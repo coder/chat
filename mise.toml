@@ -60,9 +60,12 @@ run = [
 ]
 
 [tasks."test:postgres"]
-description = "Run Postgres state integration tests"
-depends = ["services:start"]
-run = "cd state/postgres && CHAT_POSTGRES_TEST_DATABASE_URL=\"$DATABASE_URL\" go test ./..."
+description = "Run Postgres state integration tests with Testcontainers"
+run = "cd state/postgres && go test ./..."
+
+[tasks."test:redis"]
+description = "Run Redis state integration tests with Testcontainers"
+run = "cd state/redis && go test ./..."
 
 [tasks."test:root"]
 description = "Run tests for the root Go module"

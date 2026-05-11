@@ -535,9 +535,10 @@ mise run test
 mise run test:root
 mise run test:adapters
 mise run test:postgres
+mise run test:redis
 ```
 
 `mise run test` is a composite task that runs the root module tests and
 `test:adapters`; the adapter-focused task also exercises the Redis and Postgres
-state modules. `test:postgres` starts the local Postgres service and runs the
-Postgres conformance test against `DATABASE_URL`.
+state modules. The Redis and Postgres state tests use Testcontainers for real
+backend coverage and skip when Docker is unavailable.
