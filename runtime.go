@@ -265,7 +265,7 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 		return nil
 	}
 	if isSelfMessage(event.Message.Author, adapter.BotActor()) {
-		c.logger.Info("chat ignored self message", "adapter", event.Adapter, "event_id", event.ID)
+		c.logger.Debug("chat ignored self message", "adapter", event.Adapter, "event_id", event.ID)
 		return nil
 	}
 

@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"sync"
 	"testing"
@@ -262,7 +263,7 @@ func TestPostingTextMarkdownEphemeralAndExplicitFallback(t *testing.T) {
 	}
 	sent, err = thread.PostEphemeral(context.Background(),
 		chat.Actor{Adapter: "slack", Tenant: "T1", ID: "U1", BotKind: chat.BotHuman},
-		chat.Text("private fallback"),
+		chat.Markdown("**private fallback**"),
 		chat.EphemeralOptions{FallbackToDM: true},
 	)
 	if err != nil {
@@ -272,9 +273,9 @@ func TestPostingTextMarkdownEphemeralAndExplicitFallback(t *testing.T) {
 		t.Fatalf("fallback sent = %#v", sent)
 	}
 
-	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", Text: "plain reply", Mrkdwn: false})
-	api.assertPost(t, 1, slackPost{Channel: "C1", ThreadTS: "111.000", Text: "**portable**", Mrkdwn: true})
-	api.assertPost(t, 2, slackPost{Channel: "D-fallback", Text: "private fallback", Mrkdwn: false})
+	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", Text: "plain reply", Mrkdwn: boolPtr(false)})
+	api.assertPost(t, 1, slackPost{Channel: "C1", ThreadTS: "111.000", MarkdownText: "**portable**"})
+	api.assertPost(t, 2, slackPost{Channel: "D-fallback", MarkdownText: "**private fallback**"})
 }
 
 func TestNativeEphemeralPosting(t *testing.T) {
@@ -322,7 +323,7 @@ func TestNativeEphemeralPosting(t *testing.T) {
 	if sent == nil || sent.ID != "998.000" {
 		t.Fatalf("native ephemeral sent = %#v", sent)
 	}
-	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", User: "U1", Text: "**private**", Mrkdwn: true})
+	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", User: "U1", MarkdownText: "**private**"})
 }
 
 func newSlackRuntime(t *testing.T, api *slackAPIServer, opts slack.Options) *chat.Chat {
@@ -394,11 +395,12 @@ type slackAPIServer struct {
 }
 
 type slackPost struct {
-	Channel  string `json:"channel"`
-	ThreadTS string `json:"thread_ts,omitempty"`
-	User     string `json:"user,omitempty"`
-	Text     string `json:"text"`
-	Mrkdwn   bool   `json:"mrkdwn"`
+	Channel      string `json:"channel"`
+	ThreadTS     string `json:"thread_ts,omitempty"`
+	User         string `json:"user,omitempty"`
+	Text         string `json:"text,omitempty"`
+	MarkdownText string `json:"markdown_text,omitempty"`
+	Mrkdwn       *bool  `json:"mrkdwn,omitempty"`
 }
 
 func newSlackAPIServer(t *testing.T) *slackAPIServer {
@@ -448,9 +450,13 @@ func (s *slackAPIServer) assertPost(t *testing.T, index int, want slackPost) {
 		t.Fatalf("missing post %d in %#v", index, s.posts)
 	}
 	got := s.posts[index]
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("post %d = %#v, want %#v", index, got, want)
 	}
+}
+
+func boolPtr(value bool) *bool {
+	return &value
 }
 
 func decodeJSON(t *testing.T, body io.Reader, dest any) {

@@ -209,8 +209,16 @@ A **Postable Message** body with no formatting intent.
 _Avoid_: Unescaped markdown
 
 **Portable Markdown**:
-A conservative formatting intent that adapters may render or degrade across platforms.
-_Avoid_: Slack mrkdwn, GitHub-flavored markdown, native formatted text
+Conservative CommonMark input that adapters may render, translate, or degrade across platforms.
+_Avoid_: Slack mrkdwn, GitHub-flavored markdown, native formatted text, fuzzy markdown-like text
+
+**Portable Markdown Subset**:
+The supported presentation subset of **Portable Markdown** that callers can expect adapters to render or degrade predictably.
+_Avoid_: Full CommonMark compatibility, rich message layout
+
+**Platform Control Syntax**:
+Native platform text syntax that changes platform behavior rather than only rendering presentation, such as mentions, channel references, broad notifications, or platform date tokens.
+_Avoid_: Markdown formatting, harmless text styling
 
 **Actor**:
 A normalized participant identity for a human or bot within an adapter-scoped platform context.
@@ -315,7 +323,14 @@ _Avoid_: Full platform schema, strict external SDK model
 - If **Ephemeral Fallback** is requested but impossible, the operation returns an error.
 - An **Optional Capability** is detected through a small Go interface implemented by a **Platform Adapter**.
 - Absence of an **Optional Capability** returns an explicit unsupported-capability result.
-- **Plain Text** carries no formatting intent; **Portable Markdown** carries conservative formatting intent, not platform-native syntax.
+- **Plain Text** carries no formatting intent; adapters should disable platform markdown parsing for it while preserving benign platform presentation such as automatic URL linking.
+- **Portable Markdown** carries conservative CommonMark formatting intent, not platform-native syntax.
+- The **Portable Markdown Subset** is paragraphs, line breaks, emphasis, strong emphasis, inline code, fenced code blocks, block quotes, links, unordered lists, and ordered lists. Strikethrough is extension-tolerated and may degrade literally.
+- Tables, task lists, images, raw HTML, heading hierarchy, footnotes, definition lists, and embedded media are outside the **Portable Markdown Subset**.
+- A **Platform Adapter** should prefer a platform markdown input field for **Portable Markdown** when one exists, instead of converting CommonMark into a platform-native markdown dialect itself.
+- If a platform accepts **Portable Markdown** but renders it less richly than intended, that is acceptable degradation. If the platform rejects the post, the adapter returns the platform error rather than retrying through an unowned markdown dialect converter.
+- **Portable Markdown** must not be a hidden **Platform Control Syntax** channel; notifications, platform references, and platform date tokens require explicit modeling or a **Platform Escape Hatch**.
+- Normalized mentions, channel references, broad notifications, and date tokens are deferred until real app needs justify their cross-platform semantics.
 - An **Actor** identity is scoped by adapter and platform tenant, not only by the platform's raw user id.
 - **Bot Kind** represents unknown bot status explicitly rather than with a nullable boolean.
 - A **Self Message** is ignored before subscription, mention, or pattern routing.
@@ -484,7 +499,25 @@ _Avoid_: Full platform schema, strict external SDK model
 > **Domain expert:** "No, use narrow Go interfaces so support is part of the adapter's type contract."
 
 > **Dev:** "Does **Portable Markdown** mean Slack mrkdwn?"
-> **Domain expert:** "No, **Portable Markdown** is formatting intent that the Slack adapter may translate or degrade."
+> **Domain expert:** "No, **Portable Markdown** is conservative CommonMark input that adapters may translate or degrade."
+
+> **Dev:** "Should the Slack adapter convert **Portable Markdown** into Slack mrkdwn?"
+> **Domain expert:** "No, use Slack's markdown-native posting field for **Portable Markdown** where the target method supports it. Do not own a CommonMark-to-mrkdwn converter unless a fallback becomes necessary."
+
+> **Dev:** "Should **Plain Text** disable Slack URL linking?"
+> **Domain expert:** "No. **Plain Text** means no formatting intent, so disable Slack markdown parsing, but keep benign URL linking unless it proves surprising."
+
+> **Dev:** "Can **Portable Markdown** trigger Slack-specific entities like `@here`, `<@U123>`, `<#C123>`, or Slack date tokens?"
+> **Domain expert:** "No. **Portable Markdown** is presentation, not **Platform Control Syntax**. Mentions, channel references, broad notifications, and platform date tokens must be explicit constructs or platform escape hatches."
+
+> **Dev:** "Should mentions, channel references, broad notifications, or date tokens be normalized now?"
+> **Domain expert:** "No. Keep them out of the normalized MVP until real app needs justify their cross-platform semantics; use **Platform Escape Hatch** for platform-native control syntax in the meantime."
+
+> **Dev:** "What CommonMark features does **Portable Markdown** promise in the MVP?"
+> **Domain expert:** "Only the **Portable Markdown Subset**: paragraphs, line breaks, emphasis, strong emphasis, inline code, fenced code blocks, block quotes, links, unordered lists, and ordered lists. Strikethrough may be rendered when supported, but can degrade literally. Rich layout and extended Markdown features stay out of scope."
+
+> **Dev:** "If Slack `markdown_text` rejects or poorly renders **Portable Markdown**, should the adapter retry through classic mrkdwn conversion?"
+> **Domain expert:** "No. Accepted-but-less-rich rendering is normal degradation. Rejected posts return the platform error. Do not add automatic CommonMark-to-mrkdwn retry unless we explicitly decide to own that converter later."
 
 > **Dev:** "The Slack bot's own reply arrived as an inbound **Message**. Should it route to subscribed-message handlers?"
 > **Domain expert:** "No, it is a **Self Message** and must be ignored before handler routing."
@@ -546,7 +579,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - "Outbound mutation" could be part of core posting or optional operations; resolved: **Outbound Mutation** is deferred.
 - "Ephemeral message" could mean a normal reply with visibility metadata or an adapter escape hatch; resolved: **Ephemeral Message** is a core optional capability with explicit **Ephemeral Fallback** behavior.
 - "Capability" could mean a string registry or an interface contract; resolved: **Optional Capability** is interface-based.
-- "Markdown" could mean portable formatting, Slack mrkdwn, or GitHub-flavored markdown; resolved: **Portable Markdown** is conservative formatting intent, not native syntax.
+- "Markdown" could mean CommonMark input, fuzzy formatting intent, Slack mrkdwn, platform control syntax, or GitHub-flavored markdown; resolved: **Portable Markdown** is conservative CommonMark input, not native syntax. When a platform provides a markdown-native posting field, prefer that over translating into the platform's markdown dialect. Do not use **Portable Markdown** as a hidden **Platform Control Syntax** channel.
 - "User" could mean a platform-local id, global identity, or bot identity; resolved: **Actor** is scoped by adapter and tenant, **Bot Kind** models human/bot/unknown, and **Self Message** covers bot-authored inbound messages.
 - "Account linking" could mean platform actor metadata or product authentication; resolved: **Application Identity** stays outside the core runtime.
 - "Workspace" or "tenant" could mean product account, Slack workspace, or adapter install; resolved: **Platform Tenant** means the adapter's platform-scoped installation context.

@@ -333,9 +333,11 @@ ev.Thread.Post(ctx, chat.Text("plain text"))
 ev.Thread.Post(ctx, chat.Markdown("**portable** formatting intent"))
 ```
 
-`Text` means no formatting intent. `Markdown` means portable formatting intent,
-not Slack `mrkdwn`, GitHub-flavored Markdown, or a platform-native rich payload.
-Adapters may translate or degrade it.
+`Text` means no formatting intent. `Markdown` means conservative CommonMark
+formatting intent, not Slack `mrkdwn`, GitHub-flavored Markdown, or a
+platform-native rich payload. Adapters may render, translate, or degrade it.
+The Slack adapter uses Slack's `markdown_text` posting field for Markdown
+messages rather than converting CommonMark to `mrkdwn` itself.
 
 Posting returns `SentMessage` identity. Edit, delete, reactions, files, cards,
 modals, and native rich payload builders are outside the MVP.

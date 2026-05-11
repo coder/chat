@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -32,6 +33,7 @@ type Options struct {
 	Now                    func() time.Time
 	SignatureTolerance     time.Duration
 	DisableNativeEphemeral bool
+	Logger                 *slog.Logger
 }
 
 type Adapter struct {
@@ -45,6 +47,7 @@ type Adapter struct {
 	now                    func() time.Time
 	signatureTolerance     time.Duration
 	disableNativeEphemeral bool
+	logger                 *slog.Logger
 }
 
 func New(ctx context.Context, opts Options) (*Adapter, error) {
@@ -76,6 +79,10 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	if tolerance < 0 {
 		return nil, errors.New("slack: signature tolerance must be non-negative")
 	}
+	logger := opts.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Adapter{
 		signingSecret:          opts.SigningSecret,
 		botToken:               opts.BotToken,
@@ -87,6 +94,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		now:                    now,
 		signatureTolerance:     tolerance,
 		disableNativeEphemeral: opts.DisableNativeEphemeral,
+		logger:                 logger,
 	}, nil
 }
 
@@ -184,10 +192,15 @@ func (a *Adapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, error) {
 }
 
 func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg chat.PostableMessage) (*chat.SentMessage, error) {
+	messageFields, err := slackMessageFields(msg)
+	if err != nil {
+		return nil, err
+	}
 	payload := postMessagePayload{
-		Channel: thread.Channel,
-		Text:    msg.Text,
-		Mrkdwn:  msg.Format == chat.MessageFormatMarkdown,
+		Channel:      thread.Channel,
+		Text:         messageFields.Text,
+		MarkdownText: messageFields.MarkdownText,
+		Mrkdwn:       messageFields.Mrkdwn,
 	}
 	if !thread.Direct {
 		payload.ThreadTS = thread.Root
@@ -204,12 +217,17 @@ func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg ch
 }
 
 func (a *Adapter) PostEphemeralMessage(ctx context.Context, thread chat.ThreadRef, actor chat.Actor, msg chat.PostableMessage, opts chat.EphemeralOptions) (*chat.SentMessage, error) {
+	messageFields, err := slackMessageFields(msg)
+	if err != nil {
+		return nil, err
+	}
 	if !a.disableNativeEphemeral {
 		payload := postEphemeralPayload{
-			Channel: thread.Channel,
-			User:    actor.ID,
-			Text:    msg.Text,
-			Mrkdwn:  msg.Format == chat.MessageFormatMarkdown,
+			Channel:      thread.Channel,
+			User:         actor.ID,
+			Text:         messageFields.Text,
+			MarkdownText: messageFields.MarkdownText,
+			Mrkdwn:       messageFields.Mrkdwn,
 		}
 		if !thread.Direct {
 			payload.ThreadTS = thread.Root
@@ -364,6 +382,10 @@ func (a *Adapter) verifySignature(r *http.Request, body []byte) error {
 }
 
 func (a *Adapter) postEphemeralFallback(ctx context.Context, tenant string, actor chat.Actor, msg chat.PostableMessage) (*chat.SentMessage, error) {
+	messageFields, err := slackMessageFields(msg)
+	if err != nil {
+		return nil, err
+	}
 	var openResp openConversationResponse
 	if err := a.call(ctx, "conversations.open", openConversationPayload{Users: actor.ID}, &openResp); err != nil {
 		return nil, err
@@ -381,9 +403,10 @@ func (a *Adapter) postEphemeralFallback(ctx context.Context, tenant string, acto
 	}
 	var postResp postMessageResponse
 	if err := a.call(ctx, "chat.postMessage", postMessagePayload{
-		Channel: openResp.Channel.ID,
-		Text:    msg.Text,
-		Mrkdwn:  msg.Format == chat.MessageFormatMarkdown,
+		Channel:      openResp.Channel.ID,
+		Text:         messageFields.Text,
+		MarkdownText: messageFields.MarkdownText,
+		Mrkdwn:       messageFields.Mrkdwn,
 	}, &postResp); err != nil {
 		return nil, err
 	}
@@ -391,6 +414,24 @@ func (a *Adapter) postEphemeralFallback(ctx context.Context, tenant string, acto
 		return nil, fmt.Errorf("slack: fallback chat.postMessage failed: %s", postResp.Error)
 	}
 	return &chat.SentMessage{ID: postResp.TS, ThreadID: threadID, Raw: postResp}, nil
+}
+
+type slackMessage struct {
+	Text         string
+	MarkdownText string
+	Mrkdwn       *bool
+}
+
+func slackMessageFields(msg chat.PostableMessage) (slackMessage, error) {
+	switch msg.Format {
+	case chat.MessageFormatText:
+		mrkdwn := false
+		return slackMessage{Text: msg.Text, Mrkdwn: &mrkdwn}, nil
+	case chat.MessageFormatMarkdown:
+		return slackMessage{MarkdownText: msg.Text}, nil
+	default:
+		return slackMessage{}, fmt.Errorf("slack: unsupported message format %d", msg.Format)
+	}
 }
 
 func (a *Adapter) call(ctx context.Context, method string, payload any, dest any) error {
@@ -503,10 +544,11 @@ type authTestResponse struct {
 }
 
 type postMessagePayload struct {
-	Channel  string `json:"channel"`
-	ThreadTS string `json:"thread_ts,omitempty"`
-	Text     string `json:"text"`
-	Mrkdwn   bool   `json:"mrkdwn"`
+	Channel      string `json:"channel"`
+	ThreadTS     string `json:"thread_ts,omitempty"`
+	Text         string `json:"text,omitempty"`
+	MarkdownText string `json:"markdown_text,omitempty"`
+	Mrkdwn       *bool  `json:"mrkdwn,omitempty"`
 }
 
 type postMessageResponse struct {
@@ -517,11 +559,12 @@ type postMessageResponse struct {
 }
 
 type postEphemeralPayload struct {
-	Channel  string `json:"channel"`
-	ThreadTS string `json:"thread_ts,omitempty"`
-	User     string `json:"user"`
-	Text     string `json:"text"`
-	Mrkdwn   bool   `json:"mrkdwn"`
+	Channel      string `json:"channel"`
+	ThreadTS     string `json:"thread_ts,omitempty"`
+	User         string `json:"user"`
+	Text         string `json:"text,omitempty"`
+	MarkdownText string `json:"markdown_text,omitempty"`
+	Mrkdwn       *bool  `json:"mrkdwn,omitempty"`
 }
 
 type postEphemeralResponse struct {
