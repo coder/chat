@@ -11,6 +11,8 @@ import (
 type Harness struct {
 	State       chat.State
 	AdvanceTime func(time.Duration)
+	ShortTTL    time.Duration
+	ExpiryWait  time.Duration
 }
 
 func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
@@ -57,8 +59,9 @@ func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
 		t.Parallel()
 		harness := newState(t)
 		state := harness.State
+		shortTTL := harness.shortTTL()
 
-		first, err := state.MarkEvent(context.Background(), "event-1", 25*time.Millisecond)
+		first, err := state.MarkEvent(context.Background(), "event-1", shortTTL)
 		if err != nil {
 			t.Fatalf("mark first event: %v", err)
 		}
@@ -73,7 +76,7 @@ func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
 			t.Fatal("duplicate event should not be accepted")
 		}
 
-		advanceTime(harness, 60*time.Millisecond)
+		advanceTime(harness, harness.expiryWait())
 		first, err = state.MarkEvent(context.Background(), "event-1", time.Minute)
 		if err != nil {
 			t.Fatalf("mark expired event: %v", err)
@@ -87,8 +90,9 @@ func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
 		t.Parallel()
 		harness := newState(t)
 		state := harness.State
+		shortTTL := harness.shortTTL()
 
-		lease, acquired, err := state.AcquireLock(context.Background(), "thread-1", 25*time.Millisecond)
+		lease, acquired, err := state.AcquireLock(context.Background(), "thread-1", shortTTL)
 		if err != nil {
 			t.Fatalf("acquire lock: %v", err)
 		}
@@ -129,14 +133,14 @@ func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
 			t.Fatal("current owner should release lock")
 		}
 
-		lease, acquired, err = state.AcquireLock(context.Background(), "thread-1", 25*time.Millisecond)
+		lease, acquired, err = state.AcquireLock(context.Background(), "thread-1", shortTTL)
 		if err != nil {
 			t.Fatalf("second acquire lock: %v", err)
 		}
 		if !acquired {
 			t.Fatal("second acquire should succeed after release")
 		}
-		advanceTime(harness, 60*time.Millisecond)
+		advanceTime(harness, harness.expiryWait())
 
 		_, acquired, err = state.AcquireLock(context.Background(), "thread-1", time.Minute)
 		if err != nil {
@@ -180,4 +184,18 @@ func advanceTime(harness Harness, duration time.Duration) {
 		return
 	}
 	time.Sleep(duration)
+}
+
+func (h Harness) shortTTL() time.Duration {
+	if h.ShortTTL != 0 {
+		return h.ShortTTL
+	}
+	return 25 * time.Millisecond
+}
+
+func (h Harness) expiryWait() time.Duration {
+	if h.ExpiryWait != 0 {
+		return h.ExpiryWait
+	}
+	return 60 * time.Millisecond
 }

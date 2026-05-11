@@ -100,6 +100,11 @@ _Avoid_: Production state
 A production **Runtime State** implementation for horizontally scaled deployments.
 _Avoid_: Optional add-on, cache only
 
+**Postgres State**:
+A production **Runtime State** implementation for deployments that already use
+Postgres as their coordination store.
+_Avoid_: Thread application state, product database schema
+
 **Webhook Event**:
 A single inbound delivery from a platform adapter before runtime dedupe and handler routing.
 _Avoid_: Message, request
@@ -557,7 +562,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - "State" could mean optional app convenience storage or required runtime coordination; resolved: **Runtime State** is required, while **Memory State** is explicitly dev/test only.
 - "Thread state" could mean runtime coordination or product data; resolved: **Thread Application State** is outside the MVP runtime state.
 - "Message history" could mean current webhook context or platform backfill; resolved: **Message History** is deferred from the MVP.
-- "Redis" could mean an optional cache layer; resolved: **Redis State** is the first production runtime state implementation.
+- "Redis" or "Postgres" could mean optional application storage; resolved: **Redis State** and **Postgres State** are production **Runtime State** implementations only.
 - "Event identity" could mean delivery attempt or platform event; resolved: **Event Identity** excludes **Retry Metadata**.
 - "Runtime options" could mean many unrelated one-off settings; resolved: **Runtime Options** groups coordination timing such as dedupe and lock TTLs.
 - "Concurrency" could mean a full queueing system or a lock-conflict policy; resolved: **Concurrency Strategy** starts with drop only.

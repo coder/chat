@@ -10,8 +10,8 @@ to Go, with deliberate Go-shaped differences where that makes the runtime
 simpler, safer, or easier to operate.
 
 Status: the Slack-first MVP is implemented. The public surface is still early,
-but the core runtime, Slack adapter, memory state, Redis state module, example
-Slack bot, and public contract tests are in place.
+but the core runtime, Slack adapter, memory state, Redis and Postgres state
+modules, example Slack bot, and public contract tests are in place.
 
 ## Design Goals
 
@@ -20,7 +20,7 @@ Slack bot, and public contract tests are in place.
 - Slack-first vertical slice before claiming multi-platform portability.
 - Required runtime state for subscriptions, dedupe, and locks.
 - Memory state for tests and local development.
-- Redis state for horizontally scaled production deployments.
+- Redis or Postgres state for horizontally scaled production deployments.
 - Thread-oriented application code: handle a message, subscribe the thread,
   reply to the thread.
 - Platform escape hatches without making raw platform structs the normal API.
@@ -35,11 +35,13 @@ The core module is:
 go get github.com/coder/chat
 ```
 
-Redis state is optional and lives in its own module so applications that only
-use core, Slack, or memory state do not pull Redis dependencies:
+Redis and Postgres state are optional and live in separate modules so
+applications that only use core, Slack, or memory state do not pull production
+state dependencies:
 
 ```sh
 go get github.com/coder/chat/state/redis
+go get github.com/coder/chat/state/postgres
 ```
 
 Package layout:
@@ -48,11 +50,12 @@ Package layout:
 github.com/coder/chat
 github.com/coder/chat/adapters/slack
 github.com/coder/chat/state/memory
+github.com/coder/chat/state/postgres
 github.com/coder/chat/state/redis
 ```
 
 This repository uses `go.work` for local development across the root module and
-the Redis state module.
+the Redis and Postgres state modules.
 
 ## Local Development Services
 
@@ -334,6 +337,8 @@ database keyed by `ThreadID`.
 State implementations:
 
 - `state/memory`: tests and local development, included in the root module
+- `state/postgres`: production and horizontally scaled deployments, kept in the
+  separate `github.com/coder/chat/state/postgres` module
 - `state/redis`: production and horizontally scaled deployments, kept in the
   separate `github.com/coder/chat/state/redis` module
 
@@ -513,7 +518,7 @@ Required test families:
 - direct-message implicit mention routing
 - self-message filtering
 - accepted, ignored, rejected, duplicate, and lock-conflict events
-- state conformance across memory and Redis
+- state conformance across memory, Redis, and Postgres
 - token-owned lock lease acquire, release, extend, expiry, and stale release
 - Slack signature verification and URL verification
 - Slack golden payload normalization
@@ -529,7 +534,10 @@ Local test commands:
 mise run test
 mise run test:root
 mise run test:adapters
+mise run test:postgres
 ```
 
 `mise run test` is a composite task that runs the root module tests and
-`test:adapters`; the adapter-focused task also exercises the Redis state module.
+`test:adapters`; the adapter-focused task also exercises the Redis and Postgres
+state modules. `test:postgres` starts the local Postgres service and runs the
+Postgres conformance test against `DATABASE_URL`.
