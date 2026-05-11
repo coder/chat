@@ -9,8 +9,9 @@ feature parity. The goal is semantic compatibility where the model maps cleanly
 to Go, with deliberate Go-shaped differences where that makes the runtime
 simpler, safer, or easier to operate.
 
-Status: this README describes the intended MVP public contract. Until the
-implementation catches up, treat it as the build target.
+Status: the MVP runtime is implemented. The public surface is still early, but
+the core runtime, Slack adapter, memory state, Redis state module, and public
+contract tests are in place.
 
 ## Design Goals
 
@@ -28,13 +29,20 @@ implementation catches up, treat it as the build target.
 
 ## Install
 
-The package is intended to live under:
+The core module is:
 
 ```sh
 go get github.com/coder/chat
 ```
 
-Expected package layout:
+Redis state is optional and lives in its own module so applications that only
+use core, Slack, or memory state do not pull Redis dependencies:
+
+```sh
+go get github.com/coder/chat/state/redis
+```
+
+Package layout:
 
 ```text
 github.com/coder/chat
@@ -42,6 +50,9 @@ github.com/coder/chat/adapters/slack
 github.com/coder/chat/state/memory
 github.com/coder/chat/state/redis
 ```
+
+This repository uses `go.work` for local development across the root module and
+the Redis state module.
 
 ## Example
 
@@ -284,8 +295,9 @@ database keyed by `ThreadID`.
 
 State implementations:
 
-- `state/memory`: tests and local development
-- `state/redis`: production and horizontally scaled deployments
+- `state/memory`: tests and local development, included in the root module
+- `state/redis`: production and horizontally scaled deployments, kept in the
+  separate `github.com/coder/chat/state/redis` module
 
 ## Dedupe, Locks, And Concurrency
 
@@ -460,3 +472,14 @@ Required test families:
 - text, markdown, sent message, ephemeral, and ephemeral fallback posting
 - typed adapter access
 - README and GoDoc coverage for intentional Vercel differences
+
+Local test commands:
+
+```sh
+mise run test
+mise run test:root
+mise run test:adapters
+```
+
+`mise run test` is a composite task that runs the root module tests and
+`test:adapters`; the adapter-focused task also exercises the Redis state module.
