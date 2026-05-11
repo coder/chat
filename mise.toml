@@ -1,2 +1,17 @@
 [tools]
 go = "1.26.3"
+
+[tasks.test]
+description = "Run tests for every Go module in the workspace"
+depends = ["test:root", "test:adapters"]
+
+[tasks."test:adapters"]
+description = "Run adapter-focused tests"
+run = [
+  "go test ./adapters/...",
+  "cd state/redis && go test ./...",
+]
+
+[tasks."test:root"]
+description = "Run tests for the root Go module"
+run = "go test ./..."

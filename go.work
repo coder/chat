@@ -1,0 +1,8 @@
+go 1.26.3
+
+use (
+	.
+	./state/redis
+)
+
+replace github.com/coder/chat v0.0.0 => .
