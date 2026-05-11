@@ -51,7 +51,10 @@ func main() {
 
 	http.Handle("/webhooks/slack", slackWebhook)
 
-	addr := ":" + envDefault("PORT", "8080")
+	addr := ":" + os.Getenv("PORT")
+	if addr == ":" {
+		addr = ":8080"
+	}
 	slog.Info("listening", "addr", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		panic(err)
@@ -62,14 +65,6 @@ func mustEnv(name string) string {
 	value := os.Getenv(name)
 	if value == "" {
 		panic(name + " is required")
-	}
-	return value
-}
-
-func envDefault(name string, fallback string) string {
-	value := os.Getenv(name)
-	if value == "" {
-		return fallback
 	}
 	return value
 }

@@ -9,9 +9,9 @@ feature parity. The goal is semantic compatibility where the model maps cleanly
 to Go, with deliberate Go-shaped differences where that makes the runtime
 simpler, safer, or easier to operate.
 
-Status: the MVP runtime is implemented. The public surface is still early, but
-the core runtime, Slack adapter, memory state, Redis state module, and public
-contract tests are in place.
+Status: the Slack-first MVP is implemented. The public surface is still early,
+but the core runtime, Slack adapter, memory state, Redis state module, example
+Slack bot, and public contract tests are in place.
 
 ## Design Goals
 
@@ -405,9 +405,10 @@ if !ok {
 
 Examples should prefer this helper over unchecked type assertions.
 
-## Slack MVP
+## Slack MVP Status
 
-The Slack adapter is the first production-shaped adapter. It must support:
+The Slack adapter is the first production-shaped adapter. The MVP
+implementation covers:
 
 - single-install configuration
 - signing secret verification
@@ -420,12 +421,18 @@ The Slack adapter is the first production-shaped adapter. It must support:
 - self-message filtering
 - retry metadata observation
 - thread replies
+- plain text and portable markdown posting, using Slack's `markdown_text` field
+  for Markdown messages
 - native ephemeral messages
 - explicit ephemeral DM fallback
 
 The adapter should use local structs for the Slack payload shapes it supports,
 preserve raw payload data as an escape hatch, and validate required fields for
 supported event types.
+
+This is a runtime and adapter MVP, not a complete Slack product surface. The
+goal is to prove the conversation model, state coordination, and posting
+contract before adding Slack-specific product features.
 
 ## Intentional MVP Gaps
 
@@ -437,11 +444,14 @@ These are not bugs in the MVP:
 - no lazy runtime initialization
 - no multi-platform MVP
 - no multi-workspace Slack OAuth installation flow
+- no live Slack end-to-end test in CI
+- no Slack Web API rate-limit retry/backoff policy
 - no dedicated `OnDirectMessage` hook
 - no public proactive `OpenDM`, except adapter behavior needed for explicit
   ephemeral fallback
 - no pattern handlers
 - no slash commands
+- no Slack interactions, buttons, shortcuts, or Block Kit workflow
 - no middleware
 - no message history APIs
 - no thread application state APIs
