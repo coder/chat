@@ -1,0 +1,15 @@
+services:
+  redis:
+    image: redis:7.2-alpine
+    ports:
+      - "127.0.0.1:63800:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  redis-data:

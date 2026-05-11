@@ -1,0 +1,6 @@
+namespace = "chat-sdk-go-slack-postgres-state"
+
+[daemons.postgres]
+run = "docker compose up postgres"
+ready_cmd = "docker compose exec -T postgres pg_isready -U chat_sdk_go -d chat_sdk_go"
+auto = ["start", "stop"]

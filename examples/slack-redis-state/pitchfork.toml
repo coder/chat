@@ -1,0 +1,6 @@
+namespace = "chat-sdk-go-slack-redis-state"
+
+[daemons.redis]
+run = "docker compose up redis"
+ready_cmd = "docker compose exec -T redis redis-cli ping"
+auto = ["start", "stop"]

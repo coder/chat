@@ -2,8 +2,14 @@ go 1.26.3
 
 use (
 	.
+	./examples/slack-postgres-state
+	./examples/slack-redis-state
 	./state/postgres
 	./state/redis
 )
 
 replace github.com/coder/chat v0.0.0 => .
+
+replace github.com/coder/chat/state/postgres v0.0.0 => ./state/postgres
+
+replace github.com/coder/chat/state/redis v0.0.0 => ./state/redis

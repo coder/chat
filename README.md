@@ -11,7 +11,7 @@ simpler, safer, or easier to operate.
 
 Status: the Slack-first MVP is implemented. The public surface is still early,
 but the core runtime, Slack adapter, memory state, Redis and Postgres state
-modules, example Slack bot, and public contract tests are in place.
+modules, Slack examples, and public contract tests are in place.
 
 ## Design Goals
 
@@ -54,46 +54,40 @@ github.com/coder/chat/state/postgres
 github.com/coder/chat/state/redis
 ```
 
-This repository uses `go.work` for local development across the root module and
-the Redis and Postgres state modules.
+This repository uses `go.work` for local development across the root module,
+state modules, and example modules.
 
-## Local Development Services
+## Examples And Local Services
 
-Local Postgres and Redis are managed with Docker Compose and exposed through
-`mise` environment variables:
-
-```sh
-mise install
-mise run services:start
-```
-
-Docker must already be running. `services:start` uses Pitchfork to supervise
-the Compose-backed services and waits for their readiness checks. Applications
-can read `DATABASE_URL` and `REDIS_URL` from the mise environment.
-
-Stop the services when finished:
+The memory-backed Slack example runs without local infrastructure:
 
 ```sh
-mise run services:stop
+go run ./examples/slack-hello-world
 ```
 
-For automatic lifecycle management, add the optional Pitchfork shell hook to
-your zsh configuration:
+The state-backed Slack examples live in separate example modules so the core
+module does not pull Redis or Postgres dependencies just to build the basic
+example:
+
+- `examples/slack-redis-state`
+- `examples/slack-postgres-state`
+
+Each state-backed example has its own `compose.yaml`, `pitchfork.toml`, and
+README with the backend URL, service startup commands, and Slack setup steps.
+For example:
 
 ```sh
-eval "$(pitchfork activate zsh)"
+cd examples/slack-redis-state
+docker compose up -d redis
+go run .
 ```
 
-With the hook active, entering this repository can auto-start the services and
-leaving it can auto-stop them.
-
-To delete all local Postgres and Redis data, run:
+You can also let Pitchfork supervise an example's local service from that
+example directory:
 
 ```sh
-mise run services:reset
+pitchfork start redis
 ```
-
-This removes the Docker Compose volumes for both services.
 
 ## Example
 
@@ -534,11 +528,12 @@ Local test commands:
 mise run test
 mise run test:root
 mise run test:adapters
+mise run test:examples
 mise run test:postgres
 mise run test:redis
 ```
 
-`mise run test` is a composite task that runs the root module tests and
-`test:adapters`; the adapter-focused task also exercises the Redis and Postgres
-state modules. The Redis and Postgres state tests use Testcontainers for real
-backend coverage and skip when Docker is unavailable.
+`mise run test` is a composite task that runs the root module tests,
+`test:adapters`, and `test:examples`. The adapter-focused task also exercises
+the Redis and Postgres state modules. The Redis and Postgres state tests use
+Testcontainers for real backend coverage and skip when Docker is unavailable.
