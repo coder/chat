@@ -1,5 +1,51 @@
 [tools]
 go = "1.26.3"
+lazydocker = "0.25.2"
+pitchfork = "2.10.0"
+
+[env]
+DATABASE_URL = "postgres://chat_sdk_go:chat_sdk_go@127.0.0.1:54329/chat_sdk_go?sslmode=disable"
+REDIS_URL = "redis://127.0.0.1:63799/0"
+
+[tasks."services:start"]
+description = "Start local Postgres and Redis through Pitchfork"
+run = [
+  "pitchfork start postgres",
+  "pitchfork start redis",
+]
+
+[tasks."services:stop"]
+description = "Stop local Postgres and Redis"
+run = [
+  "if pitchfork supervisor status >/dev/null 2>&1; then pitchfork stop --local; fi",
+  "docker compose down",
+]
+
+[tasks."services:status"]
+description = "Show local service status"
+run = [
+  "pitchfork list",
+  "docker compose ps",
+]
+
+[tasks."services:logs"]
+description = "Show local service logs"
+run = "pitchfork logs --no-pager"
+
+[tasks."services:reset"]
+description = "Stop local services and delete local Postgres and Redis volumes"
+run = [
+  "if pitchfork supervisor status >/dev/null 2>&1; then pitchfork stop --local; fi",
+  "docker compose down -v",
+]
+
+[tasks."services:postgres:fg"]
+description = "Run local Postgres in the foreground for Pitchfork"
+run = "docker compose up postgres"
+
+[tasks."services:redis:fg"]
+description = "Run local Redis in the foreground for Pitchfork"
+run = "docker compose up redis"
 
 [tasks.test]
 description = "Run tests for every Go module in the workspace"

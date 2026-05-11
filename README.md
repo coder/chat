@@ -54,6 +54,44 @@ github.com/coder/chat/state/redis
 This repository uses `go.work` for local development across the root module and
 the Redis state module.
 
+## Local Development Services
+
+Local Postgres and Redis are managed with Docker Compose and exposed through
+`mise` environment variables:
+
+```sh
+mise install
+mise run services:start
+```
+
+Docker must already be running. `services:start` uses Pitchfork to supervise
+the Compose-backed services and waits for their readiness checks. Applications
+can read `DATABASE_URL` and `REDIS_URL` from the mise environment.
+
+Stop the services when finished:
+
+```sh
+mise run services:stop
+```
+
+For automatic lifecycle management, add the optional Pitchfork shell hook to
+your zsh configuration:
+
+```sh
+eval "$(pitchfork activate zsh)"
+```
+
+With the hook active, entering this repository can auto-start the services and
+leaving it can auto-stop them.
+
+To delete all local Postgres and Redis data, run:
+
+```sh
+mise run services:reset
+```
+
+This removes the Docker Compose volumes for both services.
+
 ## Example
 
 ```go

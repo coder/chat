@@ -72,6 +72,58 @@ url = "https://dl.google.com/go/go1.26.3.darwin-amd64.tar.gz"
 checksum = "sha256:20d2ceafb4ed41b96b879010927b28bc92a5be57a7c1801ce365a9ca51d3224a"
 url = "https://dl.google.com/go/go1.26.3.windows-amd64.zip"
 
+[[tools.lazydocker]]
+version = "0.25.2"
+backend = "aqua:jesseduffield/lazydocker"
+
+[tools.lazydocker."platforms.linux-arm64"]
+checksum = "sha256:005c38b685aaa557e7d646d83a3dadb5024340eeed8c6a2e1949eee6f530de23"
+url = "https://github.com/jesseduffield/lazydocker/releases/download/v0.25.2/lazydocker_0.25.2_Linux_arm64.tar.gz"
+
+[tools.lazydocker."platforms.linux-arm64-musl"]
+checksum = "sha256:005c38b685aaa557e7d646d83a3dadb5024340eeed8c6a2e1949eee6f530de23"
+url = "https://github.com/jesseduffield/lazydocker/releases/download/v0.25.2/lazydocker_0.25.2_Linux_arm64.tar.gz"
+
+[tools.lazydocker."platforms.linux-x64"]
+checksum = "sha256:0d9dbfc26068b218e7ed84b104748cadc6e3cf733c0afd35465306fb39b9523c"
+url = "https://github.com/jesseduffield/lazydocker/releases/download/v0.25.2/lazydocker_0.25.2_Linux_x86_64.tar.gz"
+
+[tools.lazydocker."platforms.linux-x64-musl"]
+checksum = "sha256:0d9dbfc26068b218e7ed84b104748cadc6e3cf733c0afd35465306fb39b9523c"
+url = "https://github.com/jesseduffield/lazydocker/releases/download/v0.25.2/lazydocker_0.25.2_Linux_x86_64.tar.gz"
+
+[tools.lazydocker."platforms.macos-arm64"]
+checksum = "sha256:4a54d7b4abdf255b2bce9806641eac5568d5b7fbc820c1b5d3f9e34ea1367d60"
+url = "https://github.com/jesseduffield/lazydocker/releases/download/v0.25.2/lazydocker_0.25.2_Darwin_arm64.tar.gz"
+
+[tools.lazydocker."platforms.macos-x64"]
+checksum = "sha256:af70b6e234089aa24924db25fc201d17f224e76d334e743e4595d30cf83a013b"
+url = "https://github.com/jesseduffield/lazydocker/releases/download/v0.25.2/lazydocker_0.25.2_Darwin_x86_64.tar.gz"
+
+[tools.lazydocker."platforms.windows-x64"]
+checksum = "sha256:facae8869c1bf144468191c563002162273a2c2761f052659170530cae3fa8a9"
+url = "https://github.com/jesseduffield/lazydocker/releases/download/v0.25.2/lazydocker_0.25.2_Windows_x86_64.zip"
+
+[[tools.pitchfork]]
+version = "2.10.0"
+backend = "aqua:jdx/pitchfork"
+
+[tools.pitchfork."platforms.linux-arm64"]
+checksum = "sha256:77525ad496020671d8e2fc2f5e1c1b03a518bfb9f943c4375ca3f07882d58a7c"
+url = "https://github.com/endevco/pitchfork/releases/download/v2.10.0/pitchfork-aarch64-unknown-linux-gnu.tar.gz"
+
+[tools.pitchfork."platforms.linux-x64"]
+checksum = "sha256:a6a09cce0b08135cdb884b6c70c7413bd3991f03c084bdc11bf778bb274116c4"
+url = "https://github.com/endevco/pitchfork/releases/download/v2.10.0/pitchfork-x86_64-unknown-linux-gnu.tar.gz"
+
+[tools.pitchfork."platforms.macos-arm64"]
+checksum = "sha256:94427b1ce42709003f9db48d14b073bde807f41bfa034b54ccca7067b5234a4f"
+url = "https://github.com/endevco/pitchfork/releases/download/v2.10.0/pitchfork-aarch64-apple-darwin.tar.gz"
+
+[tools.pitchfork."platforms.windows-x64"]
+checksum = "sha256:659b3c483ee0518de1f54bfb735aebbc696ff96a1c60549131cf49fb0521ba80"
+url = "https://github.com/endevco/pitchfork/releases/download/v2.10.0/pitchfork-x86_64-pc-windows-msvc.zip"
+
 [[tools.pnpm]]
 version = "11.0.8"
 backend = "aqua:pnpm/pnpm"

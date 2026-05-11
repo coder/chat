@@ -1,0 +1,11 @@
+namespace = "chat-sdk-go"
+
+[daemons.postgres]
+run = "mise run services:postgres:fg"
+ready_cmd = "docker compose exec -T postgres pg_isready -U chat_sdk_go -d chat_sdk_go"
+auto = ["start", "stop"]
+
+[daemons.redis]
+run = "mise run services:redis:fg"
+ready_cmd = "docker compose exec -T redis redis-cli ping"
+auto = ["start", "stop"]
