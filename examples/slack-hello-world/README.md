@@ -2,7 +2,7 @@
 
 This example runs a tiny Slack bot with in-memory runtime state. When the bot is
 mentioned in a channel, or messaged directly if you enable the DM event, it
-replies with `hello world`.
+replies with portable Markdown: `**hello** _world_`.
 
 ## Slack App Setup
 
@@ -14,7 +14,7 @@ In **OAuth & Permissions**, add these **Bot Token Scopes**:
 
 | Scope | Why this example needs it |
 | --- | --- |
-| `chat:write` | Send `hello world` with `chat.postMessage`. |
+| `chat:write` | Send the portable Markdown reply with `chat.postMessage`. |
 | `app_mentions:read` | Receive `app_mention` events when the bot is mentioned. |
 | `im:history` | Optional for channel-only testing, required if you subscribe to `message.im` so direct messages reach the bot. |
 
@@ -137,10 +137,10 @@ In Slack, mention the bot in a channel where it is present:
 @your-bot hello
 ```
 
-The bot should reply in the same thread:
+The bot should reply in the same thread with portable Markdown:
 
 ```text
-hello world
+**hello** _world_
 ```
 
 If you enabled `message.im`, you can also send a direct message to the bot.
