@@ -1,8 +1,8 @@
 # Chat SDK Go
 
-Chat SDK Go is a Go-native runtime for building chat bots with the core
-conversation model of Vercel Chat SDK: adapters, normalized events, threads,
-subscriptions, state-backed dedupe, and thread-scoped replies.
+Chat SDK Go is a Go-native semantic subset of Vercel Chat SDK's
+conversation runtime: adapters, normalized events, threads, subscriptions,
+state-backed dedupe, and thread-scoped replies.
 
 This is not a TypeScript API port and not a promise of full Vercel Chat SDK
 feature parity. The goal is semantic compatibility where the model maps cleanly
@@ -12,6 +12,31 @@ simpler, safer, or easier to operate.
 Status: the Slack-first MVP is implemented. The public surface is still early,
 but the core runtime, Slack adapter, memory state, Redis and Postgres state
 modules, Slack examples, and public contract tests are in place.
+
+## Vercel Chat SDK Alignment
+
+This project follows Vercel Chat SDK's conversation semantics where they fit Go,
+then narrows the MVP to a production-shaped Slack slice. The table below is the
+quick status map for readers familiar with Vercel Chat SDK:
+
+| Vercel Chat SDK concept | Chat SDK Go status |
+| --- | --- |
+| `Chat` runtime | Implemented as `chat.Chat` |
+| Platform adapters | Slack MVP implemented |
+| Normalized events and thread-scoped replies | Implemented |
+| `onNewMention` | Implemented as `OnNewMention` |
+| `onSubscribedMessage` | Implemented as `OnSubscribedMessage` |
+| Thread subscriptions | Implemented with explicit `Thread.Subscribe` / `Thread.Unsubscribe` |
+| Runtime state adapters | Memory, Redis, and Postgres implemented |
+| Direct messages | Routed as implicit new mentions, then subscribed messages |
+| Ephemeral messages | Slack native ephemeral plus explicit DM fallback |
+| Thread handle reconstruction | Implemented with `Chat.Thread` |
+| AI streaming responses | Not yet implemented |
+| Cards, actions, modals, and native rich UI | Not yet implemented |
+| Slash commands and pattern handlers | Not yet implemented |
+| Message history and AI-message conversion helpers | Not yet implemented |
+| Multiple production adapters | Not yet implemented |
+| Middleware | Not yet implemented |
 
 ## Design Goals
 
@@ -59,6 +84,15 @@ state modules, and example modules.
 
 ## Examples And Local Services
 
+Which example should you run?
+
+- Start with `examples/slack-hello-world` if you are new to the SDK or want a
+  memory-backed bot with no local infrastructure.
+- Use `examples/slack-redis-state` to try durable runtime coordination with
+  Redis.
+- Use `examples/slack-postgres-state` if Postgres is already your coordination
+  store.
+
 The memory-backed Slack example runs without local infrastructure:
 
 ```sh
@@ -89,7 +123,21 @@ example directory:
 pitchfork start redis
 ```
 
-## Example
+## Tiny Slack Example
+
+The core handler for a minimal bot can be tiny:
+
+```go
+bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+	_, err := ev.Thread.Post(ctx, chat.Text("hello world"))
+	return err
+})
+```
+
+Replying does not subscribe the thread. Call `ev.Thread.Subscribe(ctx)` when
+you want later messages in the same thread to route to `OnSubscribedMessage`.
+
+## Production-Shaped Example
 
 ```go
 package main
