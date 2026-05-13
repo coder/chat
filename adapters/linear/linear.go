@@ -179,6 +179,8 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
+		} else {
+			a.logger.Warn("ignoring unsupported Linear webhook", "type", envelope.Type, "action", envelope.Action, "organization_id", envelope.OrganizationID, "webhook_id", envelope.WebhookID, "agent_session_id", envelope.AgentSession.ID)
 		}
 		w.WriteHeader(http.StatusOK)
 	})
