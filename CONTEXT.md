@@ -335,7 +335,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - **Runtime State** is coordination state, not **Thread Application State**.
 - **Thread Application State** is deferred from the MVP and should live in the application's own storage.
 - **Message History** APIs are deferred from the MVP.
-- The **Linear App-Actor Slice** setup instructions ask users to enable Linear agent session webhooks only; comments, issues, and reactions are outside the MVP example and are ignored if delivered.
+- The **Linear App-Actor Slice** setup instructions ask users to enable Linear agent session webhooks, plus Inbox Notifications when app-user assignment should enter the agent path; comments, issues, reactions, and Permission Changes are outside the MVP example and are ignored if delivered.
 - The **Linear App-Actor Slice** hello-world example proves new mention routing, explicit thread subscription, best-effort **Agent Activity Thought**, final **Agent Activity Response**, and subscribed follow-up routing.
 - The **Linear App-Actor Slice** includes one memory-backed hello-world example for local dogfooding; production deployments should choose Redis or Postgres **Runtime State** separately.
 - **Memory State** is suitable for tests and local development, not horizontally scaled deployment.

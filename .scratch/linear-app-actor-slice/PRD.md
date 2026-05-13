@@ -99,6 +99,7 @@ This PRD follows the accepted ADR: **Linear App-Actor Slice Before Full Linear A
 - Do not expose a raw Linear client or generic GraphQL helper publicly. Platform-specific public behavior should be narrow and reachable through typed **Adapter Access**.
 - Implement Linear webhook verification as an adapter-owned boundary. Verify method, signature, timestamp freshness, and JSON envelope before considering runtime dispatch.
 - Reject transport/security/envelope failures. After successful verification, acknowledge and ignore unsupported or unbuildable Linear agent-session payloads.
+- Accept Linear assignment-related **AppUserNotification** inbox webhooks and create an agent session on the assigned issue before routing through the normal new-mention path.
 - Accept Linear **Agent Session Event** actions that represent session creation and user prompting. Other Linear webhook types and actions are ignored in MVP.
 - Normalize buildable session-creation events as mentioned **Messages**. The source comment ID is both the runtime message ID and the basis for **Event Identity**.
 - Normalize buildable prompted events as mentioned **Messages**. The agent activity source comment ID is both the runtime message ID and the basis for **Event Identity**.
@@ -130,6 +131,7 @@ This PRD follows the accepted ADR: **Linear App-Actor Slice Before Full Linear A
 - Add token/auth tests using a fake Linear OAuth endpoint to verify initial token exchange, default scopes, expiry tracking, lazy refresh, and no background refresh requirement.
 - Add identity discovery tests using a fake Linear GraphQL endpoint to verify organization ID, app user ID, app display name, and `BotActor` output.
 - Add webhook verification tests for valid signatures, invalid signatures, stale timestamps, malformed timestamps, non-POST requests, body read failures where feasible, and malformed JSON.
+- Add assignment notification tests proving `AppUserNotification` `issueAssignedToYou` creates an agent session on the issue and routes through `OnNewMention`.
 - Add webhook ignored-event tests for unsupported Linear webhook types, unsupported agent-session actions, unbuildable session payloads, and events for another app actor when payload identity proves the mismatch.
 - Add session-creation normalization tests that assert runtime-observable behavior: `OnNewMention` fires, message ID and event identity derive from source comment ID, thread ID is present, author is normalized, and message is marked mentioned.
 - Add prompted normalization tests that assert subscription-sensitive behavior: before subscription it can route as a new mention, and after explicit subscription it routes to `OnSubscribedMessage`.

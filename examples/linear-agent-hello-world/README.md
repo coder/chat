@@ -17,27 +17,32 @@ Create or open a Linear OAuth application from Linear's API settings.
 Configure the app for app-actor agent sessions:
 
 1. Enable **Agent session events** for the app webhook configuration.
-2. Set the webhook URL to:
+2. Enable the **Inbox Notifications** permission and webhook category too if
+   the app should be assignable. Linear sends `AppUserNotification` assignment
+   events when an issue is assigned to the app user; the adapter uses those
+   events to create an agent session.
+3. Set the webhook URL to:
 
    ```text
    https://YOUR_PUBLIC_HOST/webhooks/linear
    ```
 
-3. Install the app as an app actor with `actor=app`, `app:mentionable`, and
+4. Install the app as an app actor with `actor=app`, `app:mentionable`, and
    `app:assignable`. The authorization URL should include scopes like:
 
    ```text
    read,write,comments:create,issues:create,app:mentionable,app:assignable
    ```
 
-4. Copy the webhook signing secret. Use it as `LINEAR_WEBHOOK_SECRET`.
-5. Copy the client credentials for the app actor client-credentials flow. Use
+5. Copy the webhook signing secret. Use it as `LINEAR_WEBHOOK_SECRET`.
+6. Copy the client credentials for the app actor client-credentials flow. Use
    them as `LINEAR_CLIENT_CREDENTIALS_CLIENT_ID` and
    `LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET`.
 
 Do not enable Comments, Issues, or Emoji reaction webhook categories for this
-example unless you are experimenting. The MVP adapter only handles agent session
-webhooks; other valid webhook types are acknowledged and ignored.
+example unless you are experimenting. The MVP adapter handles agent session
+webhooks and assignment-related inbox notifications; other valid webhook types
+are acknowledged and ignored.
 
 Treat the webhook secret and client secret like passwords.
 

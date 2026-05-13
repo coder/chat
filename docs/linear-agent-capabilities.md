@@ -16,7 +16,8 @@ The adapter currently implements the minimum runtime slice needed to receive Lin
 | Linear capability | Current support | Notes |
 | --- | --- | --- |
 | App actor auth with client credentials | Supported | Default scopes include `read`, `write`, `comments:create`, `issues:create`, `app:mentionable`, and `app:assignable`. |
-| Agent session webhooks | Partially supported | Handles `AgentSessionEvent` `created` and `prompted`. Other webhook categories are ignored. |
+| Agent session webhooks | Partially supported | Handles `AgentSessionEvent` `created` and `prompted`. |
+| Inbox notification assignment webhooks | Supported narrowly | Handles `AppUserNotification` `issueAssignedToYou` by creating an agent session and routing it like a created session. Other notification actions are ignored. |
 | Mention-created sessions | Supported | Created sessions with `agentSession.comment` route to `OnNewMention`. |
 | Delegation-created sessions | Supported | Created sessions without `agentSession.comment` route to `OnNewMention` using `promptContext` and session id fallbacks. |
 | Follow-up prompts | Supported | Prompted events route according to runtime subscription state and read `agentActivity.body` with a content-body fallback. |
@@ -221,15 +222,23 @@ This likely belongs in a higher-level Linear agent helper package or example wor
 
 ### 12. Best-Practice Webhook Categories
 
-**Status:** Missing by MVP choice.
+**Status:** Partial.
 
-The MVP example asks users to enable agent session events only. Linear recommends Inbox notifications and Permission changes as useful when getting started.
+The adapter handles the Inbox Notification `issueAssignedToYou` action so assigning an issue to the app user can create an agent session and enter the same runtime path as a created session. Other Inbox Notification actions and Permission Change webhooks are not yet modeled.
+
+Upstream Vercel Chat SDK precedent, checked on May 13, 2026:
+
+- `@chat-adapter/linear` documents app-actor mode as driven by `AgentSessionEvent` and asks webhook setup to enable Comments, Agent session events, Issues, and optional Emoji reactions.
+- Its adapter imports Linear webhook types for `AgentSessionEvent`, `Comment`, and `Reaction` and registers handlers for `OAuthApp` revocation, `Comment`, `AgentSessionEvent`, and `Reaction`.
+- It does not register `AppUserNotification` or `PermissionChange` handlers, and it has no normalized callbacks for Inbox Notification or Permission Change payloads.
+- Its `AgentSessionEvent` parser handles `prompted` and `created`; for `created`, it currently requires `agentSession.comment`, so assignment/delegation-created sessions without an originating comment are not normalized there.
+- Go's narrow `issueAssignedToYou` handling is therefore an intentional extension beyond Vercel's current adapter behavior, limited to the one webhook shape needed to make app-user assignment enter the agent-session runtime path.
 
 Needed support:
 
-- Decide whether the adapter should parse these webhook categories or leave them to application-owned webhook handling.
-- If parsed, define normalized events or Linear-specific callbacks.
-- If left out, document that advanced agents should configure separate handlers or use future adapter extensions.
+- Keep additional Inbox Notification actions ignored until the adapter has a raw Linear webhook callback or a typed event with a clear runtime semantic.
+- Keep Permission Change webhooks ignored until the adapter has a Linear-specific callback for installation/team-access changes; they do not map cleanly to normalized chat messages.
+- Preserve enough raw payload data for advanced agents to react to permission and notification changes through future adapter extensions.
 
 ### 13. Account Linking / Auth Flow UX
 
@@ -274,7 +283,7 @@ The next slice should focus on escape hatches before building many typed wrapper
 
 1. Public `GraphQL` method on the Linear adapter.
 2. Public generic `CreateAgentActivity` method with `content`, `signal`, `signalMetadata`, and `ephemeral` support.
-3. Preserve inbound `signal`, `signalMetadata`, and `promptContext` in a stable Linear raw-message shape.
+3. Preserve inbound `signal`, `signalMetadata`, `promptContext`, and non-assignment notification metadata in a stable Linear raw-message shape.
 4. Add README examples for:
    - `agentSessionUpdate` external URLs.
    - plan updates.

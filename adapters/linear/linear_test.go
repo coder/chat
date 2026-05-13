@@ -117,6 +117,9 @@ func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 		return nil
 	})
 
+	assigned := assignedNotificationPayload(now, "N1")
+	postLinearEvent(t, bot, "whsec", assigned)
+
 	delegated := delegatedPayload(now, "S-delegated", "<issue><title>Assigned task</title></issue>")
 	postLinearEvent(t, bot, "whsec", delegated)
 
@@ -132,6 +135,7 @@ func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 	postLinearEvent(t, bot, "whsec", self)
 
 	want := []string{
+		"new:linear:ORG1:message:S-assigned-1:S-assigned-1:Thomas Kosiewski",
 		"new:linear:ORG1:message:S-delegated:S-delegated:",
 		"new:linear:ORG1:message:C1:C1:User One",
 		"subscribed:linear:ORG1:message:C2:C2",
@@ -147,6 +151,7 @@ func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 	if _, err := thread.Post(context.Background(), chat.Text("background result")); err != nil {
 		t.Fatalf("thread post: %v", err)
 	}
+	api.assertCreatedSession(t, 0, "ISSUE1")
 	api.assertActivity(t, 0, linearActivity{AgentSessionID: "S1", Ephemeral: false, Content: activityContent{Type: "response", Body: "background result"}})
 }
 
@@ -250,16 +255,21 @@ func delegatedPayload(now time.Time, sessionID string, promptContext string) str
 	return fmt.Sprintf(`{"type":"AgentSessionEvent","action":"created","organizationId":"ORG1","createdAt":"2026-05-12T00:00:00Z","promptContext":"%s","webhookTimestamp":%d,"agentSession":{"id":"%s","issueId":"ISSUE1","appUserId":"APP1"}}`, promptContext, now.UnixMilli(), sessionID)
 }
 
+func assignedNotificationPayload(now time.Time, notificationID string) string {
+	return fmt.Sprintf(`{"type":"AppUserNotification","action":"issueAssignedToYou","organizationId":"ORG1","appUserId":"APP1","createdAt":"2026-05-12T00:00:00Z","webhookTimestamp":%d,"notification":{"id":"%s","type":"issueAssignedToYou","userId":"APP1","issueId":"ISSUE1","issue":{"id":"ISSUE1","title":"testing issue","identifier":"CODAGT-414","url":"https://linear.app/codercom/issue/CODAGT-414/testing-issue","team":{"id":"TEAM1","key":"CODAGT","name":"Coder Agents"}},"actor":{"id":"U1","name":"Thomas Kosiewski"}}}`, now.UnixMilli(), notificationID)
+}
+
 func promptedPayload(now time.Time, commentID string, body string, userID string, userName string) string {
 	return fmt.Sprintf(`{"type":"AgentSessionEvent","action":"prompted","organizationId":"ORG1","createdAt":"2026-05-12T00:00:01Z","webhookTimestamp":%d,"agentSession":{"id":"S1","issueId":"ISSUE1","appUserId":"APP1","comment":{"id":"C1","body":"hello"}},"agentActivity":{"id":"A1","sourceCommentId":"%s","createdAt":"2026-05-12T00:00:01Z","content":{"type":"prompt","body":"%s"},"user":{"id":"%s","type":"user","name":"%s"}}}`, now.UnixMilli(), commentID, body, userID, userName)
 }
 
 type linearAPIServer struct {
 	*httptest.Server
-	mu       sync.Mutex
-	tokens   int
-	activity []linearActivity
-	expires  int64
+	mu              sync.Mutex
+	tokens          int
+	activity        []linearActivity
+	createdSessions []string
+	expires         int64
 }
 
 type linearActivity struct {
@@ -303,6 +313,22 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 				writeJSON(t, w, map[string]any{"data": map[string]any{"viewer": map[string]any{"id": "APP1", "name": "Linear Bot", "displayName": "Linear Bot", "organization": map[string]any{"id": "ORG1"}}}})
 				return
 			}
+			if strings.Contains(req.Query, "AgentSessionCreateOnIssue") {
+				input, ok := req.Variables["input"].(map[string]any)
+				if !ok {
+					t.Fatalf("variables = %#v", req.Variables)
+				}
+				issueID, ok := input["issueId"].(string)
+				if !ok || issueID == "" {
+					t.Fatalf("issue id input = %#v", input)
+				}
+				api.mu.Lock()
+				api.createdSessions = append(api.createdSessions, issueID)
+				sessionID := fmt.Sprintf("S-assigned-%d", len(api.createdSessions))
+				api.mu.Unlock()
+				writeJSON(t, w, map[string]any{"data": map[string]any{"agentSessionCreateOnIssue": map[string]any{"success": true, "agentSession": map[string]any{"id": sessionID, "issue": map[string]any{"id": issueID}}}}})
+				return
+			}
 			if strings.Contains(req.Query, "AgentActivityCreate") {
 				input, ok := req.Variables["input"].(map[string]any)
 				if !ok {
@@ -336,6 +362,18 @@ func (a *linearAPIServer) tokenRequests() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.tokens
+}
+
+func (a *linearAPIServer) assertCreatedSession(t *testing.T, index int, wantIssueID string) {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.createdSessions) <= index {
+		t.Fatalf("created session count = %d, want index %d", len(a.createdSessions), index)
+	}
+	if a.createdSessions[index] != wantIssueID {
+		t.Fatalf("created session[%d] = %q, want %q", index, a.createdSessions[index], wantIssueID)
+	}
 }
 
 func (a *linearAPIServer) assertActivity(t *testing.T, index int, want linearActivity) {

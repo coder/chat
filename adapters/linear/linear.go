@@ -169,7 +169,11 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			http.Error(w, "invalid linear timestamp", http.StatusUnauthorized)
 			return
 		}
-		event, ok := a.normalizeEvent(envelope, body)
+		event, ok, err := a.normalizeEvent(r.Context(), envelope, body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		if ok {
 			if err := dispatch(r.Context(), event); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -219,10 +223,19 @@ func (a *Adapter) BotActor() chat.Actor {
 	return chat.Actor{Adapter: adapterName, Tenant: a.organizationID, ID: a.botUserID, Name: a.botName, BotKind: chat.BotBot}
 }
 
-func (a *Adapter) normalizeEvent(envelope webhookEnvelope, raw []byte) (*chat.Event, bool) {
-	if envelope.Type != "AgentSessionEvent" {
-		return nil, false
+func (a *Adapter) normalizeEvent(ctx context.Context, envelope webhookEnvelope, raw []byte) (*chat.Event, bool, error) {
+	switch envelope.Type {
+	case "AgentSessionEvent":
+		event, ok := a.normalizeAgentSessionEvent(envelope, raw)
+		return event, ok, nil
+	case "AppUserNotification":
+		return a.normalizeAppUserNotification(ctx, envelope, raw)
+	default:
+		return nil, false, nil
 	}
+}
+
+func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byte) (*chat.Event, bool) {
 	if envelope.OrganizationID == "" || envelope.AgentSession.ID == "" {
 		a.logger.Warn("ignoring unbuildable Linear agent session event", "reason", "missing organization or session")
 		return nil, false
@@ -285,6 +298,42 @@ func (a *Adapter) normalizeEvent(envelope webhookEnvelope, raw []byte) (*chat.Ev
 		Raw:      json.RawMessage(raw),
 		Message:  &chat.Message{ID: sourceID, Text: text, Author: author, Mentioned: true, Raw: json.RawMessage(raw)},
 	}, true
+}
+
+func (a *Adapter) normalizeAppUserNotification(ctx context.Context, envelope webhookEnvelope, raw []byte) (*chat.Event, bool, error) {
+	if envelope.Action != "issueAssignedToYou" && envelope.Notification.Type != "issueAssignedToYou" {
+		return nil, false, nil
+	}
+	if envelope.OrganizationID == "" || envelope.Notification.ID == "" || envelope.Notification.IssueID == "" {
+		a.logger.Warn("ignoring unbuildable Linear app user notification", "action", envelope.Action)
+		return nil, false, nil
+	}
+	if envelope.AppUserID != "" && envelope.AppUserID != a.BotActor().ID {
+		a.logger.Warn("ignoring Linear app user notification for another app actor", "notification_id", envelope.Notification.ID)
+		return nil, false, nil
+	}
+	thread, err := a.createAgentSessionOnIssue(ctx, envelope.Notification.IssueID)
+	if err != nil {
+		return nil, false, fmt.Errorf("linear: create agent session for assigned issue: %w", err)
+	}
+	issue := envelope.Notification.Issue
+	text := issueAssignmentText(issue)
+	author := actorFromWebhook(envelope.OrganizationID, envelope.Notification.Actor)
+	if author.ID == "" {
+		author = systemActor(envelope.OrganizationID, envelope.Notification.ID)
+	}
+	threadID, err := encodeThreadID(thread)
+	if err != nil {
+		return nil, false, err
+	}
+	return &chat.Event{
+		ID:       "linear:" + envelope.OrganizationID + ":message:" + thread.Session,
+		Adapter:  adapterName,
+		Tenant:   envelope.OrganizationID,
+		ThreadID: threadID,
+		Raw:      json.RawMessage(raw),
+		Message:  &chat.Message{ID: thread.Session, Text: text, Author: author, Mentioned: true, Raw: json.RawMessage(raw)},
+	}, true, nil
 }
 
 func actorFromWebhook(tenant string, actor webhookActor) chat.Actor {
@@ -381,6 +430,23 @@ func (a *Adapter) fetchIdentity(ctx context.Context) (linearIdentity, error) {
 	}
 	viewer := resp.Data.Viewer
 	return linearIdentity{BotUserID: viewer.ID, Name: firstNonEmpty(viewer.DisplayName, viewer.Name), OrganizationID: viewer.Organization.ID}, nil
+}
+
+func (a *Adapter) createAgentSessionOnIssue(ctx context.Context, issueID string) (threadPayload, error) {
+	variables := map[string]any{"input": map[string]any{"issueId": issueID}}
+	var resp graphQLResponse[agentSessionCreateOnIssueData]
+	if err := a.callGraphQL(ctx, `mutation AgentSessionCreateOnIssue($input: AgentSessionCreateOnIssue!) { agentSessionCreateOnIssue(input: $input) { success agentSession { id issue { id } } } }`, variables, &resp); err != nil {
+		return threadPayload{}, err
+	}
+	if err := resp.firstError(); err != nil {
+		return threadPayload{}, err
+	}
+	session := resp.Data.AgentSessionCreateOnIssue.AgentSession
+	createdIssueID := firstNonEmpty(session.Issue.ID, issueID)
+	if !resp.Data.AgentSessionCreateOnIssue.Success || session.ID == "" || createdIssueID == "" {
+		return threadPayload{}, errors.New("linear: failed to create agent session on issue")
+	}
+	return threadPayload{Organization: a.BotActor().Tenant, Issue: createdIssueID, Session: session.ID}, nil
 }
 
 func (a *Adapter) createAgentActivity(ctx context.Context, thread threadPayload, content agentActivityContent, ephemeral bool) (*chat.SentMessage, error) {
@@ -503,14 +569,18 @@ func validatePostableMessage(msg chat.PostableMessage) error {
 }
 
 type webhookEnvelope struct {
-	Type             string         `json:"type"`
-	Action           string         `json:"action"`
-	OrganizationID   string         `json:"organizationId"`
-	CreatedAt        string         `json:"createdAt"`
-	PromptContext    string         `json:"promptContext"`
-	WebhookTimestamp int64          `json:"webhookTimestamp"`
-	AgentSession     agentSession   `json:"agentSession"`
-	AgentActivity    *agentActivity `json:"agentActivity"`
+	Type             string              `json:"type"`
+	Action           string              `json:"action"`
+	OrganizationID   string              `json:"organizationId"`
+	OAuthClientID    string              `json:"oauthClientId"`
+	AppUserID        string              `json:"appUserId"`
+	CreatedAt        string              `json:"createdAt"`
+	PromptContext    string              `json:"promptContext"`
+	WebhookID        string              `json:"webhookId"`
+	WebhookTimestamp int64               `json:"webhookTimestamp"`
+	AgentSession     agentSession        `json:"agentSession"`
+	AgentActivity    *agentActivity      `json:"agentActivity"`
+	Notification     appUserNotification `json:"notification"`
 }
 
 type agentSession struct {
@@ -524,7 +594,17 @@ type agentSession struct {
 }
 
 type issueRef struct {
-	ID string `json:"id"`
+	ID         string  `json:"id"`
+	Title      string  `json:"title"`
+	Identifier string  `json:"identifier"`
+	URL        string  `json:"url"`
+	Team       teamRef `json:"team"`
+}
+
+type teamRef struct {
+	ID   string `json:"id"`
+	Key  string `json:"key"`
+	Name string `json:"name"`
 }
 
 type sessionComment struct {
@@ -552,6 +632,15 @@ type webhookActor struct {
 	Type        string `json:"type"`
 	Name        string `json:"name"`
 	DisplayName string `json:"displayName"`
+}
+
+type appUserNotification struct {
+	ID      string       `json:"id"`
+	Type    string       `json:"type"`
+	UserID  string       `json:"userId"`
+	IssueID string       `json:"issueId"`
+	Issue   issueRef     `json:"issue"`
+	Actor   webhookActor `json:"actor"`
 }
 
 type oauthTokenResponse struct {
@@ -601,6 +690,20 @@ type linearIdentity struct {
 	OrganizationID string
 }
 
+type agentSessionCreateOnIssueData struct {
+	AgentSessionCreateOnIssue agentSessionCreate `json:"agentSessionCreateOnIssue"`
+}
+
+type agentSessionCreate struct {
+	Success      bool             `json:"success"`
+	AgentSession agentSessionNode `json:"agentSession"`
+}
+
+type agentSessionNode struct {
+	ID    string   `json:"id"`
+	Issue issueRef `json:"issue"`
+}
+
 type agentActivityData struct {
 	AgentActivityCreate agentActivityCreate `json:"agentActivityCreate"`
 }
@@ -612,6 +715,17 @@ type agentActivityCreate struct {
 
 type activityRef struct {
 	ID string `json:"id"`
+}
+
+func issueAssignmentText(issue issueRef) string {
+	parts := []string{"Issue assigned to agent"}
+	if issue.Identifier != "" || issue.Title != "" {
+		parts = append(parts, strings.TrimSpace(issue.Identifier+" "+issue.Title))
+	}
+	if issue.URL != "" {
+		parts = append(parts, issue.URL)
+	}
+	return strings.Join(parts, "\n")
 }
 
 func firstNonEmpty(values ...string) string {
