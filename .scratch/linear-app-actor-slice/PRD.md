@@ -73,7 +73,7 @@ This PRD follows the accepted ADR: **Linear App-Actor Slice Before Full Linear A
 49. As a bot developer, I want self-authored Linear messages filtered by the runtime, so that bot responses do not create loops.
 50. As a local dogfooter, I want a memory-backed Linear hello-world example, so that I can prove the adapter without setting up Redis or Postgres.
 51. As a local dogfooter, I want setup instructions for creating a Linear OAuth app, so that I can configure the platform correctly.
-52. As a local dogfooter, I want setup instructions for installing with `actor=app` and `app:mentionable`, so that the app appears as a mentionable Linear agent.
+52. As a local dogfooter, I want setup instructions for installing with `actor=app`, `app:mentionable`, and `app:assignable`, so that the app appears as a mentionable and assignable Linear agent.
 53. As a local dogfooter, I want setup instructions for client-credentials environment variables, so that I can run the example locally.
 54. As a local dogfooter, I want setup instructions for enabling only agent session webhooks, so that unsupported comments, issues, and reactions do not confuse the MVP.
 55. As a local dogfooter, I want setup instructions for exposing the webhook endpoint through HTTPS, so that Linear can deliver webhooks to my local process.
@@ -89,7 +89,7 @@ This PRD follows the accepted ADR: **Linear App-Actor Slice Before Full Linear A
 - Keep the adapter under the normal Linear platform identity and adapter name, even though the first supported shape is app-actor agent sessions only.
 - The public adapter constructor follows the Slack adapter style: context-aware construction, an options struct, injectable HTTP client, injectable clock for tests, and optional logger.
 - Model **App-Actor Client Credentials** as a nested option with client ID, client secret, and optional scopes. This preserves top-level OAuth app credentials for a future multi-tenant installation design.
-- Default client-credentials scopes include read, write, comment creation, issue creation, and app mentionability.
+- Default client-credentials scopes include read, write, comment creation, issue creation, app mentionability, and app assignability.
 - Do not expose static access-token auth, personal API key auth, or multi-tenant OAuth install storage in the MVP.
 - During **Adapter Initialization**, exchange client credentials for an app-actor token and query Linear for organization and app user identity.
 - Cache the client-credentials access token in adapter process memory. Refresh it lazily before Linear API calls when it is near expiry. Do not add token methods to **Runtime State**.

@@ -104,7 +104,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	}
 	creds := opts.ClientCredentials
 	if len(creds.Scopes) == 0 {
-		creds.Scopes = []string{"read", "write", "comments:create", "issues:create", "app:mentionable"}
+		creds.Scopes = []string{"read", "write", "comments:create", "issues:create", "app:mentionable", "app:assignable"}
 	}
 	return &Adapter{
 		webhookSecret:      opts.WebhookSecret,

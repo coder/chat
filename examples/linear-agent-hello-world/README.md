@@ -22,11 +22,11 @@ Configure the app for app-actor agent sessions:
    https://YOUR_PUBLIC_HOST/webhooks/linear
    ```
 
-3. Install the app as an app actor with `actor=app` and the `app:mentionable`
-   scope. The authorization URL should include scopes like:
+3. Install the app as an app actor with `actor=app`, `app:mentionable`, and
+   `app:assignable`. The authorization URL should include scopes like:
 
    ```text
-   read,write,comments:create,issues:create,app:mentionable
+   read,write,comments:create,issues:create,app:mentionable,app:assignable
    ```
 
 4. Copy the webhook signing secret. Use it as `LINEAR_WEBHOOK_SECRET`.

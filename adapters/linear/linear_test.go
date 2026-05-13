@@ -277,7 +277,7 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 			if r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("client_id") != "client" || r.Form.Get("client_secret") != "secret" {
 				t.Fatalf("unexpected token form: %v", r.Form)
 			}
-			if got := r.Form.Get("scope"); got != "read,write,comments:create,issues:create,app:mentionable" {
+			if got := r.Form.Get("scope"); got != "read,write,comments:create,issues:create,app:mentionable,app:assignable" {
 				t.Fatalf("scopes = %q", got)
 			}
 			api.mu.Lock()

@@ -105,7 +105,7 @@ The Linear hello-world example must prove:
 Dogfooding instructions should include setup steps for:
 
 - creating a Linear OAuth app;
-- installing it with `actor=app` and `app:mentionable`;
+- installing it with `actor=app`, `app:mentionable`, and `app:assignable`;
 - configuring client-credentials environment variables;
 - enabling agent session webhooks only;
 - exposing `/webhooks/linear` through a public HTTPS tunnel;
