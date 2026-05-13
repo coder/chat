@@ -540,9 +540,8 @@ MVP implementation covers:
 - single-install app-actor client credentials
 - webhook signing secret verification and timestamp replay checks
 - app actor and organization identity discovery during adapter initialization
-- Linear `AgentSessionEvent` created and prompted normalization
-- Linear assignment inbox notifications that create an agent session and route as
-  new mentions
+- Linear `AgentSessionEvent` created and prompted normalization, including
+  assignment/delegation-created sessions emitted by Linear
 - source-comment-based event identity for dedupe
 - tenant-correct opaque Linear agent session thread IDs
 - runtime self-message filtering through the discovered app actor identity

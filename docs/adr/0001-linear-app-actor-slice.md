@@ -23,8 +23,7 @@ The MVP will:
 - exclude static access-token auth, personal API key auth, generic comment mode, and multi-tenant OAuth installation storage;
 - exchange client credentials during adapter initialization and discover the Linear organization and app user identity before webhooks are served;
 - refresh client-credentials tokens lazily before Linear API calls and cache the token in adapter process memory;
-- accept assignment-related Linear app-user notification webhooks by creating an agent session on the assigned issue;
-- accept Linear agent-session webhooks for app-session creation and prompting;
+- accept Linear agent-session webhooks for app-session creation, including Linear-created assignment/delegation sessions, and prompting;
 - normalize buildable agent-session events as mentioned messages and let runtime subscription state decide new-mention vs subscribed-message routing;
 - use source comment identity as the logical event identity for dedupe, matching the upstream Chat SDK's Linear message dedupe semantics;
 - use opaque Go thread IDs that include organization, issue, optional comment context, and agent session identity;
