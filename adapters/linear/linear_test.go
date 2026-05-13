@@ -39,6 +39,29 @@ func TestConstructionValidation(t *testing.T) {
 	}
 }
 
+func TestInitRejectsMissingGrantedScopes(t *testing.T) {
+	t.Parallel()
+
+	api := newLinearAPIServer(t, 3600)
+	api.tokenScope = "read write app:mentionable"
+	adapter, err := linear.New(context.Background(), linear.Options{
+		WebhookSecret: "whsec",
+		ClientCredentials: linear.ClientCredentials{
+			ClientID:     "client",
+			ClientSecret: "secret",
+		},
+		APIBaseURL: api.URL,
+		Client:     api.Client(),
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	_, err = chat.New(context.Background(), chat.WithState(memory.New()), chat.WithAdapter(adapter))
+	if err == nil || !strings.Contains(err.Error(), "app:assignable") {
+		t.Fatalf("init err = %v, want missing app:assignable", err)
+	}
+}
+
 func TestWebhookVerificationAndIgnoredEvents(t *testing.T) {
 	t.Parallel()
 
@@ -256,10 +279,11 @@ func promptedPayload(now time.Time, commentID string, body string, userID string
 
 type linearAPIServer struct {
 	*httptest.Server
-	mu       sync.Mutex
-	tokens   int
-	activity []linearActivity
-	expires  int64
+	mu         sync.Mutex
+	tokens     int
+	activity   []linearActivity
+	expires    int64
+	tokenScope string
 }
 
 type linearActivity struct {
@@ -275,7 +299,7 @@ type activityContent struct {
 
 func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 	t.Helper()
-	api := &linearAPIServer{expires: expires}
+	api := &linearAPIServer{expires: expires, tokenScope: "read write app:mentionable app:assignable"}
 	api.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/oauth/token":
@@ -285,14 +309,14 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 			if r.Form.Get("grant_type") != "client_credentials" || r.Form.Get("client_id") != "client" || r.Form.Get("client_secret") != "secret" {
 				t.Fatalf("unexpected token form: %v", r.Form)
 			}
-			if got := r.Form.Get("scope"); got != "read,write,comments:create,issues:create,app:mentionable,app:assignable" {
+			if got := r.Form.Get("scope"); got != "read,write,app:mentionable,app:assignable" {
 				t.Fatalf("scopes = %q", got)
 			}
 			api.mu.Lock()
 			api.tokens++
 			token := fmt.Sprintf("token-%d", api.tokens)
 			api.mu.Unlock()
-			writeJSON(t, w, map[string]any{"access_token": token, "expires_in": api.expires})
+			writeJSON(t, w, map[string]any{"access_token": token, "expires_in": api.expires, "scope": api.tokenScope})
 		case "/graphql":
 			if got := r.Header.Get("Authorization"); !strings.HasPrefix(got, "Bearer token-") {
 				t.Fatalf("authorization = %q", got)

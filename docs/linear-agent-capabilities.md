@@ -15,7 +15,7 @@ The adapter currently implements the minimum runtime slice needed to receive Lin
 
 | Linear capability | Current support | Notes |
 | --- | --- | --- |
-| App actor auth with client credentials | Supported | Default scopes include `read`, `write`, `comments:create`, `issues:create`, `app:mentionable`, and `app:assignable`. |
+| App actor auth with client credentials | Supported | Default scopes include `read`, `write`, `app:mentionable`, and `app:assignable`; startup verifies Linear granted all requested scopes. |
 | Agent session webhooks | Partially supported | Handles `AgentSessionEvent` `created` and `prompted`, including Linear-created assignment/delegation sessions. |
 | Inbox notification webhooks | Not normalized | Ignored by the adapter, matching upstream Chat SDK. |
 | Mention-created sessions | Supported | Created sessions with `agentSession.comment` route to `OnNewMention`. |
@@ -225,6 +225,12 @@ This likely belongs in a higher-level Linear agent helper package or example wor
 **Status:** Partial.
 
 The adapter does not normalize Inbox Notification or Permission Change webhooks. Assignment/delegation should enter the runtime through Linear's `AgentSessionEvent` `created` webhook: Linear creates the agent session automatically when the app actor is delegated an issue, and follow-up chat arrives as `AgentSessionEvent` `prompted`.
+
+Setup footgun: if direct mentions create sessions but assignment/delegation does not,
+reinstall the app actor after confirming `app:assignable` is in the authorization
+URL. Linear can keep stale install/app state after scope changes; during
+dogfooding we had to delete and recreate the OAuth app before
+assignment-created sessions started arriving.
 
 Upstream Vercel Chat SDK precedent, checked on May 13, 2026:
 

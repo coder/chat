@@ -89,7 +89,7 @@ This PRD follows the accepted ADR: **Linear App-Actor Slice Before Full Linear A
 - Keep the adapter under the normal Linear platform identity and adapter name, even though the first supported shape is app-actor agent sessions only.
 - The public adapter constructor follows the Slack adapter style: context-aware construction, an options struct, injectable HTTP client, injectable clock for tests, and optional logger.
 - Model **App-Actor Client Credentials** as a nested option with client ID, client secret, and optional scopes. This preserves top-level OAuth app credentials for a future multi-tenant installation design.
-- Default client-credentials scopes include read, write, comment creation, issue creation, app mentionability, and app assignability.
+- Default client-credentials scopes include read, write, app mentionability, and app assignability; adapter initialization verifies Linear granted every requested scope.
 - Do not expose static access-token auth, personal API key auth, or multi-tenant OAuth install storage in the MVP.
 - During **Adapter Initialization**, exchange client credentials for an app-actor token and query Linear for organization and app user identity.
 - Cache the client-credentials access token in adapter process memory. Refresh it lazily before Linear API calls when it is near expiry. Do not add token methods to **Runtime State**.

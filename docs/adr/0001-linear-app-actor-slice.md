@@ -21,7 +21,7 @@ The MVP will:
 - live under the normal `adapters/linear` package and use adapter name `linear`;
 - use nested single-install **App-Actor Client Credentials** as its owned authentication path;
 - exclude static access-token auth, personal API key auth, generic comment mode, and multi-tenant OAuth installation storage;
-- exchange client credentials during adapter initialization and discover the Linear organization and app user identity before webhooks are served;
+- exchange client credentials during adapter initialization, verify Linear granted every requested scope, and discover the Linear organization and app user identity before webhooks are served;
 - refresh client-credentials tokens lazily before Linear API calls and cache the token in adapter process memory;
 - accept Linear agent-session webhooks for app-session creation, including Linear-created assignment/delegation sessions, and prompting;
 - normalize buildable agent-session events as mentioned messages and let runtime subscription state decide new-mention vs subscribed-message routing;

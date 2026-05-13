@@ -537,7 +537,7 @@ contract before adding Slack-specific product features.
 The Linear adapter is a narrow app-actor slice, not a full Linear adapter. The
 MVP implementation covers:
 
-- single-install app-actor client credentials
+- single-install app-actor client credentials with granted-scope verification
 - webhook signing secret verification and timestamp replay checks
 - app actor and organization identity discovery during adapter initialization
 - Linear `AgentSessionEvent` created and prompted normalization, including

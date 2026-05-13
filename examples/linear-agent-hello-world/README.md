@@ -28,7 +28,7 @@ Configure the app for app-actor agent sessions:
    `app:assignable`. The authorization URL should include scopes like:
 
    ```text
-   read,write,comments:create,issues:create,app:mentionable,app:assignable
+   read,write,app:mentionable,app:assignable
    ```
 
 4. Copy the webhook signing secret. Use it as `LINEAR_WEBHOOK_SECRET`.
@@ -42,6 +42,12 @@ webhooks; other valid webhook types, including Inbox Notifications and
 Permission Changes, are acknowledged and ignored.
 
 Treat the webhook secret and client secret like passwords.
+
+If assignment/delegation does not create an agent session but direct mentions do,
+reinstall the app actor after confirming `app:assignable` is in the authorization
+URL. Linear can keep stale install/app state after scope changes; during
+dogfooding we had to delete and recreate the OAuth app before
+assignment-created sessions started arriving.
 
 ## Expose Localhost
 

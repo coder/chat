@@ -21,6 +21,8 @@ import (
 	"github.com/coder/chat"
 )
 
+var defaultClientCredentialScopes = []string{"read", "write", "app:mentionable", "app:assignable"}
+
 const (
 	adapterName               = "linear"
 	defaultAPIBaseURL         = "https://api.linear.app"
@@ -103,8 +105,9 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	creds := opts.ClientCredentials
+	creds.Scopes = normalizeScopeList(creds.Scopes)
 	if len(creds.Scopes) == 0 {
-		creds.Scopes = []string{"read", "write", "comments:create", "issues:create", "app:mentionable", "app:assignable"}
+		creds.Scopes = append([]string(nil), defaultClientCredentialScopes...)
 	}
 	return &Adapter{
 		webhookSecret:      opts.WebhookSecret,
@@ -370,6 +373,9 @@ func (a *Adapter) refreshToken(ctx context.Context) error {
 	if resp.AccessToken == "" {
 		return errors.New("linear: token response did not return access token")
 	}
+	if err := verifyGrantedScopes(a.clientCredentials.Scopes, resp.Scope); err != nil {
+		return err
+	}
 
 	var expiry time.Time
 	if resp.ExpiresIn > 0 {
@@ -581,6 +587,7 @@ type webhookActor struct {
 type oauthTokenResponse struct {
 	AccessToken string `json:"access_token"`
 	ExpiresIn   int64  `json:"expires_in"`
+	Scope       string `json:"scope"`
 }
 
 type graphQLRequest struct {
@@ -645,6 +652,54 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizeScopeList(scopes []string) []string {
+	if len(scopes) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(scopes))
+	seen := map[string]struct{}{}
+	for _, scope := range scopes {
+		scope = strings.TrimSpace(scope)
+		if scope == "" {
+			continue
+		}
+		if _, ok := seen[scope]; ok {
+			continue
+		}
+		seen[scope] = struct{}{}
+		out = append(out, scope)
+	}
+	return out
+}
+
+func verifyGrantedScopes(requested []string, granted string) error {
+	grantedScopes := parseGrantedScopes(granted)
+	if len(grantedScopes) == 0 {
+		return errors.New("linear: token response did not return granted scopes")
+	}
+	var missing []string
+	for _, scope := range normalizeScopeList(requested) {
+		if _, ok := grantedScopes[scope]; !ok {
+			missing = append(missing, scope)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("linear: token response missing granted scopes: %s", strings.Join(missing, ","))
+	}
+	return nil
+}
+
+func parseGrantedScopes(value string) map[string]struct{} {
+	out := map[string]struct{}{}
+	for _, scope := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r' }) {
+		scope = strings.TrimSpace(scope)
+		if scope != "" {
+			out[scope] = struct{}{}
+		}
+	}
+	return out
 }
 
 func absDuration(value time.Duration) time.Duration {
