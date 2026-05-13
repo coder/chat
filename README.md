@@ -9,9 +9,11 @@ feature parity. The goal is semantic compatibility where the model maps cleanly
 to Go, with deliberate Go-shaped differences where that makes the runtime
 simpler, safer, or easier to operate.
 
-Status: the Slack-first MVP is implemented. The public surface is still early,
-but the core runtime, Slack adapter, memory state, Redis and Postgres state
-modules, Slack examples, and public contract tests are in place.
+Status: the Slack-first MVP is implemented, and a narrow Linear app-actor
+slice is implemented for Linear agent sessions. The public surface is still
+early, but the core runtime, Slack adapter, Linear app-actor adapter, memory
+state, Redis and Postgres state modules, examples, and public contract tests are
+in place.
 
 ## Vercel Chat SDK Alignment
 
@@ -22,7 +24,7 @@ quick status map for readers familiar with Vercel Chat SDK:
 | Vercel Chat SDK concept | Chat SDK Go status |
 | --- | --- |
 | `Chat` runtime | Implemented as `chat.Chat` |
-| Platform adapters | Slack MVP implemented |
+| Platform adapters | Slack MVP and Linear app-actor MVP implemented |
 | Normalized events and thread-scoped replies | Implemented |
 | `onNewMention` | Implemented as `OnNewMention` |
 | `onSubscribedMessage` | Implemented as `OnSubscribedMessage` |
@@ -74,6 +76,7 @@ Package layout:
 ```text
 github.com/coder/chat
 github.com/coder/chat/adapters/slack
+github.com/coder/chat/adapters/linear
 github.com/coder/chat/state/memory
 github.com/coder/chat/state/postgres
 github.com/coder/chat/state/redis
@@ -88,6 +91,8 @@ Which example should you run?
 
 - Start with `examples/slack-hello-world` if you are new to the SDK or want a
   memory-backed bot with no local infrastructure.
+- Use `examples/linear-agent-hello-world` if you want to dogfood Linear
+  app-actor agent sessions with memory state.
 - Use `examples/slack-redis-state` to try durable runtime coordination with
   Redis.
 - Use `examples/slack-postgres-state` if Postgres is already your coordination
@@ -97,6 +102,14 @@ The memory-backed Slack example runs without local infrastructure:
 
 ```sh
 go run ./examples/slack-hello-world
+```
+
+The memory-backed Linear app-actor example also runs without local
+infrastructure, but it requires a Linear OAuth app installed as an app actor and
+a public HTTPS webhook URL:
+
+```sh
+go run ./examples/linear-agent-hello-world
 ```
 
 The state-backed Slack examples live in separate example modules so the core
@@ -519,6 +532,29 @@ This is a runtime and adapter MVP, not a complete Slack product surface. The
 goal is to prove the conversation model, state coordination, and posting
 contract before adding Slack-specific product features.
 
+## Linear App-Actor MVP Status
+
+The Linear adapter is a narrow app-actor slice, not a full Linear adapter. The
+MVP implementation covers:
+
+- single-install app-actor client credentials
+- webhook signing secret verification and timestamp replay checks
+- app actor and organization identity discovery during adapter initialization
+- Linear `AgentSessionEvent` created and prompted normalization
+- source-comment-based event identity for dedupe
+- tenant-correct opaque Linear agent session thread IDs
+- runtime self-message filtering through the discovered app actor identity
+- thread handle reconstruction for stored Linear agent session thread IDs
+- final responses as Linear agent activity responses
+- ephemeral thoughts through typed adapter access with `PostThought`
+- plain text and portable markdown pass-through for Linear activity bodies
+- one memory-backed hello-world example with setup and dogfooding instructions
+
+The Linear adapter follows the Slack adapter pattern: supported payload shapes are
+modeled locally, low-level HTTP/GraphQL calls stay private, and public
+platform-specific behavior is exposed through narrow methods rather than a raw
+Linear client.
+
 ## Intentional MVP Gaps
 
 These are not bugs in the MVP:
@@ -527,7 +563,10 @@ These are not bugs in the MVP:
 - no full Vercel Chat SDK feature parity
 - no multiple handlers per routing hook
 - no lazy runtime initialization
-- no multi-platform MVP
+- no full Linear adapter beyond the app-actor agent-session slice
+- no Linear personal API key, static access-token, generic comments mode, or
+  multi-tenant OAuth installation flow
+- no Linear streaming, plans, actions, reactions, history, or Markdown conversion
 - no multi-workspace Slack OAuth installation flow
 - no live Slack end-to-end test in CI
 - no Slack Web API rate-limit retry/backoff policy
