@@ -246,25 +246,24 @@ func (a *Adapter) normalizeEvent(envelope webhookEnvelope, raw []byte) (*chat.Ev
 
 	switch envelope.Action {
 	case "created":
-		if envelope.AgentSession.Comment == nil || envelope.AgentSession.Comment.ID == "" {
-			a.logger.Warn("ignoring Linear created agent session without source comment", "session_id", envelope.AgentSession.ID)
-			return nil, false
+		if envelope.AgentSession.Comment == nil {
+			envelope.AgentSession.Comment = &sessionComment{}
 		}
-		sourceID = envelope.AgentSession.Comment.ID
-		text = envelope.AgentSession.Comment.Body
+		sourceID = firstNonEmpty(envelope.AgentSession.Comment.ID, envelope.AgentSession.ID)
+		text = firstNonEmpty(envelope.AgentSession.Comment.Body, envelope.PromptContext, "Agent session created")
 		if envelope.AgentSession.Creator != nil {
 			author = actorFromWebhook(envelope.OrganizationID, *envelope.AgentSession.Creator)
 		} else {
-			author = a.BotActor()
+			author = systemActor(envelope.OrganizationID, envelope.AgentSession.ID)
 		}
 	case "prompted":
 		activity := envelope.AgentActivity
-		if activity == nil || activity.SourceCommentID == "" {
-			a.logger.Warn("ignoring Linear prompted agent session without source comment", "session_id", envelope.AgentSession.ID)
+		if activity == nil {
+			a.logger.Warn("ignoring Linear prompted agent session without activity", "session_id", envelope.AgentSession.ID)
 			return nil, false
 		}
-		sourceID = activity.SourceCommentID
-		text = activity.Content.Body
+		sourceID = firstNonEmpty(activity.SourceCommentID, activity.ID)
+		text = firstNonEmpty(activity.Body, activity.Content.Body)
 		author = actorFromWebhook(envelope.OrganizationID, activity.User)
 	default:
 		return nil, false
@@ -294,6 +293,10 @@ func actorFromWebhook(tenant string, actor webhookActor) chat.Actor {
 		kind = chat.BotBot
 	}
 	return chat.Actor{Adapter: adapterName, Tenant: tenant, ID: actor.ID, Name: firstNonEmpty(actor.DisplayName, actor.Name), BotKind: kind}
+}
+
+func systemActor(tenant string, sessionID string) chat.Actor {
+	return chat.Actor{Adapter: adapterName, Tenant: tenant, ID: "agent-session:" + sessionID, BotKind: chat.BotUnknown}
 }
 
 func (a *Adapter) verifySignature(r *http.Request, body []byte) error {
@@ -504,6 +507,7 @@ type webhookEnvelope struct {
 	Action           string         `json:"action"`
 	OrganizationID   string         `json:"organizationId"`
 	CreatedAt        string         `json:"createdAt"`
+	PromptContext    string         `json:"promptContext"`
 	WebhookTimestamp int64          `json:"webhookTimestamp"`
 	AgentSession     agentSession   `json:"agentSession"`
 	AgentActivity    *agentActivity `json:"agentActivity"`
@@ -532,6 +536,7 @@ type sessionComment struct {
 type agentActivity struct {
 	ID              string               `json:"id"`
 	SourceCommentID string               `json:"sourceCommentId"`
+	Body            string               `json:"body"`
 	Content         agentActivityContent `json:"content"`
 	User            webhookActor         `json:"user"`
 	CreatedAt       string               `json:"createdAt"`

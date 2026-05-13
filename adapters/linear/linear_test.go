@@ -117,6 +117,9 @@ func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 		return nil
 	})
 
+	delegated := delegatedPayload(now, "S-delegated", "<issue><title>Assigned task</title></issue>")
+	postLinearEvent(t, bot, "whsec", delegated)
+
 	created := createdPayload(now, "C1", "hello", "U1", "User One", "APP1")
 	postLinearEvent(t, bot, "whsec", created)
 	postLinearEvent(t, bot, "whsec", created)
@@ -129,6 +132,7 @@ func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 	postLinearEvent(t, bot, "whsec", self)
 
 	want := []string{
+		"new:linear:ORG1:message:S-delegated:S-delegated:",
 		"new:linear:ORG1:message:C1:C1:User One",
 		"subscribed:linear:ORG1:message:C2:C2",
 	}
@@ -240,6 +244,10 @@ func createdPayload(now time.Time, commentID string, body string, userID string,
 
 func createdPayloadWithActorType(now time.Time, commentID string, body string, userID string, userName string, appUserID string, actorType string) string {
 	return fmt.Sprintf(`{"type":"AgentSessionEvent","action":"created","organizationId":"ORG1","createdAt":"2026-05-12T00:00:00Z","webhookTimestamp":%d,"agentSession":{"id":"S1","issueId":"ISSUE1","appUserId":"%s","comment":{"id":"%s","body":"%s","createdAt":"2026-05-12T00:00:00Z"},"creator":{"id":"%s","type":"%s","name":"%s"}}}`, now.UnixMilli(), appUserID, commentID, body, userID, actorType, userName)
+}
+
+func delegatedPayload(now time.Time, sessionID string, promptContext string) string {
+	return fmt.Sprintf(`{"type":"AgentSessionEvent","action":"created","organizationId":"ORG1","createdAt":"2026-05-12T00:00:00Z","promptContext":"%s","webhookTimestamp":%d,"agentSession":{"id":"%s","issueId":"ISSUE1","appUserId":"APP1"}}`, promptContext, now.UnixMilli(), sessionID)
 }
 
 func promptedPayload(now time.Time, commentID string, body string, userID string, userName string) string {

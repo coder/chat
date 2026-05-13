@@ -1,10 +1,11 @@
 # Linear Agent Hello World Example
 
 This example runs a tiny Linear app-actor bot with in-memory runtime state. When
-someone mentions the installed Linear app in an issue, Linear creates an agent
-session and sends an `AgentSessionEvent` webhook. The example subscribes the
-session thread, posts an ephemeral thought, posts a final response, and then
-routes follow-up prompts to `OnSubscribedMessage`.
+someone mentions the installed Linear app in an issue, or delegates an issue to
+the app, Linear creates an agent session and sends an `AgentSessionEvent`
+webhook. The example subscribes the session thread, posts an ephemeral thought,
+posts a final response, and then routes follow-up prompts to
+`OnSubscribedMessage`.
 
 This is a Linear app-actor example, not a personal API key or generic issue
 comment bot.
@@ -104,7 +105,8 @@ export PORT=8080
 go run ./examples/linear-agent-hello-world
 ```
 
-In Linear, mention the installed app actor in an issue:
+In Linear, mention the installed app actor in an issue or delegate the issue to
+the app actor:
 
 ```text
 @your-agent hello
@@ -112,7 +114,7 @@ In Linear, mention the installed app actor in an issue:
 
 Expected behavior:
 
-1. Linear creates an agent session.
+1. Linear creates an agent session from the mention or delegation.
 2. The example receives an `AgentSessionEvent` and routes it to `OnNewMention`.
 3. The example subscribes the Linear agent session thread.
 4. The app posts an ephemeral thought:
