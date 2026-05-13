@@ -12,6 +12,10 @@ _Avoid_: TypeScript port, Vercel Chat SDK clone
 The fallible startup step that assembles state, adapters, and validation into a ready **Go Chat Runtime**.
 _Avoid_: Infallible constructor, lazy validation
 
+**App-Actor Client Credentials**:
+A single-install OAuth credential pair that lets a platform app act as itself rather than as an authorizing human.
+_Avoid_: Personal API key, user OAuth token, marketplace installation
+
 **Runtime Shutdown**:
 The idempotent cleanup step that asks adapters and runtime state to release resources.
 _Avoid_: Best-effort silent cleanup
@@ -32,9 +36,21 @@ _Avoid_: Feature parity, API parity
 The first production-shaped vertical slice of the runtime, using Slack to prove the core conversation model before adding another adapter.
 _Avoid_: Multi-platform MVP
 
+**Linear App-Actor Slice**:
+A Linear adapter vertical slice where the bot participates as an app-owned actor through Linear agent sessions, rather than as a normal user or generic issue-comment integration.
+_Avoid_: Linear user bot, personal API key bot, full Linear adapter
+
+**Agent Session Event**:
+A Linear app-actor webhook occurrence that represents a user invoking or continuing an app-owned agent session.
+_Avoid_: Generic Linear comment, Linear issue event
+
 **Thread**:
 The runtime's stable conversation address for routing events, storing subscription state, and posting replies.
 _Avoid_: Slack thread_ts, channel, platform thread
+
+**Linear Agent Session Thread**:
+A **Thread** for a Linear app-owned agent session, addressed by organization, issue, optional comment context, and agent session identity.
+_Avoid_: Session id only, issue thread, generic comment thread
 
 **Thread ID**:
 An opaque, stable string representation of a **Thread** that is produced and validated by its adapter.
@@ -181,6 +197,14 @@ _Avoid_: Raw-first API, parser type contract
 An explicit typed helper path for retrieving a registered **Platform Adapter** when application code needs platform-specific APIs.
 _Avoid_: Unchecked type assertion in examples
 
+**Agent Activity Thought**:
+A Linear app-actor output that acknowledges the agent is working without serving as the final response.
+_Avoid_: Typing indicator, final response, generic status update
+
+**Agent Activity Response**:
+A Linear app-actor output that posts the agent's final textual response into an agent session.
+_Avoid_: Generic issue comment, thought, plan update, action log
+
 **Postable Message**:
 A normalized outbound message body that adapters can render to their platform's native posting API.
 _Avoid_: Card DSL, native payload
@@ -256,6 +280,12 @@ _Avoid_: Full platform schema, strict external SDK model
 ## Relationships
 
 - A **Go Chat Runtime** aims for **Semantic Compatibility** with the upstream Chat SDK's core model.
+- The **Linear App-Actor Slice** models **App-Actor Client Credentials** as a nested adapter option so top-level OAuth app credentials remain available for future multi-tenant installation design.
+- The **Linear App-Actor Slice** uses **App-Actor Client Credentials** as its owned authentication path.
+- The **Linear App-Actor Slice** does not expose static access-token authentication in its MVP because the adapter owns app-actor token exchange and refresh semantics.
+- **App-Actor Client Credentials** access tokens are cached in the Linear adapter process for MVP; **Runtime State** is not expanded to store adapter credential caches.
+- **App-Actor Client Credentials** tokens are refreshed lazily before Linear API calls when near expiry; the MVP does not run a background token refresher.
+- **App-Actor Client Credentials** are resolved during **Adapter Initialization**; invalid credentials or missing app actor identity fail startup before webhooks are served.
 - **Runtime Construction** returns configuration and initialization errors instead of deferring them to the first webhook.
 - **Runtime Shutdown** attempts all adapter cleanup hooks before state cleanup and returns joined cleanup errors.
 - **Runtime Construction** does not require application handlers; missing **Handler Registration** is a no-op for that route.
@@ -265,12 +295,29 @@ _Avoid_: Full platform schema, strict external SDK model
 - **Routing Hook** GoDoc must call out that single-handler replacement differs from Vercel Chat SDK's multiple-handler registration.
 - **Semantic Compatibility** does not require TypeScript API compatibility, JSX-style cards, or full adapter feature parity.
 - A **Slack-First Slice** should prove the **Go Chat Runtime** before the project generalizes around a second platform.
+- A **Linear App-Actor Slice** should prove Linear app-owned actor participation before the project claims a full Linear adapter.
+- A **Linear App-Actor Slice** excludes personal API key user bots, generic Linear issue-comment routing, and multi-tenant marketplace installation until those are separately justified.
+- The **Linear App-Actor Slice** accepts Linear **Agent Session Event** actions that create or prompt an app-owned agent session.
+- A Linear **Agent Session Event** that creates or prompts a session is normalized as a mentioned **Message**; **Runtime Dispatch** still decides whether it is a **New Mention** or **Subscribed Thread** message from subscription state.
+- Invalid Linear webhook signatures, stale timestamps, and malformed JSON are rejected rather than treated as **Ignored Events**.
+- Unbuildable Linear **Agent Session Event** payloads are **Ignored Events** after successful webhook verification, matching the upstream Chat SDK's lenient Linear agent-session behavior.
+- A Linear **Agent Session Event** for a different app actor is an **Ignored Event** when the payload carries enough app actor identity to prove the mismatch.
+- Unsupported Linear webhook shapes in the **Linear App-Actor Slice** are **Ignored Events** rather than errors once signature and payload verification succeed.
 - A **Thread** is adapter-scoped and may include multiple platform identifiers needed to address the conversation.
 - In Slack, a **Thread** is rooted at the parent thread timestamp; for an unthreaded root message, it is rooted at that message's timestamp rather than the whole channel.
+- Posting an **Agent Activity Thought** returns a **Sent Message** record for the created Linear activity, even though example application code may ignore it.
+- **Agent Activity Thought** output in the **Linear App-Actor Slice** is ephemeral in MVP, matching Linear's typing-style app-actor behavior.
+- A **Linear App-Actor Slice** may expose **Agent Activity Thought** through **Adapter Access** as a Linear-specific escape hatch instead of adding a generic typing or thinking API to the **Go Chat Runtime**.
+- Failure to post an **Agent Activity Thought** should not prevent posting the eventual **Agent Activity Response** in example application code.
+- Posting to a **Linear Agent Session Thread** in the **Linear App-Actor Slice** creates an **Agent Activity Response** rather than a generic issue comment.
+- The **Linear App-Actor Slice** rejects non-agent-session Linear thread IDs until generic issue/comment posting is separately designed.
 - Posting to a **Thread** replies to that conversation address; it does not create a new root/channel message by default.
 - A **Direct Message Thread** follows normal **Thread** routing and posting semantics once it exists.
 - An inbound **Direct Message Thread** message is treated as an implicit **New Mention** when the thread is not subscribed.
 - A **Thread ID** must include the adapter identity and enough platform routing context to avoid collisions across workspaces, channels, and platforms.
+- A **Linear Agent Session Thread** can be reconstructed from its **Thread ID** for out-of-webhook posting as long as the adapter still has valid app-actor credentials for the tenant.
+- A **Linear Agent Session Thread** keeps organization identity in its opaque **Thread ID** as a Go tenant-correctness difference from the upstream Chat SDK's shorter Linear thread strings.
+- A **Linear Agent Session Thread** includes organization, issue, optional comment, and agent session context in its adapter-produced **Thread ID**.
 - Application code may pass around a **Thread ID**, but only an adapter should construct or decode one.
 - Application code may ask the runtime to create a **Thread Handle** from a **Thread ID**, but adapter validation still decides whether the id is valid.
 - A **Subscribed Thread** routes inbound message-created **Events** to subscribed-message handlers before mention or pattern handlers are considered.
@@ -288,9 +335,13 @@ _Avoid_: Full platform schema, strict external SDK model
 - **Runtime State** is coordination state, not **Thread Application State**.
 - **Thread Application State** is deferred from the MVP and should live in the application's own storage.
 - **Message History** APIs are deferred from the MVP.
+- The **Linear App-Actor Slice** setup instructions ask users to enable Linear agent session webhooks; comments, issues, reactions, Inbox Notifications, and Permission Changes are outside the MVP example and are ignored if delivered.
+- The **Linear App-Actor Slice** hello-world example proves new mention routing, explicit thread subscription, best-effort **Agent Activity Thought**, final **Agent Activity Response**, and subscribed follow-up routing.
+- The **Linear App-Actor Slice** includes one memory-backed hello-world example for local dogfooding; production deployments should choose Redis or Postgres **Runtime State** separately.
 - **Memory State** is suitable for tests and local development, not horizontally scaled deployment.
 - The MVP includes **Redis State** so the **Slack-First Slice** can run across multiple instances.
 - The runtime deduplicates **Webhook Events** and serializes handler execution with a **Thread Lock**.
+- In the **Linear App-Actor Slice**, **Event Identity** follows the Linear source comment identity for the logical user message rather than the webhook delivery identity.
 - **Event Identity** is the dedupe key; **Retry Metadata** is recorded for observation only.
 - Dedupe TTL and lock TTL belong in **Runtime Options**.
 - Default **Runtime Options** use a 24 hour dedupe TTL and a 2 minute **Thread Lock** TTL.
@@ -302,6 +353,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - Releasing or extending a **Lock Lease** must verify the ownership token so an expired holder cannot affect a newer holder.
 - A **Lock Conflict** is acknowledged to the platform by default and recorded as unhandled runtime contention.
 - An adapter accepts and normalizes a **Webhook Event**, but **Runtime Dispatch** decides which handler runs.
+- The **Linear App-Actor Slice** preserves synchronous **Runtime Dispatch** for MVP; long-running Linear agent work should post an early **Agent Activity Thought** and enqueue follow-up work in application code.
 - The initial **Go Chat Runtime** performs **Runtime Dispatch** synchronously while preserving a boundary for future deferred or queued execution.
 - The synchronous **Dispatch Context** comes from the inbound webhook request.
 - Runtime locks must be released when **Dispatch Context** is cancelled or handler execution exits.
@@ -332,17 +384,25 @@ _Avoid_: Full platform schema, strict external SDK model
 - **Portable Markdown** carries conservative CommonMark formatting intent, not platform-native syntax.
 - The **Portable Markdown Subset** is paragraphs, line breaks, emphasis, strong emphasis, inline code, fenced code blocks, block quotes, links, unordered lists, and ordered lists. Strikethrough is extension-tolerated and may degrade literally.
 - Tables, task lists, images, raw HTML, heading hierarchy, footnotes, definition lists, and embedded media are outside the **Portable Markdown Subset**.
+- The **Linear App-Actor Slice** intentionally does not port the upstream Chat SDK's richer Linear Markdown conversion in MVP because the **Go Chat Runtime** only exposes plain text and portable markdown post bodies.
+- The **Linear App-Actor Slice** passes **Plain Text** and **Portable Markdown** message bodies through to Linear agent activity bodies without a Markdown conversion layer in MVP.
 - A **Platform Adapter** should prefer a platform markdown input field for **Portable Markdown** when one exists, instead of converting CommonMark into a platform-native markdown dialect itself.
 - If a platform accepts **Portable Markdown** but renders it less richly than intended, that is acceptable degradation. If the platform rejects the post, the adapter returns the platform error rather than retrying through an unowned markdown dialect converter.
 - **Portable Markdown** must not be a hidden **Platform Control Syntax** channel; notifications, platform references, and platform date tokens require explicit modeling or a **Platform Escape Hatch**.
 - Normalized mentions, channel references, broad notifications, and date tokens are deferred until real app needs justify their cross-platform semantics.
 - An **Actor** identity is scoped by adapter and platform tenant, not only by the platform's raw user id.
 - **Bot Kind** represents unknown bot status explicitly rather than with a nullable boolean.
+- The **Linear App-Actor Slice** populates **Actor** names for the app actor and inbound actors when Linear provides them, while routing identity remains based on tenant-scoped actor ids.
+- In the **Linear App-Actor Slice**, the adapter's **BotActor** is the Linear app user discovered during **Adapter Initialization**, and self-authored Linear messages are filtered by runtime self-message routing.
 - A **Self Message** is ignored before subscription, mention, or pattern routing.
 - A **Go Chat Runtime** exposes **Actor** metadata but does not own **Application Identity** linking or login workflows.
 - **Thread ID** and **Actor** identities include **Platform Tenant** context.
 - The **Slack-First Slice** ships as a **Single-Install Adapter** while preserving tenant-correct identifiers.
 - A **Platform Adapter** may decode only **Supported Platform Shapes**, while preserving raw payload data and tolerating unrelated platform fields.
+- The **Linear App-Actor Slice** lives under the normal Linear adapter package and adapter name even though its first supported shape is app-actor agent sessions only.
+- The **Linear App-Actor Slice** MVP API surface is limited to app-actor token exchange, app actor identity discovery, and Linear agent activity creation for thoughts and responses.
+- The **Linear App-Actor Slice** follows the Slack adapter pattern for platform APIs: inject an HTTP client for transport, keep low-level API calls private, and expose only narrow adapter methods through **Adapter Access**.
+- The **Linear App-Actor Slice** uses direct HTTP/GraphQL calls and local structs for supported Linear shapes rather than introducing a Linear SDK dependency in MVP.
 - Supported Slack payloads are decoded with local structs, permissive unknown-field handling, and explicit validation of required fields.
 
 ## Example dialogue
