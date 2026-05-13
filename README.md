@@ -555,6 +555,9 @@ modeled locally, low-level HTTP/GraphQL calls stay private, and public
 platform-specific behavior is exposed through narrow methods rather than a raw
 Linear client.
 
+For the tracked list of Linear agent APIs and best-practice behaviors that are
+not yet implemented, see `docs/linear-agent-capabilities.md`.
+
 ## Intentional MVP Gaps
 
 These are not bugs in the MVP:
