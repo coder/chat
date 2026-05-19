@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/coder/chat"
 	"github.com/coder/chat/adapters/slack"
@@ -14,6 +15,7 @@ import (
 func main() {
 	ctx := context.Background()
 	slogLogger := slog.Default()
+	mustAllowDemoMemoryState()
 
 	slackAdapter, err := slack.New(ctx, slack.Options{
 		SigningSecret: mustEnv("SLACK_SIGNING_SECRET"),
@@ -40,7 +42,7 @@ func main() {
 	}()
 
 	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
-		_, err = ev.Thread.Post(ctx, chat.Markdown("**hello** _world_"))
+		_, err := ev.Thread.Post(ctx, chat.Markdown("**hello** _world_"))
 		return err
 	})
 
@@ -49,15 +51,28 @@ func main() {
 		panic(err)
 	}
 
-	http.Handle("/webhooks/slack", slackWebhook)
-
 	addr := ":" + os.Getenv("PORT")
 	if addr == ":" {
 		addr = ":8080"
 	}
 	slog.Info("listening", "addr", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	server := newWebhookServer(addr, slackWebhook)
+	if err := server.ListenAndServe(); err != nil {
 		panic(err)
+	}
+}
+
+func newWebhookServer(addr string, slackWebhook http.Handler) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/webhooks/slack", slackWebhook)
+
+	return &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 
@@ -67,4 +82,10 @@ func mustEnv(name string) string {
 		panic(name + " is required")
 	}
 	return value
+}
+
+func mustAllowDemoMemoryState() {
+	if os.Getenv("CHAT_DEMO_IN_MEMORY_STATE") != "1" {
+		panic("CHAT_DEMO_IN_MEMORY_STATE=1 is required")
+	}
 }

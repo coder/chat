@@ -27,6 +27,7 @@ const (
 	adapterName               = "linear"
 	defaultAPIBaseURL         = "https://api.linear.app"
 	defaultSignatureTolerance = time.Minute
+	maxWebhookBodyBytes       = 1 << 20
 	tokenRefreshBuffer        = time.Hour
 )
 
@@ -154,8 +155,13 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes))
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "linear webhook too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "read body", http.StatusBadRequest)
 			return
 		}
@@ -183,25 +189,54 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 				return
 			}
 		} else {
-			a.logger.Debug("ignoring unsupported Linear webhook", "type", envelope.Type, "action", envelope.Action, "organization_id", envelope.OrganizationID, "webhook_id", envelope.WebhookID, "agent_session_id", envelope.AgentSession.ID)
+			a.logger.Debug(
+				"ignoring unsupported Linear webhook",
+				"type", envelope.Type,
+				"action", envelope.Action,
+				"organization_id", envelope.OrganizationID,
+				"webhook_id", envelope.WebhookID,
+				"agent_session_id", envelope.AgentSession.ID,
+			)
 		}
 		w.WriteHeader(http.StatusOK)
 	})
 }
 
 func (a *Adapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, error) {
-	payload, err := decodeThreadID(id)
+	payload, err := a.validateThreadPayload(id)
 	if err != nil {
 		return chat.ThreadRef{}, err
 	}
-	return chat.ThreadRef{ID: id, Adapter: adapterName, Tenant: payload.Organization, Channel: payload.Issue, Root: payload.Session, Raw: payload}, nil
+	return chat.ThreadRef{
+		ID:      id,
+		Adapter: adapterName,
+		Tenant:  payload.Organization,
+		Channel: payload.Issue,
+		Root:    payload.Session,
+		Raw:     payload,
+	}, nil
+}
+
+func (a *Adapter) validateThreadPayload(id chat.ThreadID) (threadPayload, error) {
+	payload, err := decodeThreadID(id)
+	if err != nil {
+		return threadPayload{}, err
+	}
+	bot := a.BotActor()
+	if bot.Tenant != "" && payload.Organization != bot.Tenant {
+		return threadPayload{}, fmt.Errorf(
+			"linear: thread organization %q does not match initialized organization",
+			payload.Organization,
+		)
+	}
+	return payload, nil
 }
 
 func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg chat.PostableMessage) (*chat.SentMessage, error) {
 	if err := validatePostableMessage(msg); err != nil {
 		return nil, err
 	}
-	payload, err := payloadFromThread(thread)
+	payload, err := a.payloadFromThread(thread)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +249,7 @@ func (a *Adapter) PostThought(ctx context.Context, id chat.ThreadID, text string
 	if strings.TrimSpace(text) == "" {
 		return nil, errors.New("linear: thought text is required")
 	}
-	payload, err := decodeThreadID(id)
+	payload, err := a.validateThreadPayload(id)
 	if err != nil {
 		return nil, err
 	}
@@ -241,13 +276,35 @@ func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byt
 		a.logger.Warn("ignoring unbuildable Linear agent session event", "reason", "missing organization or session")
 		return nil, false
 	}
+	bot := a.BotActor()
+	if bot.Tenant != "" && envelope.OrganizationID != bot.Tenant {
+		a.logger.Warn(
+			"ignoring Linear agent session event for another organization",
+			"session_id", envelope.AgentSession.ID,
+			"organization_id", envelope.OrganizationID,
+		)
+		return nil, false
+	}
+	if envelope.OAuthClientID != "" && envelope.OAuthClientID != a.clientCredentials.ClientID {
+		a.logger.Warn(
+			"ignoring Linear agent session event for another OAuth client",
+			"session_id", envelope.AgentSession.ID,
+			"oauth_client_id", envelope.OAuthClientID,
+		)
+		return nil, false
+	}
+	if envelope.AgentSession.AppUserID != "" && envelope.AppUserID != "" && envelope.AgentSession.AppUserID != envelope.AppUserID {
+		a.logger.Warn("ignoring Linear agent session event with conflicting app actors", "session_id", envelope.AgentSession.ID)
+		return nil, false
+	}
+	appUserID := firstNonEmpty(envelope.AgentSession.AppUserID, envelope.AppUserID)
+	if appUserID != "" && appUserID != bot.ID {
+		a.logger.Warn("ignoring Linear agent session event for another app actor", "session_id", envelope.AgentSession.ID)
+		return nil, false
+	}
 	issueID := firstNonEmpty(envelope.AgentSession.IssueID, envelope.AgentSession.Issue.ID)
 	if issueID == "" {
 		a.logger.Warn("ignoring Linear agent session event without issue", "session_id", envelope.AgentSession.ID)
-		return nil, false
-	}
-	if envelope.AgentSession.AppUserID != "" && envelope.AgentSession.AppUserID != a.BotActor().ID {
-		a.logger.Warn("ignoring Linear agent session event for another app actor", "session_id", envelope.AgentSession.ID)
 		return nil, false
 	}
 
@@ -286,7 +343,12 @@ func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byt
 		a.logger.Warn("ignoring unbuildable Linear agent session event", "session_id", envelope.AgentSession.ID)
 		return nil, false
 	}
-	threadID, err := encodeThreadID(threadPayload{Organization: envelope.OrganizationID, Issue: issueID, Comment: rootCommentID, Session: envelope.AgentSession.ID})
+	threadID, err := encodeThreadID(threadPayload{
+		Organization: envelope.OrganizationID,
+		Issue:        issueID,
+		Comment:      rootCommentID,
+		Session:      envelope.AgentSession.ID,
+	})
 	if err != nil {
 		a.logger.Warn("ignoring Linear agent session event with invalid thread", "error", err)
 		return nil, false
@@ -497,14 +559,15 @@ func decodeThreadID(id chat.ThreadID) (threadPayload, error) {
 	return payload, nil
 }
 
-func payloadFromThread(thread chat.ThreadRef) (threadPayload, error) {
+func (a *Adapter) payloadFromThread(thread chat.ThreadRef) (threadPayload, error) {
 	if thread.Adapter != adapterName {
 		return threadPayload{}, fmt.Errorf("linear: thread adapter %q is not linear", thread.Adapter)
 	}
-	if payload, ok := thread.Raw.(threadPayload); ok {
-		return payload, nil
+	payload, err := a.validateThreadPayload(thread.ID)
+	if err != nil {
+		return threadPayload{}, err
 	}
-	return decodeThreadID(thread.ID)
+	return payload, nil
 }
 
 func validatePostableMessage(msg chat.PostableMessage) error {
