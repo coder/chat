@@ -1,10 +1,22 @@
 [tools]
 go = "1.26.3"
-pitchfork = "2.10.0"
+"npm:clawpatch" = "0.3.0"
+pitchfork = "2.11.0"
 
 [tasks.test]
 description = "Run tests for every Go module in the workspace"
 depends = ["test:root", "test:adapters", "test:examples"]
+
+[tasks."clawpatch:autofix"]
+description = "Fix Clawpatch findings, run Codex cleanup passes, and commit"
+run = "scripts/clawpatch-autofix.sh"
+
+[tasks."clawpatch:init"]
+description = "Initialize Clawpatch if needed and refresh the feature map"
+run = [
+  "test -f clawpatch.config.json || clawpatch init",
+  "clawpatch map",
+]
 
 [tasks."test:adapters"]
 description = "Run adapter-focused tests"

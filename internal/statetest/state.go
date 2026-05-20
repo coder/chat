@@ -163,17 +163,44 @@ func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
 		t.Parallel()
 		harness := newState(t)
 		state := harness.State
+		bg := context.Background()
+		threadID := chat.ThreadID("fake:v1:thread")
+		eventID := "event"
+		lockKey := "thread"
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 
-		if err := state.SubscribeThread(ctx, "fake:v1:thread"); err == nil {
+		if err := state.SubscribeThread(ctx, threadID); err == nil {
 			t.Fatal("expected cancelled context to stop state mutation")
 		}
-		if _, err := state.MarkEvent(ctx, "event", time.Minute); err == nil {
+		subscribed, err := state.IsThreadSubscribed(bg, threadID)
+		if err != nil {
+			t.Fatalf("check subscription after cancelled subscribe: %v", err)
+		}
+		if subscribed {
+			t.Fatal("cancelled subscribe should not subscribe thread")
+		}
+
+		if _, err := state.MarkEvent(ctx, eventID, time.Minute); err == nil {
 			t.Fatal("expected cancelled context to stop dedupe mutation")
 		}
-		if _, _, err := state.AcquireLock(ctx, "thread", time.Minute); err == nil {
+		first, err := state.MarkEvent(bg, eventID, time.Minute)
+		if err != nil {
+			t.Fatalf("mark event after cancelled mark: %v", err)
+		}
+		if !first {
+			t.Fatal("cancelled mark should not reserve event")
+		}
+
+		if _, _, err := state.AcquireLock(ctx, lockKey, time.Minute); err == nil {
 			t.Fatal("expected cancelled context to stop lock mutation")
+		}
+		_, acquired, err := state.AcquireLock(bg, lockKey, time.Minute)
+		if err != nil {
+			t.Fatalf("acquire lock after cancelled acquire: %v", err)
+		}
+		if !acquired {
+			t.Fatal("cancelled acquire should not reserve lock")
 		}
 	})
 }

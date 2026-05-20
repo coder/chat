@@ -118,6 +118,93 @@ func TestWebhookVerificationAndIgnoredEvents(t *testing.T) {
 	}
 }
 
+func TestWebhookRejectsOversizedUnauthenticatedBody(t *testing.T) {
+	t.Parallel()
+
+	adapter, err := linear.New(context.Background(), linear.Options{
+		WebhookSecret: "whsec",
+		ClientCredentials: linear.ClientCredentials{
+			ClientID:     "client",
+			ClientSecret: "secret",
+		},
+	})
+	if err != nil {
+		t.Fatalf("new adapter: %v", err)
+	}
+	handler := adapter.Webhook(func(context.Context, *chat.Event) error {
+		t.Fatal("oversized unauthenticated body reached dispatch")
+		return nil
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/linear", bytes.NewReader(make([]byte, 2<<20)))
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+func TestTenantEnforcementForWebhook(t *testing.T) {
+	t.Parallel()
+
+	api := newLinearAPIServer(t, 3600)
+	now := time.UnixMilli(1_700_000_000_000)
+	bot, _ := newLinearRuntime(t, api, linear.Options{WebhookSecret: "whsec", Now: func() time.Time { return now }})
+
+	var seen int
+	bot.OnNewMention(func(context.Context, *chat.MessageEvent) error {
+		seen++
+		return nil
+	})
+
+	otherOrg := createdPayloadForOrganization(now, "ORG2", "C1", "hello", "U1", "User One", "APP1")
+	postLinearEvent(t, bot, "whsec", otherOrg)
+	if seen != 0 {
+		t.Fatalf("handler calls = %d, want 0", seen)
+	}
+}
+
+func TestWebhookIgnoresEnvelopeAppIdentityMismatch(t *testing.T) {
+	t.Parallel()
+
+	api := newLinearAPIServer(t, 3600)
+	now := time.UnixMilli(1_700_000_000_000)
+	bot, _ := newLinearRuntime(t, api, linear.Options{WebhookSecret: "whsec", Now: func() time.Time { return now }})
+
+	var seen int
+	bot.OnNewMention(func(context.Context, *chat.MessageEvent) error {
+		seen++
+		return nil
+	})
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "top-level app user id",
+			body: createdPayloadWithEnvelopeIdentity(now, "C1", "", "OTHERAPP", "client"),
+		},
+		{
+			name: "oauth client id",
+			body: createdPayloadWithEnvelopeIdentity(now, "C2", "APP1", "", "other-client"),
+		},
+		{
+			name: "conflicting app user ids",
+			body: createdPayloadWithEnvelopeIdentity(now, "C3", "APP1", "OTHERAPP", ""),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			postLinearEvent(t, bot, "whsec", tt.body)
+			if seen != 0 {
+				t.Fatalf("handler calls = %d, want 0", seen)
+			}
+		})
+	}
+}
+
 func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 	t.Parallel()
 
@@ -151,7 +238,7 @@ func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 	otherApp := createdPayload(now, "C4", "other app", "U2", "User Two", "OTHERAPP")
 	postLinearEvent(t, bot, "whsec", otherApp)
 
-	self := createdPayloadWithActorType(now, "C3", "self", "APP1", "Linear Bot", "APP1", "bot")
+	self := createdPayloadWithActorType(now, "ORG1", "C3", "self", "APP1", "Linear Bot", "APP1", "bot")
 	postLinearEvent(t, bot, "whsec", self)
 
 	want := []string{
@@ -170,7 +257,11 @@ func TestAgentSessionRoutingDedupeSelfAndThreadReconstruction(t *testing.T) {
 	if _, err := thread.Post(context.Background(), chat.Text("background result")); err != nil {
 		t.Fatalf("thread post: %v", err)
 	}
-	api.assertActivity(t, 0, linearActivity{AgentSessionID: "S1", Ephemeral: false, Content: activityContent{Type: "response", Body: "background result"}})
+	api.assertActivity(t, 0, linearActivity{
+		AgentSessionID: "S1",
+		Ephemeral:      false,
+		Content:        activityContent{Type: "response", Body: "background result"},
+	})
 }
 
 func TestPostingResponseThoughtMarkdownAndLazyRefresh(t *testing.T) {
@@ -213,8 +304,16 @@ func TestPostingResponseThoughtMarkdownAndLazyRefresh(t *testing.T) {
 		t.Fatal("expected empty thought to fail")
 	}
 
-	api.assertActivity(t, 0, linearActivity{AgentSessionID: "S1", Ephemeral: false, Content: activityContent{Type: "response", Body: "**final**"}})
-	api.assertActivity(t, 1, linearActivity{AgentSessionID: "S1", Ephemeral: true, Content: activityContent{Type: "thought", Body: "Thinking..."}})
+	api.assertActivity(t, 0, linearActivity{
+		AgentSessionID: "S1",
+		Ephemeral:      false,
+		Content:        activityContent{Type: "response", Body: "**final**"},
+	})
+	api.assertActivity(t, 1, linearActivity{
+		AgentSessionID: "S1",
+		Ephemeral:      true,
+		Content:        activityContent{Type: "thought", Body: "Thinking..."},
+	})
 	if api.tokenRequests() < 2 {
 		t.Fatalf("token requests = %d, want refresh before API calls", api.tokenRequests())
 	}
@@ -262,19 +361,108 @@ func signLinearRequest(req *http.Request, secret string, body []byte) {
 }
 
 func createdPayload(now time.Time, commentID string, body string, userID string, userName string, appUserID string) string {
-	return createdPayloadWithActorType(now, commentID, body, userID, userName, appUserID, "user")
+	return createdPayloadForOrganization(now, "ORG1", commentID, body, userID, userName, appUserID)
 }
 
-func createdPayloadWithActorType(now time.Time, commentID string, body string, userID string, userName string, appUserID string, actorType string) string {
-	return fmt.Sprintf(`{"type":"AgentSessionEvent","action":"created","organizationId":"ORG1","createdAt":"2026-05-12T00:00:00Z","webhookTimestamp":%d,"agentSession":{"id":"S1","issueId":"ISSUE1","appUserId":"%s","comment":{"id":"%s","body":"%s","createdAt":"2026-05-12T00:00:00Z"},"creator":{"id":"%s","type":"%s","name":"%s"}}}`, now.UnixMilli(), appUserID, commentID, body, userID, actorType, userName)
+func createdPayloadForOrganization(now time.Time, organizationID string, commentID string, body string, userID string, userName string, appUserID string) string {
+	return createdPayloadWithActorType(now, organizationID, commentID, body, userID, userName, appUserID, "user")
+}
+
+func createdPayloadWithActorType(now time.Time, organizationID string, commentID string, body string, userID string, userName string, appUserID string, actorType string) string {
+	return fmt.Sprintf(`{
+		"type":"AgentSessionEvent",
+		"action":"created",
+		"organizationId":"%s",
+		"createdAt":"2026-05-12T00:00:00Z",
+		"webhookTimestamp":%d,
+		"agentSession":{
+			"id":"S1",
+			"issueId":"ISSUE1",
+			"appUserId":"%s",
+			"comment":{
+				"id":"%s",
+				"body":"%s",
+				"createdAt":"2026-05-12T00:00:00Z"
+			},
+			"creator":{
+				"id":"%s",
+				"type":"%s",
+				"name":"%s"
+			}
+		}
+	}`, organizationID, now.UnixMilli(), appUserID, commentID, body, userID, actorType, userName)
+}
+
+func createdPayloadWithEnvelopeIdentity(now time.Time, commentID string, sessionAppUserID string, envelopeAppUserID string, oauthClientID string) string {
+	appUserField := ""
+	if envelopeAppUserID != "" {
+		appUserField = fmt.Sprintf(`,"appUserId":"%s"`, envelopeAppUserID)
+	}
+	oauthClientField := ""
+	if oauthClientID != "" {
+		oauthClientField = fmt.Sprintf(`,"oauthClientId":"%s"`, oauthClientID)
+	}
+	return fmt.Sprintf(`{
+		"type":"AgentSessionEvent",
+		"action":"created",
+		"organizationId":"ORG1"%s%s,
+		"createdAt":"2026-05-12T00:00:00Z",
+		"webhookTimestamp":%d,
+		"agentSession":{
+			"id":"S1",
+			"issueId":"ISSUE1",
+			"appUserId":"%s",
+			"comment":{
+				"id":"%s",
+				"body":"hello",
+				"createdAt":"2026-05-12T00:00:00Z"
+			},
+			"creator":{
+				"id":"U1",
+				"type":"user",
+				"name":"User One"
+			}
+		}
+	}`, appUserField, oauthClientField, now.UnixMilli(), sessionAppUserID, commentID)
 }
 
 func delegatedPayload(now time.Time, sessionID string, promptContext string) string {
-	return fmt.Sprintf(`{"type":"AgentSessionEvent","action":"created","organizationId":"ORG1","createdAt":"2026-05-12T00:00:00Z","promptContext":"%s","webhookTimestamp":%d,"agentSession":{"id":"%s","issueId":"ISSUE1","appUserId":"APP1"}}`, promptContext, now.UnixMilli(), sessionID)
+	return fmt.Sprintf(`{
+		"type":"AgentSessionEvent",
+		"action":"created",
+		"organizationId":"ORG1",
+		"createdAt":"2026-05-12T00:00:00Z",
+		"promptContext":"%s",
+		"webhookTimestamp":%d,
+		"agentSession":{
+			"id":"%s",
+			"issueId":"ISSUE1",
+			"appUserId":"APP1"
+		}
+	}`, promptContext, now.UnixMilli(), sessionID)
 }
 
 func promptedPayload(now time.Time, commentID string, body string, userID string, userName string) string {
-	return fmt.Sprintf(`{"type":"AgentSessionEvent","action":"prompted","organizationId":"ORG1","createdAt":"2026-05-12T00:00:01Z","webhookTimestamp":%d,"agentSession":{"id":"S1","issueId":"ISSUE1","appUserId":"APP1","comment":{"id":"C1","body":"hello"}},"agentActivity":{"id":"A1","sourceCommentId":"%s","createdAt":"2026-05-12T00:00:01Z","content":{"type":"prompt","body":"%s"},"user":{"id":"%s","type":"user","name":"%s"}}}`, now.UnixMilli(), commentID, body, userID, userName)
+	return fmt.Sprintf(`{
+		"type":"AgentSessionEvent",
+		"action":"prompted",
+		"organizationId":"ORG1",
+		"createdAt":"2026-05-12T00:00:01Z",
+		"webhookTimestamp":%d,
+		"agentSession":{
+			"id":"S1",
+			"issueId":"ISSUE1",
+			"appUserId":"APP1",
+			"comment":{"id":"C1","body":"hello"}
+		},
+		"agentActivity":{
+			"id":"A1",
+			"sourceCommentId":"%s",
+			"createdAt":"2026-05-12T00:00:01Z",
+			"content":{"type":"prompt","body":"%s"},
+			"user":{"id":"%s","type":"user","name":"%s"}
+		}
+	}`, now.UnixMilli(), commentID, body, userID, userName)
 }
 
 type linearAPIServer struct {

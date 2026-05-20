@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/coder/chat"
 	"github.com/coder/chat/adapters/linear"
@@ -47,16 +49,7 @@ func main() {
 		panic("linear adapter is not registered")
 	}
 
-	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
-		if err := ev.Thread.Subscribe(ctx); err != nil {
-			return err
-		}
-		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Thinking...")
-		_, err := ev.Thread.Post(ctx, chat.Markdown(
-			"**hello from Linear app actor**\n\nI subscribed to this agent session. Send a follow-up prompt to test the subscribed route.",
-		))
-		return err
-	})
+	bot.OnNewMention(newMentionHandler(linearAccess))
 
 	bot.OnSubscribedMessage(func(ctx context.Context, ev *chat.MessageEvent) error {
 		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Reading your follow-up...")
@@ -68,15 +61,48 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	http.Handle("/webhooks/linear", linearWebhook)
-
 	addr := ":" + os.Getenv("PORT")
 	if addr == ":" {
 		addr = ":8080"
 	}
 	slog.Info("listening", "addr", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
+	server := newWebhookServer(addr, linearWebhook)
+	if err := server.ListenAndServe(); err != nil {
 		panic(err)
+	}
+}
+
+type linearThoughtPoster interface {
+	PostThought(context.Context, chat.ThreadID, string) (*chat.SentMessage, error)
+}
+
+func newMentionHandler(linearAccess linearThoughtPoster) chat.MessageHandler {
+	return func(ctx context.Context, ev *chat.MessageEvent) error {
+		if err := ev.Thread.Subscribe(ctx); err != nil {
+			return err
+		}
+		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Thinking...")
+		_, err := ev.Thread.Post(ctx, chat.Markdown(
+			"**hello from Linear app actor**\n\nI subscribed to this agent session. Send a follow-up prompt to test the subscribed route.",
+		))
+		if err != nil {
+			return errors.Join(err, ev.Thread.Unsubscribe(context.WithoutCancel(ctx)))
+		}
+		return nil
+	}
+}
+
+func newWebhookServer(addr string, linearWebhook http.Handler) *http.Server {
+	mux := http.NewServeMux()
+	mux.Handle("/webhooks/linear", linearWebhook)
+
+	return &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 }
 

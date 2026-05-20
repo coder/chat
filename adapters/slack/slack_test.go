@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -68,6 +69,35 @@ func TestWebhookVerifiesSlackSignatureAndHandlesURLVerification(t *testing.T) {
 	}
 }
 
+func TestWebhookRejectsOversizedPayloadBeforeSignature(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	adapter, err := slack.New(context.Background(), slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new slack adapter: %v", err)
+	}
+
+	handler := adapter.Webhook(func(context.Context, *chat.Event) error {
+		t.Fatal("oversized payload reached dispatch")
+		return nil
+	})
+
+	body := make([]byte, 2<<20)
+	req := httptest.NewRequest(http.MethodPost, "/slack", bytes.NewReader(body))
+	req.Header.Set("X-Slack-Request-Timestamp", formatUnix(now))
+	req.Header.Set("X-Slack-Signature", "v0=bad")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized payload status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestWebhookRejectsMalformedSupportedSlackEvents(t *testing.T) {
 	t.Parallel()
 
@@ -100,6 +130,43 @@ func TestWebhookRejectsMalformedSupportedSlackEvents(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed supported event status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestWebhookRejectsSlackEventsForMismatchedTeam(t *testing.T) {
+	t.Parallel()
+
+	now := time.Unix(1_700_000_000, 0)
+	adapter, err := slack.New(context.Background(), slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		TeamID:        "T1",
+		BotUserID:     "UBOT",
+		Now:           func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new slack adapter: %v", err)
+	}
+
+	handler := adapter.Webhook(func(context.Context, *chat.Event) error {
+		t.Fatal("mismatched team event reached dispatch")
+		return nil
+	})
+
+	rec := serveSignedSlackWebhook(t, handler, now, `{
+		"type":"event_callback",
+		"team_id":"T2",
+		"event_id":"WrongTeam1",
+		"event":{
+			"type":"app_mention",
+			"channel":"C1",
+			"user":"U1",
+			"text":"<@UBOT> hi",
+			"ts":"111.000"
+		}
+	}`, "", "")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched team status = %d, body = %s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -206,6 +273,136 @@ func TestWebhookNormalizesMentionsDirectMessagesRetriesAndSelfMessages(t *testin
 		"event":{"type":"reaction_added","user":"U1"}
 	}`, "", ""); status != http.StatusOK {
 		t.Fatalf("unsupported event status = %d", status)
+	}
+}
+
+func TestConfiguredSlackIdentityDiscoversBotIDForSelfMessages(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		TeamID:        "T1",
+		BotUserID:     "UBOT",
+		Now:           func() time.Time { return now },
+	})
+	if authCalls := api.authCallCount(); authCalls != 1 {
+		t.Fatalf("auth.test calls = %d, want 1", authCalls)
+	}
+
+	handled := 0
+	bot.OnNewMention(func(context.Context, *chat.MessageEvent) error {
+		handled++
+		return nil
+	})
+
+	postSlackEvent(t, bot, now, `{
+		"type":"event_callback",
+		"team_id":"T1",
+		"event_id":"SelfBotMessage1",
+		"event":{
+			"type":"message",
+			"subtype":"bot_message",
+			"channel":"C1",
+			"bot_id":"BBOT",
+			"text":"<@UBOT> bot echo",
+			"ts":"225.000"
+		}
+	}`, "", "")
+
+	if handled != 0 {
+		t.Fatalf("self bot_message reached handler %d time(s)", handled)
+	}
+}
+
+func TestSlackInitRejectsConflictingAuthIdentity(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		options      slack.Options
+		authResponse map[string]any
+		wantErr      string
+	}{
+		{
+			name: "team id",
+			options: slack.Options{
+				TeamID:    "T1",
+				BotUserID: "UBOT",
+			},
+			authResponse: map[string]any{"ok": true, "team_id": "T2", "user_id": "UBOT", "bot_id": "BBOT"},
+			wantErr:      `slack: auth.test returned team_id "T2", expected "T1"`,
+		},
+		{
+			name: "bot user id",
+			options: slack.Options{
+				TeamID:    "T1",
+				BotUserID: "UBOT",
+			},
+			authResponse: map[string]any{"ok": true, "team_id": "T1", "user_id": "UOTHER", "bot_id": "BBOT"},
+			wantErr:      `slack: auth.test returned user_id "UOTHER", expected "UBOT"`,
+		},
+		{
+			name: "bot id",
+			options: slack.Options{
+				TeamID: "T1",
+				BotID:  "BBOT",
+			},
+			authResponse: map[string]any{"ok": true, "team_id": "T1", "user_id": "UBOT", "bot_id": "BOTHER"},
+			wantErr:      `slack: auth.test returned bot_id "BOTHER", expected "BBOT"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := newSlackAPIServer(t)
+			api.setAuthResponse(tt.authResponse)
+			tt.options.SigningSecret = "secret"
+			tt.options.BotToken = "xoxb-test"
+			tt.options.APIBaseURL = api.URL
+			tt.options.Client = api.Client()
+
+			adapter, err := slack.New(context.Background(), tt.options)
+			if err != nil {
+				t.Fatalf("new slack adapter: %v", err)
+			}
+			err = adapter.Init(context.Background())
+			if err == nil || err.Error() != tt.wantErr {
+				t.Fatalf("init error = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestSlackInitDoesNotPartiallyAssignFailedDiscovery(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	api.setAuthResponse(map[string]any{"ok": true, "team_id": "T1", "user_id": "UBOT"})
+	adapter, err := slack.New(context.Background(), slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		APIBaseURL:    api.URL,
+		Client:        api.Client(),
+	})
+	if err != nil {
+		t.Fatalf("new slack adapter: %v", err)
+	}
+	err = adapter.Init(context.Background())
+	if err == nil || err.Error() != "slack: auth.test did not return bot_id" {
+		t.Fatalf("init error = %v, want missing bot_id", err)
+	}
+	if bot := adapter.BotActor(); bot.Tenant != "" || bot.ID != "" {
+		t.Fatalf("bot actor after failed init = %#v, want empty identity", bot)
+	}
+
+	api.setAuthResponse(map[string]any{"ok": true, "team_id": "T2", "user_id": "U2", "bot_id": "B2"})
+	if err := adapter.Init(context.Background()); err != nil {
+		t.Fatalf("retry init: %v", err)
+	}
+	if bot := adapter.BotActor(); bot.Tenant != "T2" || bot.ID != "U2" {
+		t.Fatalf("bot actor after retry = %#v, want T2/U2", bot)
 	}
 }
 
@@ -352,6 +549,16 @@ func postSlackEvent(t *testing.T, bot *chat.Chat, now time.Time, body string, re
 	if err != nil {
 		t.Fatalf("webhook: %v", err)
 	}
+	rec := serveSignedSlackWebhook(t, handler, now, body, retryNum, retryReason)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	return rec.Code
+}
+
+func serveSignedSlackWebhook(t *testing.T, handler http.Handler, now time.Time, body string, retryNum string, retryReason string) *httptest.ResponseRecorder {
+	t.Helper()
+
 	bodyBytes := []byte(body)
 	req := httptest.NewRequest(http.MethodPost, "/slack", bytes.NewReader(bodyBytes))
 	signSlackRequest(req, "secret", now, bodyBytes)
@@ -363,10 +570,7 @@ func postSlackEvent(t *testing.T, bot *chat.Chat, now time.Time, body string, re
 	}
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
-	}
-	return rec.Code
+	return rec
 }
 
 func signSlackRequest(req *http.Request, secret string, now time.Time, body []byte) {
@@ -390,8 +594,10 @@ func formatUnix(t time.Time) string {
 
 type slackAPIServer struct {
 	*httptest.Server
-	mu    sync.Mutex
-	posts []slackPost
+	mu           sync.Mutex
+	posts        []slackPost
+	authResponse map[string]any
+	authCalls    int
 }
 
 type slackPost struct {
@@ -406,11 +612,17 @@ type slackPost struct {
 func newSlackAPIServer(t *testing.T) *slackAPIServer {
 	t.Helper()
 
-	api := &slackAPIServer{}
+	api := &slackAPIServer{
+		authResponse: map[string]any{"ok": true, "team_id": "T1", "user_id": "UBOT", "bot_id": "BBOT"},
+	}
 	api.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/auth.test":
-			writeJSON(t, w, map[string]any{"ok": true, "team_id": "T1", "user_id": "UBOT", "bot_id": "BBOT"})
+			api.mu.Lock()
+			api.authCalls++
+			response := maps.Clone(api.authResponse)
+			api.mu.Unlock()
+			writeJSON(t, w, response)
 		case "/chat.postMessage":
 			var post slackPost
 			decodeJSON(t, r.Body, &post)
@@ -440,6 +652,18 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 	}))
 	t.Cleanup(api.Close)
 	return api
+}
+
+func (s *slackAPIServer) setAuthResponse(response map[string]any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authResponse = response
+}
+
+func (s *slackAPIServer) authCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.authCalls
 }
 
 func (s *slackAPIServer) assertPost(t *testing.T, index int, want slackPost) {

@@ -73,8 +73,16 @@ type Chat struct {
 	handlersMu        sync.RWMutex
 	newMention        MessageHandler
 	subscribedMessage MessageHandler
+	acceptancesMu     sync.Mutex
+	eventAcceptances  map[string]*eventAcceptance
 	shutdownMu        sync.Mutex
 	shutdown          bool
+	shutdownDone      chan struct{}
+}
+
+type eventAcceptance struct {
+	done chan struct{}
+	err  error
 }
 
 func New(ctx context.Context, opts ...Option) (*Chat, error) {
@@ -102,10 +110,11 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 	}
 
 	chat := &Chat{
-		state:    cfg.state,
-		adapters: map[string]Adapter{},
-		logger:   cfg.logger,
-		options:  cfg.options,
+		state:            cfg.state,
+		adapters:         map[string]Adapter{},
+		logger:           cfg.logger,
+		options:          cfg.options,
+		eventAcceptances: map[string]*eventAcceptance{},
 	}
 	for _, adapter := range cfg.adapters {
 		if adapter == nil {
@@ -118,10 +127,13 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		if _, exists := chat.adapters[name]; exists {
 			return nil, fmt.Errorf("chat: adapter %q registered more than once", name)
 		}
-		if err := adapter.Init(ctx); err != nil {
-			return nil, fmt.Errorf("chat: initialize adapter %q: %w", name, err)
-		}
 		chat.adapters[name] = adapter
+		if err := adapter.Init(ctx); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("chat: initialize adapter %q: %w", name, err),
+				shutdownAdapters(ctx, chat.adapters),
+			)
+		}
 	}
 	return chat, nil
 }
@@ -203,20 +215,34 @@ func (c *Chat) Shutdown(ctx context.Context) error {
 	assert(c != nil, "Shutdown called on nil runtime")
 	c.shutdownMu.Lock()
 	if c.shutdown {
+		done := c.shutdownDone
 		c.shutdownMu.Unlock()
-		return nil
+		select {
+		case <-done:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	c.shutdown = true
+	done := make(chan struct{})
+	c.shutdownDone = done
 	c.shutdownMu.Unlock()
+	defer close(done)
 
+	err := shutdownAdapters(ctx, c.adapters)
+	if stateErr := c.state.Shutdown(ctx); stateErr != nil {
+		return errors.Join(err, fmt.Errorf("shutdown state: %w", stateErr))
+	}
+	return err
+}
+
+func shutdownAdapters(ctx context.Context, adapters map[string]Adapter) error {
 	var errs []error
-	for name, adapter := range c.adapters {
+	for name, adapter := range adapters {
 		if err := adapter.Shutdown(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("shutdown adapter %q: %w", name, err))
 		}
-	}
-	if err := c.state.Shutdown(ctx); err != nil {
-		errs = append(errs, fmt.Errorf("shutdown state: %w", err))
 	}
 	return errors.Join(errs...)
 }
@@ -225,25 +251,36 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 	if err := validateEvent(event); err != nil {
 		return err
 	}
-	adapter, ok := c.adapters[event.Adapter]
-	if !ok {
-		return fmt.Errorf("chat: event adapter %q is not registered", event.Adapter)
+	acceptance, primary := c.beginEventAcceptance(event.ID)
+	if !primary {
+		return waitEventAcceptance(ctx, acceptance)
+	}
+	finish := func(err error) error {
+		c.finishEventAcceptance(event.ID, acceptance, err)
+		return err
+	}
+	acceptEvent := func() (bool, error) {
+		firstSeen, err := c.markAcceptedEvent(ctx, event)
+		if err != nil {
+			return false, finish(err)
+		}
+		c.finishEventAcceptance(event.ID, acceptance, nil)
+		return firstSeen, nil
 	}
 
-	firstSeen, err := c.state.MarkEvent(ctx, event.ID, c.options.DedupeTTL)
-	if err != nil {
-		return fmt.Errorf("chat: mark event: %w", err)
-	}
-	if !firstSeen {
-		c.logger.Info("chat duplicate event dropped", "adapter", event.Adapter, "event_id", event.ID)
-		return nil
+	adapter, ok := c.adapters[event.Adapter]
+	if !ok {
+		return finish(fmt.Errorf("chat: event adapter %q is not registered", event.Adapter))
 	}
 
 	lease, acquired, err := c.state.AcquireLock(ctx, string(event.ThreadID), c.options.ThreadLockTTL)
 	if err != nil {
-		return fmt.Errorf("chat: acquire thread lock: %w", err)
+		return finish(fmt.Errorf("chat: acquire thread lock: %w", err))
 	}
 	if !acquired {
+		if accepted, err := acceptEvent(); err != nil || !accepted {
+			return err
+		}
 		c.logger.Info("chat lock conflict dropped", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 		return nil
 	}
@@ -257,27 +294,39 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 
 	ref, err := adapter.ValidateThreadID(event.ThreadID)
 	if err != nil {
-		return fmt.Errorf("chat: validate event thread id: %w", err)
+		return finish(fmt.Errorf("chat: validate event thread id: %w", err))
 	}
 	thread := c.newThread(adapter, ref)
 	if event.Message == nil {
+		if accepted, err := acceptEvent(); err != nil || !accepted {
+			return err
+		}
 		c.logger.Info("chat ignored non-message event", "adapter", event.Adapter, "event_id", event.ID)
 		return nil
 	}
 	if isSelfMessage(event.Message.Author, adapter.BotActor()) {
+		if accepted, err := acceptEvent(); err != nil || !accepted {
+			return err
+		}
 		c.logger.Debug("chat ignored self message", "adapter", event.Adapter, "event_id", event.ID)
 		return nil
 	}
 
 	handler, route, err := c.route(ctx, event)
 	if err != nil {
-		return err
+		return finish(err)
 	}
 	if handler == nil {
+		if accepted, err := acceptEvent(); err != nil || !accepted {
+			return err
+		}
 		c.logger.Info("chat ignored unrouted message", "adapter", event.Adapter, "event_id", event.ID)
 		return nil
 	}
 
+	if accepted, err := acceptEvent(); err != nil || !accepted {
+		return err
+	}
 	msgEvent := &MessageEvent{
 		Event:   event,
 		Thread:  thread,
@@ -287,6 +336,48 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 		c.logger.Error("chat handler failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "route", route)
 	}
 	return nil
+}
+
+func (c *Chat) beginEventAcceptance(eventID string) (*eventAcceptance, bool) {
+	c.acceptancesMu.Lock()
+	defer c.acceptancesMu.Unlock()
+	if acceptance, ok := c.eventAcceptances[eventID]; ok {
+		return acceptance, false
+	}
+	acceptance := &eventAcceptance{done: make(chan struct{})}
+	c.eventAcceptances[eventID] = acceptance
+	return acceptance, true
+}
+
+func (c *Chat) finishEventAcceptance(eventID string, acceptance *eventAcceptance, err error) {
+	c.acceptancesMu.Lock()
+	defer c.acceptancesMu.Unlock()
+	if c.eventAcceptances[eventID] == acceptance {
+		delete(c.eventAcceptances, eventID)
+	}
+	acceptance.err = err
+	close(acceptance.done)
+}
+
+func waitEventAcceptance(ctx context.Context, acceptance *eventAcceptance) error {
+	select {
+	case <-acceptance.done:
+		return acceptance.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Chat) markAcceptedEvent(ctx context.Context, event *Event) (bool, error) {
+	firstSeen, err := c.state.MarkEvent(ctx, event.ID, c.options.DedupeTTL)
+	if err != nil {
+		return false, fmt.Errorf("chat: mark event: %w", err)
+	}
+	if !firstSeen {
+		c.logger.Info("chat duplicate event dropped", "adapter", event.Adapter, "event_id", event.ID)
+		return false, nil
+	}
+	return true, nil
 }
 
 func validateEvent(event *Event) error {

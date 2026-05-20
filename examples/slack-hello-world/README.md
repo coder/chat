@@ -4,6 +4,10 @@ This example runs a tiny Slack bot with in-memory runtime state. When the bot is
 mentioned in a channel, or messaged directly if you enable the DM event, it
 replies with portable Markdown: `**hello** _world_`.
 
+This example requires `CHAT_DEMO_IN_MEMORY_STATE=1` because state is lost on
+restart. Use `examples/slack-redis-state` or `examples/slack-postgres-state` for
+durable Slack apps.
+
 ## Slack App Setup
 
 Create or open a Slack app from the Slack app dashboard:
@@ -76,6 +80,7 @@ Start the example on port `8080`:
 ```sh
 export SLACK_SIGNING_SECRET="..."
 export SLACK_BOT_TOKEN="xoxb-..."
+export CHAT_DEMO_IN_MEMORY_STATE=1
 export PORT=8080
 
 go run ./examples/slack-hello-world
@@ -126,6 +131,7 @@ From the repository root:
 ```sh
 export SLACK_SIGNING_SECRET="..."
 export SLACK_BOT_TOKEN="xoxb-..."
+export CHAT_DEMO_IN_MEMORY_STATE=1
 export PORT=8080
 
 go run ./examples/slack-hello-world
@@ -148,7 +154,7 @@ If you enabled `message.im`, you can also send a direct message to the bot.
 ## Notes
 
 - State is in memory, so subscriptions and dedupe data are lost when the process
-  exits.
+  exits. This example is intended for local demos.
 - Slack URL verification is handled by the Slack adapter at `/webhooks/slack`.
 - Slack request signatures are verified with `SLACK_SIGNING_SECRET`.
 - The bot token is used for `auth.test` during adapter startup and

@@ -20,7 +20,10 @@ import (
 	"github.com/coder/chat"
 )
 
-const adapterName = "slack"
+const (
+	adapterName         = "slack"
+	maxWebhookBodyBytes = 1 << 20
+)
 
 type Options struct {
 	SigningSecret          string
@@ -103,7 +106,7 @@ func (a *Adapter) Name() string {
 }
 
 func (a *Adapter) Init(ctx context.Context) error {
-	if a.teamID != "" && a.botUserID != "" {
+	if a.teamID != "" && a.botUserID != "" && a.botID != "" {
 		return nil
 	}
 
@@ -114,15 +117,32 @@ func (a *Adapter) Init(ctx context.Context) error {
 	if !resp.OK {
 		return fmt.Errorf("slack: auth.test failed: %s", resp.Error)
 	}
-	if resp.TeamID == "" {
+	if err := requireMatchingAuthField("team_id", a.teamID, resp.TeamID); err != nil {
+		return err
+	}
+	if err := requireMatchingAuthField("user_id", a.botUserID, resp.UserID); err != nil {
+		return err
+	}
+	if err := requireMatchingAuthField("bot_id", a.botID, resp.BotID); err != nil {
+		return err
+	}
+
+	teamID := firstNonEmpty(a.teamID, resp.TeamID)
+	botUserID := firstNonEmpty(a.botUserID, resp.UserID)
+	botID := firstNonEmpty(a.botID, resp.BotID)
+	if teamID == "" {
 		return errors.New("slack: auth.test did not return team_id")
 	}
-	if resp.UserID == "" {
+	if botUserID == "" {
 		return errors.New("slack: auth.test did not return user_id")
 	}
-	a.teamID = firstNonEmpty(a.teamID, resp.TeamID)
-	a.botUserID = firstNonEmpty(a.botUserID, resp.UserID)
-	a.botID = firstNonEmpty(a.botID, resp.BotID)
+	if botID == "" {
+		return errors.New("slack: auth.test did not return bot_id")
+	}
+
+	a.teamID = teamID
+	a.botUserID = botUserID
+	a.botID = botID
 	return nil
 }
 
@@ -137,8 +157,13 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			return
 		}
 
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes))
 		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				http.Error(w, "slack payload too large", http.StatusRequestEntityTooLarge)
+				return
+			}
 			http.Error(w, "read body", http.StatusBadRequest)
 			return
 		}
@@ -263,6 +288,9 @@ func (a *Adapter) BotActor() chat.Actor {
 func (a *Adapter) normalizeEvent(r *http.Request, envelope eventEnvelope, raw []byte) (*chat.Event, bool, error) {
 	if envelope.TeamID == "" {
 		return nil, false, errors.New("slack: team_id is required")
+	}
+	if a.teamID != "" && envelope.TeamID != a.teamID {
+		return nil, false, fmt.Errorf("slack: team_id %q does not match configured team", envelope.TeamID)
 	}
 	if envelope.EventID == "" {
 		return nil, false, errors.New("slack: event_id is required")
@@ -592,6 +620,13 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func requireMatchingAuthField(name string, configured string, discovered string) error {
+	if configured != "" && discovered != "" && configured != discovered {
+		return fmt.Errorf("slack: auth.test returned %s %q, expected %q", name, discovered, configured)
+	}
+	return nil
 }
 
 func absDuration(duration time.Duration) time.Duration {
