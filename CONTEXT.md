@@ -116,6 +116,10 @@ _Avoid_: Runtime state, thread.state
 Past messages in a **Thread** fetched from the platform after their original webhook delivery.
 _Avoid_: Current event, application context store
 
+**History Reader**:
+An optional, storage-free **Platform Adapter** capability, reached through **Adapter Access**, that does a live platform read of past **Messages** for a **Thread** and never writes **Runtime State**.
+_Avoid_: Runtime message store, routing hook input, cached history
+
 **Memory State**:
 An in-process **Runtime State** implementation for tests and local development only.
 _Avoid_: Production state
@@ -269,6 +273,14 @@ _Avoid_: Core post
 A runtime behavior supported only by adapters that implement its narrow Go interface.
 _Avoid_: String capability flag, mandatory adapter method
 
+**Retry Policy**:
+A per-adapter, bounded outbound-retry configuration (attempt cap plus cumulative-backoff ceiling) that honors a platform's **Retry-After** signal and never sleeps past the caller's deadline.
+_Avoid_: Runtime Options field, global limiter, unbounded backoff
+
+**Rate Limited**:
+The typed error a **Platform Adapter** returns when bounded retry is exhausted, carrying adapter, **Retry-After**, attempts, and the raw platform response as a **Platform Escape Hatch**.
+_Avoid_: Generic error string, retriable signal
+
 **Direct Message Thread**:
 A private **Thread** between the bot and one or more platform actors.
 _Avoid_: Ephemeral message, proactive DM capability
@@ -312,6 +324,14 @@ _Avoid_: Global workspace, account
 **Single-Install Adapter**:
 A **Platform Adapter** configured for one **Platform Tenant** without runtime OAuth installation or per-tenant credential lookup.
 _Avoid_: Multi-workspace adapter
+
+**Multi-Tenant Adapter**:
+A **Platform Adapter** that resolves per-**Platform Tenant** credentials at webhook time via an app-owned **Install Store**, instead of the **Single-Install Adapter** default.
+_Avoid_: Default adapter mode, runtime-owned install database
+
+**Install Store**:
+An app-owned **Optional Capability** the runtime defines and the application implements, mapping a **Platform Tenant** to adapter-specific credentials; the runtime owns the contract, not the store, the OAuth flow, or **Application Identity**.
+_Avoid_: Runtime credential database, account linking, OAuth web flow
 
 **Supported Platform Shape**:
 The subset of a platform webhook payload that an adapter explicitly understands and normalizes.
@@ -378,7 +398,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - A **Go Chat Runtime** requires **Runtime State**; it must not silently create **Memory State** for production-facing construction.
 - **Runtime State** is coordination state, not **Thread Application State**.
 - **Thread Application State** is deferred from the MVP and should live in the application's own storage.
-- **Message History** APIs are deferred from the MVP.
+- **Message History** stays app-owned and deferred for storage; the only runtime seam is a thin optional storage-free **History Reader** read-through reached via **Adapter Access**, which never writes **Runtime State**.
 - The **Linear App-Actor Slice** setup instructions ask users to enable Linear agent session webhooks; comments, issues, reactions, Inbox Notifications, and Permission Changes are outside the MVP example and are ignored if delivered.
 - The **Linear App-Actor Slice** hello-world example proves new mention routing, explicit thread subscription, best-effort **Agent Activity Thought**, final **Agent Activity Response**, and subscribed follow-up routing.
 - The **Linear App-Actor Slice** includes one memory-backed hello-world example for local dogfooding; production deployments should choose Redis or Postgres **Runtime State** separately.
@@ -402,6 +422,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - The synchronous **Dispatch Context** comes from the inbound webhook request; under deferred **Dispatch Mode** the **Thread Lock** is held across the detached work and refreshed before its lease expires.
 - Runtime locks must be released when **Dispatch Context** is cancelled or handler execution exits.
 - **Runtime State** mutations performed during synchronous dispatch respect the caller's **Dispatch Context** and fail when it is cancelled.
+- Outbound rate-limit retry is **Platform Adapter**-owned via a per-adapter **Retry Policy**: bounded by an attempt cap and cumulative ceiling, never sleeping past the caller's deadline, surfacing exhaustion as a typed **Rate Limited** error, visible through **Runtime Observation** and the **Observation Hook**; long throttles move to **Ack-Then-Work** rather than longer synchronous sleeps.
 - An **Accepted Event** is acknowledged to the platform by default even when its application handler fails.
 - Invalid verification or invalid platform payloads are not **Accepted Events**.
 - An **Ignored Event** is acknowledged to the platform without runtime handler dispatch.
@@ -442,6 +463,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - A **Go Chat Runtime** exposes **Actor** metadata but does not own **Application Identity** linking or login workflows.
 - **Thread ID** and **Actor** identities include **Platform Tenant** context.
 - The **Slack-First Slice** ships as a **Single-Install Adapter** while preserving tenant-correct identifiers.
+- The **Single-Install Adapter** stays the default; a **Multi-Tenant Adapter** is an additive mode that resolves per-**Platform Tenant** credentials through an app-owned **Install Store**, while the store, the OAuth web flow, and **Application Identity** stay app-owned.
 - A **Platform Adapter** may decode only **Supported Platform Shapes**, while preserving raw payload data and tolerating unrelated platform fields.
 - The **Linear App-Actor Slice** lives under the normal Linear adapter package and adapter name even though its first supported shape is app-actor agent sessions only.
 - The **Linear App-Actor Slice** MVP API surface is limited to app-actor token exchange, app actor identity discovery, and Linear agent activity creation for thoughts and responses.
