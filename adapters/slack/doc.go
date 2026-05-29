@@ -27,4 +27,15 @@
 // per-workspace bot token plus an optional bot user id used for tenant-correct
 // self-filtering. Thread Handle reconstruction (out-of-webhook posting) resolves
 // the same way, keyed by the Platform Tenant decoded from the opaque Thread ID.
+//
+// # Message history (ADR 0009)
+//
+// The adapter implements the HistoryReader Optional Capability, reached only via
+// typed Adapter Access (chat.AdapterAs). ReadHistory is a thin live read-through of
+// the Slack conversation read API (conversations.replies for thread-rooted Thread
+// IDs, conversations.history for direct messages). It is storage-free: it performs
+// no runtime storage, no dedupe, and no caching. Durable transcripts and LLM
+// context are Thread Application State, owned by the application. Ordering is
+// newest-first, the Before cursor is a Message.ID paging toward older messages, and
+// the page-size limit is clamped to Slack's maximum.
 package slack

@@ -182,3 +182,38 @@ type NativeContent struct {
 type NativeContentPoster interface {
 	PostNative(context.Context, ThreadRef, NativeContent) (*SentMessage, error)
 }
+
+// HistoryQuery parameterizes a HistoryReader read. Pagination and ordering are
+// adapter-owned (platform read APIs differ) and documented in each adapter's
+// GoDoc; this struct imposes no portable pagination model.
+type HistoryQuery struct {
+	// Limit is the desired page size. The adapter clamps it to the platform's
+	// maximum and applies its own default when Limit <= 0.
+	Limit int
+	// Before is an optional opaque cursor: a Message.ID returned by a prior page.
+	// It is a plain string (NOT a fabricated MessageID type); the adapter
+	// interprets it per its platform read API.
+	Before string
+}
+
+// HistoryReader is an Optional Capability: an adapter implements it only when the
+// platform exposes a conversation read API. It is reached exclusively through
+// typed Adapter Access (chat.AdapterAs); it is NOT a method on the core Adapter
+// interface, NOT a Routing Hook input, and is never auto-invoked during Runtime
+// Dispatch.
+//
+// ReadHistory is a live platform read keyed by the opaque Thread ID. It performs
+// NO runtime storage: it does not write Runtime State, does not dedupe via Event
+// Identity, and does not cache. Returned Messages are normalized with raw platform
+// data preserved via the Platform Escape Hatch (Message.Raw). Ordering, pagination,
+// and page-size clamping are adapter-owned and documented in the adapter's GoDoc.
+//
+// Stored/long-term conversation context (transcripts, LLM context windows,
+// summaries, RAG corpora) is Thread Application State, owned by the application in
+// its own storage keyed by Thread ID; this capability is a thin live read-through
+// only. Absence of the capability is the explicit ErrUnsupportedCapability result
+// (via AdapterAs returning ok == false), never an empty []Message that masquerades
+// as "no history".
+type HistoryReader interface {
+	ReadHistory(context.Context, ThreadID, HistoryQuery) ([]Message, error)
+}

@@ -600,6 +600,22 @@ type slackAPIServer struct {
 	authResponse   map[string]any
 	authCalls      int
 	openViewTrigID string
+	historyReqs    []historyRequest
+	historyResp    map[string]any
+	historyBlock   chan struct{}
+}
+
+// historyRequest records a decoded conversations.history / conversations.replies
+// request so history tests can assert Thread ID to read mapping, limit clamping,
+// and cursor handling.
+type historyRequest struct {
+	Method    string
+	Channel   string `json:"channel"`
+	TS        string `json:"ts"`
+	Limit     int    `json:"limit"`
+	Latest    string `json:"latest"`
+	Inclusive bool   `json:"inclusive"`
+	Auth      string
 }
 
 type slackPost struct {
@@ -660,6 +676,27 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 				t.Fatalf("conversations.open users = %q", payload.Users)
 			}
 			writeJSON(t, w, map[string]any{"ok": true, "channel": map[string]any{"id": "D-fallback"}})
+		case "/conversations.replies", "/conversations.history":
+			var req historyRequest
+			decodeJSON(t, r.Body, &req)
+			req.Method = r.URL.Path
+			req.Auth = r.Header.Get("Authorization")
+			api.mu.Lock()
+			api.historyReqs = append(api.historyReqs, req)
+			block := api.historyBlock
+			response := maps.Clone(api.historyResp)
+			api.mu.Unlock()
+			if block != nil {
+				select {
+				case <-block:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			if response == nil {
+				response = map[string]any{"ok": true, "messages": []any{}}
+			}
+			writeJSON(t, w, response)
 		default:
 			t.Fatalf("unexpected Slack API path %s", r.URL.Path)
 		}

@@ -21,6 +21,9 @@ func TestDocumentationCoversIntentionalVercelDifferences(t *testing.T) {
 		"no public proactive `OpenDM`",
 		"no thread application state APIs",
 		"no full Vercel Chat SDK feature parity",
+		"Message history is application-owned",
+		"Thread Application State",
+		"HistoryReader",
 	} {
 		if !strings.Contains(readmeText, phrase) {
 			t.Fatalf("README.md does not mention %q", phrase)
@@ -70,6 +73,54 @@ func TestAdapterDocumentationCoversMultiTenantInstall(t *testing.T) {
 				"stay app-owned",
 				"InstallStore is application-implemented",
 				"linear.LinearInstall",
+			},
+		},
+	}
+	for _, tc := range cases {
+		source, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.path, err)
+		}
+		text := string(source)
+		for _, phrase := range tc.phrases {
+			if !strings.Contains(text, phrase) {
+				t.Fatalf("%s does not mention %q", tc.path, phrase)
+			}
+		}
+	}
+}
+
+func TestDocumentationCoversMessageHistoryCapability(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		path    string
+		phrases []string
+	}{
+		{
+			path: "README.md",
+			phrases: []string{
+				"HistoryReader",
+				"Optional Capability",
+				"Thread Application State",
+				"no runtime storage",
+			},
+		},
+		{
+			path: "adapters/slack/doc.go",
+			phrases: []string{
+				"HistoryReader Optional Capability",
+				"storage-free",
+				"Thread Application State",
+			},
+		},
+		{
+			path: "types.go",
+			phrases: []string{
+				"HistoryReader is an Optional Capability",
+				"It performs",
+				"NO runtime storage",
+				"Thread Application State",
 			},
 		},
 	}

@@ -42,7 +42,8 @@ quick status map for readers familiar with Vercel Chat SDK:
 | Cards, JSX-style cards, native payload builders | Not yet implemented |
 | Pattern handlers | Not yet implemented |
 | Observability metrics/tracing | Optional `Observer` seam, no-op default, no OTel dependency in core |
-| Message history and AI-message conversion helpers | Not yet implemented |
+| Message history persistence | App-owned (Thread Application State); thin live read-through via `HistoryReader` Optional Capability (Slack) |
+| AI-message conversion helpers | Not yet implemented |
 | Multiple production adapters | Not yet implemented |
 | Middleware | Not yet implemented |
 
@@ -520,6 +521,44 @@ Fallback is explicit:
 
 Ephemeral behavior is modeled as an optional adapter capability through small Go
 interfaces, not string capability flags.
+
+## Message History
+
+Message history is application-owned. The runtime owns coordination state
+(subscriptions, dedupe, locks), not a message store; durable transcripts, LLM
+context windows, summaries, and RAG corpora are Thread Application State kept in
+the application's own storage keyed by Thread ID.
+
+For the common "fetch recent platform messages for this thread" case, an adapter
+may implement the `HistoryReader` Optional Capability, reached through typed
+adapter access like other capabilities:
+
+```go
+hr, ok := chat.AdapterAs[interface{ chat.HistoryReader }](bot, "slack")
+if ok {
+	msgs, err := hr.ReadHistory(ctx, ev.Thread.ID(), chat.HistoryQuery{Limit: 20})
+	// The app decides what, if anything, to persist as Thread Application State.
+}
+```
+
+`HistoryReader` is a thin live read-through, not history persistence:
+
+- `ReadHistory` reads the platform API directly, keyed by the opaque Thread ID.
+  It performs no runtime storage: no Runtime State writes, no dedupe, no caching.
+- It is reached only through `chat.AdapterAs`; there is no `bot.ReadHistory` and no
+  `Thread.History`, and history is never a routing hook input or auto-fetched
+  during dispatch.
+- Absence of the capability is the explicit unsupported result (`ok == false`),
+  never an empty slice that masquerades as "no history".
+- Ordering, pagination, and page-size clamping are adapter-owned and documented in
+  each adapter's GoDoc. The Slack adapter returns messages newest-first, pages
+  toward older messages via a `Before` cursor that is a `Message.ID`, and clamps
+  the limit to Slack's maximum.
+- Long fetches run after ack via the ack-then-work seam; the runtime never fetches
+  history on the inbound request path.
+
+This deliberately diverges from Vercel Chat SDK's end-to-end stored-history model:
+persistence of conversation content stays an application concern.
 
 ## Actors And Identity
 
