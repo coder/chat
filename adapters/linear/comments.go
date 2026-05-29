@@ -48,7 +48,7 @@ func (a *Adapter) createIssueComment(ctx context.Context, thread threadPayload, 
 	}
 	variables := map[string]any{"input": input}
 	var resp graphQLResponse[commentCreateData]
-	if err := a.callGraphQL(ctx, `mutation CommentCreate($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id } } }`, variables, &resp); err != nil {
+	if err := a.callGraphQL(ctx, thread.Organization, `mutation CommentCreate($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id } } }`, variables, &resp); err != nil {
 		return nil, err
 	}
 	if err := resp.firstError(); err != nil {
@@ -78,7 +78,7 @@ type commentCreateData struct {
 // through OnNewMention / OnSubscribedMessage exactly as agent-session prompts do.
 // The bot's own comments are surfaced with the app actor as author so the
 // runtime's Self Message filter drops them.
-func (a *Adapter) normalizeCommentEvent(envelope webhookEnvelope, raw []byte) (*chat.Event, bool) {
+func (a *Adapter) normalizeCommentEvent(envelope webhookEnvelope, raw []byte, resolved resolvedInstall) (*chat.Event, bool) {
 	comment := envelope.Data
 	if comment == nil || comment.ID == "" {
 		a.logger.Warn("ignoring unbuildable Linear comment event", "reason", "missing comment")
@@ -88,8 +88,7 @@ func (a *Adapter) normalizeCommentEvent(envelope webhookEnvelope, raw []byte) (*
 		a.logger.Warn("ignoring Linear comment event without organization", "comment_id", comment.ID)
 		return nil, false
 	}
-	bot := a.BotActor()
-	if bot.Tenant != "" && envelope.OrganizationID != bot.Tenant {
+	if resolved.tenant != "" && envelope.OrganizationID != resolved.tenant {
 		a.logger.Warn(
 			"ignoring Linear comment event for another organization",
 			"comment_id", comment.ID,
@@ -97,7 +96,7 @@ func (a *Adapter) normalizeCommentEvent(envelope webhookEnvelope, raw []byte) (*
 		)
 		return nil, false
 	}
-	if envelope.OAuthClientID != "" && envelope.OAuthClientID != a.clientCredentials.ClientID {
+	if envelope.OAuthClientID != "" && resolved.oauthClientID != "" && envelope.OAuthClientID != resolved.oauthClientID {
 		a.logger.Warn("ignoring Linear comment event for another OAuth client", "comment_id", comment.ID)
 		return nil, false
 	}
@@ -107,9 +106,16 @@ func (a *Adapter) normalizeCommentEvent(envelope webhookEnvelope, raw []byte) (*
 		return nil, false
 	}
 
+	bot := a.mentionBotActor(resolved)
 	author := commentAuthor(envelope.OrganizationID, comment)
 	if author.ID == "" {
 		a.logger.Warn("ignoring unbuildable Linear comment event", "comment_id", comment.ID)
+		return nil, false
+	}
+	// Tenant-correct self-filtering from the per-install app actor: the runtime's
+	// single-valued BotActor() filter cannot match in multi-tenant mode, so drop the
+	// bot's own comments here as an Ignored Event.
+	if a.multiTenant() && resolved.botUserID != "" && author.BotKind == chat.BotBot && author.ID == resolved.botUserID {
 		return nil, false
 	}
 
@@ -153,6 +159,17 @@ func (a *Adapter) normalizeCommentEvent(envelope webhookEnvelope, raw []byte) (*
 			Raw:       rawMessage,
 		},
 	}, true
+}
+
+// mentionBotActor returns the app actor used for mention detection. In
+// single-install mode it is the discovered BotActor (carrying the bot name for the
+// textual @-mention fallback); in multi-tenant mode it is the per-install app actor
+// id resolved for this webhook.
+func (a *Adapter) mentionBotActor(resolved resolvedInstall) chat.Actor {
+	if !a.multiTenant() {
+		return a.BotActor()
+	}
+	return chat.Actor{Adapter: adapterName, Tenant: resolved.tenant, ID: resolved.botUserID, BotKind: chat.BotBot}
 }
 
 // commentAuthor resolves the comment author, preferring the explicit user/actor.

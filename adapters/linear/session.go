@@ -20,6 +20,17 @@ import (
 // portable runtime surface.
 func (a *Adapter) GraphQL(ctx context.Context, query string, variables any, dest any) error {
 	assertAdapter(a)
+	if a.multiTenant() {
+		return errors.New("linear: GraphQL requires a tenant; use GraphQLForTenant in multi-tenant mode")
+	}
+	return a.GraphQLForTenant(ctx, "", query, variables, dest)
+}
+
+// GraphQLForTenant is the multi-tenant form of GraphQL: it resolves the per-org
+// access token for the given Platform Tenant (the organizationId baked into a
+// Thread ID) before issuing the query. Single-install callers use GraphQL.
+func (a *Adapter) GraphQLForTenant(ctx context.Context, tenant string, query string, variables any, dest any) error {
+	assertAdapter(a)
 	if query == "" {
 		return errors.New("linear: graphql query is required")
 	}
@@ -27,7 +38,7 @@ func (a *Adapter) GraphQL(ctx context.Context, query string, variables any, dest
 		Data   json.RawMessage `json:"data"`
 		Errors []graphQLError  `json:"errors"`
 	}
-	if err := a.callGraphQL(ctx, query, variables, &envelope); err != nil {
+	if err := a.callGraphQL(ctx, tenant, query, variables, &envelope); err != nil {
 		return err
 	}
 	if len(envelope.Errors) > 0 {
@@ -116,7 +127,7 @@ func (a *Adapter) UpdateSession(ctx context.Context, id chat.ThreadID, in AgentS
 		"input": input,
 	}
 	var resp graphQLResponse[agentSessionUpdateData]
-	if err := a.callGraphQL(ctx, `mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) { agentSessionUpdate(id: $id, input: $input) { success } }`, variables, &resp); err != nil {
+	if err := a.callGraphQL(ctx, payload.Organization, `mutation AgentSessionUpdate($id: String!, $input: AgentSessionUpdateInput!) { agentSessionUpdate(id: $id, input: $input) { success } }`, variables, &resp); err != nil {
 		return err
 	}
 	if err := resp.firstError(); err != nil {

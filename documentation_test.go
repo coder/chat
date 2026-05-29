@@ -44,3 +44,45 @@ func TestDocumentationCoversIntentionalVercelDifferences(t *testing.T) {
 		}
 	}
 }
+
+func TestAdapterDocumentationCoversMultiTenantInstall(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		path    string
+		phrases []string
+	}{
+		{
+			path: "adapters/slack/doc.go",
+			phrases: []string{
+				"Multi-tenant is opt-in",
+				"account linking",
+				"stay app-owned",
+				"InstallStore is application-implemented",
+				"slack.SlackInstall",
+			},
+		},
+		{
+			path: "adapters/linear/doc.go",
+			phrases: []string{
+				"Multi-tenant is opt-in",
+				"account linking",
+				"stay app-owned",
+				"InstallStore is application-implemented",
+				"linear.LinearInstall",
+			},
+		},
+	}
+	for _, tc := range cases {
+		source, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.path, err)
+		}
+		text := string(source)
+		for _, phrase := range tc.phrases {
+			if !strings.Contains(text, phrase) {
+				t.Fatalf("%s does not mention %q", tc.path, phrase)
+			}
+		}
+	}
+}

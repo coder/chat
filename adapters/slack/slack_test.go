@@ -596,6 +596,7 @@ type slackAPIServer struct {
 	*httptest.Server
 	mu             sync.Mutex
 	posts          []slackPost
+	postAuth       []string
 	authResponse   map[string]any
 	authCalls      int
 	openViewTrigID string
@@ -630,6 +631,7 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 			decodeJSON(t, r.Body, &post)
 			api.mu.Lock()
 			api.posts = append(api.posts, post)
+			api.postAuth = append(api.postAuth, r.Header.Get("Authorization"))
 			api.mu.Unlock()
 			writeJSON(t, w, map[string]any{"ok": true, "channel": post.Channel, "ts": "999.000"})
 		case "/chat.postEphemeral":
@@ -637,6 +639,7 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 			decodeJSON(t, r.Body, &post)
 			api.mu.Lock()
 			api.posts = append(api.posts, post)
+			api.postAuth = append(api.postAuth, r.Header.Get("Authorization"))
 			api.mu.Unlock()
 			writeJSON(t, w, map[string]any{"ok": true, "message_ts": "998.000"})
 		case "/views.open":
@@ -688,6 +691,16 @@ func (s *slackAPIServer) assertPost(t *testing.T, index int, want slackPost) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("post %d = %#v, want %#v", index, got, want)
 	}
+}
+
+func (s *slackAPIServer) authForPost(t *testing.T, index int) string {
+	t.Helper()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.postAuth) <= index {
+		t.Fatalf("missing post auth %d in %#v", index, s.postAuth)
+	}
+	return s.postAuth[index]
 }
 
 func boolPtr(value bool) *bool {

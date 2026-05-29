@@ -45,6 +45,31 @@ type commandForm struct {
 	APIAppID    string
 }
 
+// handleCommandForm resolves the per-tenant install for a slash command, then
+// normalizes and dispatches it. A not-installed workspace is an Ignored Event
+// (ack 200, no dispatch); a store transport error is a 5xx the platform may retry.
+func (a *Adapter) handleCommandForm(w http.ResponseWriter, r *http.Request, dispatch chat.DispatchFunc, form url.Values) {
+	_, found, err := a.resolveInstall(r.Context(), form.Get("team_id"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if !found {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	event, err := a.normalizeCommand(r, form)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := dispatch(r.Context(), event); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 // normalizeCommand decodes and validates a slash command into a Command Event. A
 // missing required field or a cross-tenant team is a 400, like a malformed event.
 func (a *Adapter) normalizeCommand(r *http.Request, form url.Values) (*chat.Event, error) {
@@ -74,7 +99,7 @@ func (a *Adapter) normalizeCommand(r *http.Request, form url.Values) (*chat.Even
 	if cmd.TriggerID == "" {
 		return nil, errors.New("slack: command trigger_id is required")
 	}
-	if a.teamID != "" && cmd.TeamID != a.teamID {
+	if !a.multiTenant() && a.teamID != "" && cmd.TeamID != a.teamID {
 		return nil, fmt.Errorf("slack: team_id %q does not match configured team", cmd.TeamID)
 	}
 
@@ -154,35 +179,64 @@ type interactionPayload struct {
 	Raw         json.RawMessage `json:"-"`
 }
 
-// normalizeInteraction decodes a Slack interactivity payload. Only block_actions is
-// handled this slice; other verified types are Ignored Events (ok=false, no
-// dispatch). A malformed body or a missing required field is a 400, never an ignore.
-func (a *Adapter) normalizeInteraction(r *http.Request, raw string) (*chat.Event, bool, error) {
+// handleInteractionForm resolves the per-tenant install for an interactivity
+// payload, then normalizes and dispatches it. An unsupported interaction type and
+// a not-installed workspace are Ignored Events (ack 200, no dispatch); a store
+// transport error is a 5xx the platform may retry; a missing required field is a
+// 400.
+func (a *Adapter) handleInteractionForm(w http.ResponseWriter, r *http.Request, dispatch chat.DispatchFunc, raw string) {
 	var payload interactionPayload
 	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return nil, false, errors.New("slack: invalid interactivity payload")
+		http.Error(w, "slack: invalid interactivity payload", http.StatusBadRequest)
+		return
 	}
 	payload.Raw = json.RawMessage(raw)
 
 	if payload.Type != "block_actions" {
-		return nil, false, nil
+		w.WriteHeader(http.StatusOK)
+		return
 	}
 
-	if payload.Team.ID == "" {
-		return nil, false, errors.New("slack: interaction team id is required")
+	_, found, err := a.resolveInstall(r.Context(), payload.Team.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
-	if a.teamID != "" && payload.Team.ID != a.teamID {
-		return nil, false, fmt.Errorf("slack: team_id %q does not match configured team", payload.Team.ID)
+	if !found {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	event, err := a.normalizeInteraction(r, payload)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := dispatch(r.Context(), event); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+// normalizeInteraction decodes a verified Slack block_actions payload into an
+// Interaction Event. A missing required field is a 400, never an ignore.
+func (a *Adapter) normalizeInteraction(r *http.Request, payload interactionPayload) (*chat.Event, error) {
+	if payload.Team.ID == "" {
+		return nil, errors.New("slack: interaction team id is required")
+	}
+	if !a.multiTenant() && a.teamID != "" && payload.Team.ID != a.teamID {
+		return nil, fmt.Errorf("slack: team_id %q does not match configured team", payload.Team.ID)
 	}
 	if payload.User.ID == "" {
-		return nil, false, errors.New("slack: interaction user id is required")
+		return nil, errors.New("slack: interaction user id is required")
 	}
 	channelID := firstNonEmpty(payload.Channel.ID, payload.Container.ChannelID)
 	if channelID == "" {
-		return nil, false, errors.New("slack: interaction channel id is required")
+		return nil, errors.New("slack: interaction channel id is required")
 	}
 	if len(payload.Actions) == 0 || payload.Actions[0].ActionID == "" {
-		return nil, false, errors.New("slack: interaction action_id is required")
+		return nil, errors.New("slack: interaction action_id is required")
 	}
 
 	direct := isDirectChannel(channelID, "")
@@ -191,7 +245,7 @@ func (a *Adapter) normalizeInteraction(r *http.Request, raw string) (*chat.Event
 		// Anchor to the message bearing the block: thread_ts if threaded, else ts.
 		root = firstNonEmpty(payload.Container.ThreadTS, payload.Container.MessageTS)
 		if root == "" {
-			return nil, false, errors.New("slack: interaction message ts is required")
+			return nil, errors.New("slack: interaction message ts is required")
 		}
 	}
 	threadID, err := encodeThreadID(threadPayload{
@@ -201,7 +255,7 @@ func (a *Adapter) normalizeInteraction(r *http.Request, raw string) (*chat.Event
 		Direct:  direct,
 	})
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 
 	return &chat.Event{
@@ -221,7 +275,7 @@ func (a *Adapter) normalizeInteraction(r *http.Request, raw string) (*chat.Event
 			Actor:    a.humanActor(payload.Team.ID, payload.User.ID),
 			Raw:      payload,
 		},
-	}, true, nil
+	}, nil
 }
 
 // interactionEventID derives a stable Event Identity for a block_actions payload so
@@ -257,6 +311,10 @@ func (a *Adapter) PostNative(ctx context.Context, thread chat.ThreadRef, content
 	if content.Payload == nil {
 		return nil, errors.New("slack: native content payload is required")
 	}
+	token, err := a.postToken(ctx, thread.Tenant)
+	if err != nil {
+		return nil, err
+	}
 	payload := postMessagePayload{
 		Channel: thread.Channel,
 		Blocks:  content.Payload,
@@ -266,7 +324,7 @@ func (a *Adapter) PostNative(ctx context.Context, thread chat.ThreadRef, content
 	}
 
 	var resp postMessageResponse
-	if err := a.call(ctx, "chat.postMessage", payload, &resp); err != nil {
+	if err := a.callWithToken(ctx, token, "chat.postMessage", payload, &resp); err != nil {
 		return nil, err
 	}
 	if !resp.OK {
@@ -278,6 +336,10 @@ func (a *Adapter) PostNative(ctx context.Context, thread chat.ThreadRef, content
 // OpenModal opens a modal via views.open using a trigger_id reachable from a
 // Command or Interaction Event's Raw escape hatch. The opaque view is an outbound
 // Optional Capability; the synchronous view_submission response is a deferred slice.
+//
+// In multi-tenant mode the workspace token is resolved from the Thread ID's tenant
+// via the same install resolver; the caller supplies the thread the trigger came
+// from so the correct workspace token is used.
 func (a *Adapter) OpenModal(ctx context.Context, triggerID string, view any) error {
 	if triggerID == "" {
 		return errors.New("slack: trigger_id is required to open a modal")
@@ -285,8 +347,32 @@ func (a *Adapter) OpenModal(ctx context.Context, triggerID string, view any) err
 	if view == nil {
 		return errors.New("slack: modal view is required")
 	}
+	if a.multiTenant() {
+		return errors.New("slack: OpenModal requires a workspace token; use OpenModalForTenant in multi-tenant mode")
+	}
+	return a.openModalWithToken(ctx, a.botToken, triggerID, view)
+}
+
+// OpenModalForTenant opens a modal authorizing with the workspace resolved from
+// the given Platform Tenant, for multi-tenant deployments. Single-install callers
+// use OpenModal.
+func (a *Adapter) OpenModalForTenant(ctx context.Context, tenant string, triggerID string, view any) error {
+	if triggerID == "" {
+		return errors.New("slack: trigger_id is required to open a modal")
+	}
+	if view == nil {
+		return errors.New("slack: modal view is required")
+	}
+	token, err := a.postToken(ctx, tenant)
+	if err != nil {
+		return err
+	}
+	return a.openModalWithToken(ctx, token, triggerID, view)
+}
+
+func (a *Adapter) openModalWithToken(ctx context.Context, token string, triggerID string, view any) error {
 	var resp openViewResponse
-	if err := a.call(ctx, "views.open", openViewPayload{TriggerID: triggerID, View: view}, &resp); err != nil {
+	if err := a.callWithToken(ctx, token, "views.open", openViewPayload{TriggerID: triggerID, View: view}, &resp); err != nil {
 		return err
 	}
 	if !resp.OK {
@@ -298,6 +384,8 @@ func (a *Adapter) OpenModal(ctx context.Context, triggerID string, view any) err
 // RespondURL posts a portable reply to the response_url carried on a Command or
 // Interaction Event's Raw escape hatch (which must be produced by this adapter).
 // It keeps the native response path adapter-owned without widening Postable Message.
+// It needs no bot token: the response_url is a pre-authorized webhook, so it works
+// identically in single-install and multi-tenant modes.
 func (a *Adapter) RespondURL(ctx context.Context, raw any, msg chat.PostableMessage) error {
 	responseURL := responseURLFromRaw(raw)
 	if responseURL == "" {

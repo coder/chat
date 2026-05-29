@@ -42,17 +42,40 @@ const (
 	tokenRefreshBuffer        = time.Hour
 )
 
-// ClientCredentials configures single-install Linear app-actor authentication.
+// ClientCredentials configures Linear app-actor authentication.
 type ClientCredentials struct {
 	ClientID     string
 	ClientSecret string
 	Scopes       []string
 }
 
+// LinearInstall is the adapter-specific Install.Credential payload for Linear, a
+// Platform Escape Hatch for credentials. Linear signs webhooks per install and
+// authorizes per org, so both the verification material and the reply credentials
+// ride here: the per-install webhook secret plus the per-org App-Actor Client
+// Credentials (or a pre-exchanged installation AccessToken). When only client
+// credentials are supplied the adapter performs the lazy client-credentials token
+// exchange per tenant (ADR-0001). BotUserID is an optional pre-discovered app
+// actor id used for tenant-correct self-filtering, taking second place behind
+// Install.BotActorID.
+type LinearInstall struct {
+	WebhookSecret     string
+	ClientCredentials ClientCredentials
+	AccessToken       string
+	BotUserID         string
+}
+
 // Options configures the Linear adapter.
 type Options struct {
-	WebhookSecret      string
-	ClientCredentials  ClientCredentials
+	WebhookSecret     string
+	ClientCredentials ClientCredentials
+	// InstallStore selects Multi-Tenant Adapter mode: per-org webhook secrets and
+	// credentials are resolved per webhook (and per Thread Handle reconstruction)
+	// from the store instead of static WebhookSecret/ClientCredentials. Supplying
+	// InstallStore together with either a WebhookSecret or ClientCredentials, or
+	// supplying none of them, is a Runtime Construction error. Linear signs
+	// per-install, so the webhook secret comes from the install record in this mode.
+	InstallStore       chat.InstallStore
 	APIBaseURL         string
 	Client             *http.Client
 	Now                func() time.Time
@@ -70,6 +93,7 @@ var _ chat.Adapter = (*Adapter)(nil)
 type Adapter struct {
 	webhookSecret      string
 	clientCredentials  ClientCredentials
+	installStore       chat.InstallStore
 	apiBaseURL         string
 	client             *http.Client
 	now                func() time.Time
@@ -83,20 +107,42 @@ type Adapter struct {
 	organizationID string
 	botUserID      string
 	botName        string
+
+	// tenantTokensMu guards the per-tenant derived-token cache used in multi-tenant
+	// mode. Tokens are derived from the install record's client credentials and kept
+	// keyed by Platform Tenant with ADR-0001 lazy refresh; the durable install
+	// record is re-fetched per event from the app's store, so a revoked install
+	// stops resolving once its record is gone.
+	tenantTokensMu sync.Mutex
+	tenantTokens   map[string]*tenantToken
+}
+
+type tenantToken struct {
+	accessToken string
+	expiry      time.Time
 }
 
 func New(ctx context.Context, opts Options) (*Adapter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if opts.WebhookSecret == "" {
-		return nil, errors.New("linear: webhook secret is required")
-	}
-	if opts.ClientCredentials.ClientID == "" {
-		return nil, errors.New("linear: client credentials client id is required")
-	}
-	if opts.ClientCredentials.ClientSecret == "" {
-		return nil, errors.New("linear: client credentials client secret is required")
+	multiTenant := opts.InstallStore != nil
+	if multiTenant {
+		// Linear signs per install, so the webhook secret and credentials come from
+		// the install record; supplying static ones alongside a store is ambiguous.
+		if opts.WebhookSecret != "" || opts.ClientCredentials.ClientID != "" || opts.ClientCredentials.ClientSecret != "" {
+			return nil, errors.New("linear: set either webhook secret/client credentials or install store, not both")
+		}
+	} else {
+		if opts.WebhookSecret == "" {
+			return nil, errors.New("linear: webhook secret or install store is required")
+		}
+		if opts.ClientCredentials.ClientID == "" {
+			return nil, errors.New("linear: client credentials client id is required")
+		}
+		if opts.ClientCredentials.ClientSecret == "" {
+			return nil, errors.New("linear: client credentials client secret is required")
+		}
 	}
 	client := opts.Client
 	if client == nil {
@@ -123,26 +169,41 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	}
 	retryPolicy := opts.RetryPolicy.withDefaults()
 	creds := opts.ClientCredentials
-	creds.Scopes = normalizeScopeList(creds.Scopes)
-	if len(creds.Scopes) == 0 {
-		creds.Scopes = append([]string(nil), defaultClientCredentialScopes...)
+	if !multiTenant {
+		creds.Scopes = normalizeScopeList(creds.Scopes)
+		if len(creds.Scopes) == 0 {
+			creds.Scopes = append([]string(nil), defaultClientCredentialScopes...)
+		}
 	}
 	return &Adapter{
 		webhookSecret:      opts.WebhookSecret,
 		clientCredentials:  creds,
+		installStore:       opts.InstallStore,
 		apiBaseURL:         apiBaseURL,
 		client:             client,
 		now:                now,
 		signatureTolerance: tolerance,
 		logger:             logger,
 		retryPolicy:        retryPolicy,
+		tenantTokens:       map[string]*tenantToken{},
 	}, nil
 }
 
 func (a *Adapter) Name() string { return adapterName }
 
+// multiTenant reports whether this adapter resolves per-org credentials through an
+// InstallStore instead of a single static client-credentials install.
+func (a *Adapter) multiTenant() bool {
+	return a.installStore != nil
+}
+
 func (a *Adapter) Init(ctx context.Context) error {
 	assertAdapter(a)
+	// Multi-tenant identity (org, app actor) is per install, resolved per webhook /
+	// from each install record, so there is no single identity to discover here.
+	if a.multiTenant() {
+		return nil
+	}
 	if err := a.refreshToken(ctx); err != nil {
 		return err
 	}
@@ -183,7 +244,20 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			http.Error(w, "read body", http.StatusBadRequest)
 			return
 		}
-		if err := a.verifySignature(r, body); err != nil {
+		resolved, secret, ignored, err := a.resolveWebhookInstall(r.Context(), body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if ignored {
+			// ErrInstallNotFound for the org parsed from the unverified body: Ignored
+			// Event. Acknowledge without verifying or dispatching.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		// Re-validate the unverified routing read by verifying the signature with the
+		// resolved secret before any side effect.
+		if err := a.verifySignatureWithSecret(r, body, secret); err != nil {
 			http.Error(w, "invalid linear signature", http.StatusUnauthorized)
 			return
 		}
@@ -196,7 +270,7 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			http.Error(w, "invalid linear timestamp", http.StatusUnauthorized)
 			return
 		}
-		event, ok, err := a.normalizeEvent(r.Context(), envelope, body)
+		event, ok, err := a.normalizeEvent(r.Context(), envelope, body, resolved)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -220,6 +294,61 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 	})
 }
 
+// resolvedInstall carries the per-tenant identity threaded into normalization so a
+// multi-tenant adapter validates against the install record rather than a single
+// configured org/client/app-actor.
+type resolvedInstall struct {
+	tenant        string
+	oauthClientID string
+	botUserID     string
+}
+
+// routingEnvelope is the minimal shape parsed from an unverified body to learn the
+// Platform Tenant (organizationId) for routing only. Linear signs per install, so
+// the tenant must be read before the signing secret is known; it is re-validated
+// by signature verification before any side effect.
+type routingEnvelope struct {
+	OrganizationID string `json:"organizationId"`
+}
+
+// resolveWebhookInstall reads the tenant from the unverified body (routing only)
+// and resolves the per-install signing secret and identity. In single-install mode
+// it returns the static webhook secret and configured identity. In multi-tenant
+// mode it parses organizationId, calls InstallStore.Lookup, and returns the
+// install-record secret and identity; ErrInstallNotFound returns ignored=true (an
+// Ignored Event), and any other store error returns a non-nil error (5xx).
+func (a *Adapter) resolveWebhookInstall(ctx context.Context, body []byte) (resolved resolvedInstall, secret string, ignored bool, err error) {
+	if !a.multiTenant() {
+		bot := a.BotActor()
+		return resolvedInstall{tenant: bot.Tenant, oauthClientID: a.clientCredentials.ClientID, botUserID: bot.ID}, a.webhookSecret, false, nil
+	}
+	var route routingEnvelope
+	if jsonErr := json.Unmarshal(body, &route); jsonErr != nil || route.OrganizationID == "" {
+		// An unparseable or org-less body cannot be routed to an install; treat it as
+		// an Ignored Event rather than dispatching unsigned input.
+		return resolvedInstall{}, "", true, nil
+	}
+	install, lookupErr := a.installStore.Lookup(ctx, adapterName, route.OrganizationID)
+	if lookupErr != nil {
+		if errors.Is(lookupErr, chat.ErrInstallNotFound) {
+			return resolvedInstall{}, "", true, nil
+		}
+		return resolvedInstall{}, "", false, fmt.Errorf("linear: install lookup: %w", lookupErr)
+	}
+	cred, credErr := linearCredential(install.Credential)
+	if credErr != nil {
+		return resolvedInstall{}, "", false, credErr
+	}
+	if cred.WebhookSecret == "" {
+		return resolvedInstall{}, "", false, errors.New("linear: install credential has no webhook secret")
+	}
+	return resolvedInstall{
+		tenant:        route.OrganizationID,
+		oauthClientID: cred.ClientCredentials.ClientID,
+		botUserID:     firstNonEmpty(install.BotActorID, cred.BotUserID),
+	}, cred.WebhookSecret, false, nil
+}
+
 func (a *Adapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, error) {
 	payload, err := a.validateThreadPayload(id)
 	if err != nil {
@@ -240,12 +369,16 @@ func (a *Adapter) validateThreadPayload(id chat.ThreadID) (threadPayload, error)
 	if err != nil {
 		return threadPayload{}, err
 	}
-	bot := a.BotActor()
-	if bot.Tenant != "" && payload.Organization != bot.Tenant {
-		return threadPayload{}, fmt.Errorf(
-			"linear: thread organization %q does not match initialized organization",
-			payload.Organization,
-		)
+	// The single-install org guard is wrong in multi-tenant mode, where every org the
+	// store serves is valid; the install lookup on the posting path decides instead.
+	if !a.multiTenant() {
+		bot := a.BotActor()
+		if bot.Tenant != "" && payload.Organization != bot.Tenant {
+			return threadPayload{}, fmt.Errorf(
+				"linear: thread organization %q does not match initialized organization",
+				payload.Organization,
+			)
+		}
 	}
 	return payload, nil
 }
@@ -300,26 +433,25 @@ func (a *Adapter) BotActor() chat.Actor {
 	return chat.Actor{Adapter: adapterName, Tenant: a.organizationID, ID: a.botUserID, Name: a.botName, BotKind: chat.BotBot}
 }
 
-func (a *Adapter) normalizeEvent(_ context.Context, envelope webhookEnvelope, raw []byte) (*chat.Event, bool, error) {
+func (a *Adapter) normalizeEvent(_ context.Context, envelope webhookEnvelope, raw []byte, resolved resolvedInstall) (*chat.Event, bool, error) {
 	switch envelope.Type {
 	case "AgentSessionEvent":
-		event, ok := a.normalizeAgentSessionEvent(envelope, raw)
+		event, ok := a.normalizeAgentSessionEvent(envelope, raw, resolved)
 		return event, ok, nil
 	case "Comment":
-		event, ok := a.normalizeCommentEvent(envelope, raw)
+		event, ok := a.normalizeCommentEvent(envelope, raw, resolved)
 		return event, ok, nil
 	default:
 		return nil, false, nil
 	}
 }
 
-func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byte) (*chat.Event, bool) {
+func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byte, resolved resolvedInstall) (*chat.Event, bool) {
 	if envelope.OrganizationID == "" || envelope.AgentSession.ID == "" {
 		a.logger.Warn("ignoring unbuildable Linear agent session event", "reason", "missing organization or session")
 		return nil, false
 	}
-	bot := a.BotActor()
-	if bot.Tenant != "" && envelope.OrganizationID != bot.Tenant {
+	if resolved.tenant != "" && envelope.OrganizationID != resolved.tenant {
 		a.logger.Warn(
 			"ignoring Linear agent session event for another organization",
 			"session_id", envelope.AgentSession.ID,
@@ -327,7 +459,7 @@ func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byt
 		)
 		return nil, false
 	}
-	if envelope.OAuthClientID != "" && envelope.OAuthClientID != a.clientCredentials.ClientID {
+	if envelope.OAuthClientID != "" && resolved.oauthClientID != "" && envelope.OAuthClientID != resolved.oauthClientID {
 		a.logger.Warn(
 			"ignoring Linear agent session event for another OAuth client",
 			"session_id", envelope.AgentSession.ID,
@@ -340,7 +472,7 @@ func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byt
 		return nil, false
 	}
 	appUserID := firstNonEmpty(envelope.AgentSession.AppUserID, envelope.AppUserID)
-	if appUserID != "" && appUserID != bot.ID {
+	if appUserID != "" && resolved.botUserID != "" && appUserID != resolved.botUserID {
 		a.logger.Warn("ignoring Linear agent session event for another app actor", "session_id", envelope.AgentSession.ID)
 		return nil, false
 	}
@@ -383,6 +515,12 @@ func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byt
 	}
 	if sourceID == "" || author.ID == "" {
 		a.logger.Warn("ignoring unbuildable Linear agent session event", "session_id", envelope.AgentSession.ID)
+		return nil, false
+	}
+	// Tenant-correct self-filtering from the per-install app actor: drop the bot's
+	// own authored events as an Ignored Event, since the runtime's single-valued
+	// BotActor() filter cannot match in multi-tenant mode.
+	if a.multiTenant() && resolved.botUserID != "" && author.BotKind == chat.BotBot && author.ID == resolved.botUserID {
 		return nil, false
 	}
 	threadID, err := encodeThreadID(threadPayload{
@@ -449,7 +587,7 @@ func systemActor(tenant string, sessionID string) chat.Actor {
 	return chat.Actor{Adapter: adapterName, Tenant: tenant, ID: "agent-session:" + sessionID, BotKind: chat.BotUnknown}
 }
 
-func (a *Adapter) verifySignature(r *http.Request, body []byte) error {
+func (a *Adapter) verifySignatureWithSecret(r *http.Request, body []byte, secret string) error {
 	got := r.Header.Get("Linear-Signature")
 	if got == "" {
 		return errors.New("linear: missing signature")
@@ -458,7 +596,7 @@ func (a *Adapter) verifySignature(r *http.Request, body []byte) error {
 	if err != nil {
 		return errors.New("linear: invalid signature")
 	}
-	mac := hmac.New(sha256.New, []byte(a.webhookSecret))
+	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write(body)
 	expected := mac.Sum(nil)
 	if !hmac.Equal(expected, decoded) {
@@ -492,41 +630,130 @@ func (a *Adapter) ensureToken(ctx context.Context) error {
 }
 
 func (a *Adapter) refreshToken(ctx context.Context) error {
-	values := url.Values{}
-	values.Set("grant_type", "client_credentials")
-	values.Set("client_id", a.clientCredentials.ClientID)
-	values.Set("client_secret", a.clientCredentials.ClientSecret)
-	values.Set("scope", strings.Join(a.clientCredentials.Scopes, ","))
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.apiBaseURL+"/oauth/token", strings.NewReader(values.Encode()))
+	token, expiry, err := a.exchangeClientCredentials(ctx, a.clientCredentials)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	var resp oauthTokenResponse
-	if err := a.doJSON(req, &resp); err != nil {
-		return fmt.Errorf("linear: fetch client credentials token: %w", err)
-	}
-	if resp.AccessToken == "" {
-		return errors.New("linear: token response did not return access token")
-	}
-	if err := verifyGrantedScopes(a.clientCredentials.Scopes, resp.Scope); err != nil {
-		return err
-	}
-
-	var expiry time.Time
-	if resp.ExpiresIn > 0 {
-		expiry = a.now().Add(time.Duration(resp.ExpiresIn) * time.Second)
-	}
 	a.mu.Lock()
-	a.accessToken = resp.AccessToken
+	a.accessToken = token
 	a.tokenExpiry = expiry
 	a.mu.Unlock()
 	return nil
 }
 
+// exchangeClientCredentials performs the App-Actor Client Credentials grant and
+// verifies the granted scopes, returning the access token and its expiry. It is
+// shared by the single-install refresh and the per-tenant multi-tenant exchange.
+func (a *Adapter) exchangeClientCredentials(ctx context.Context, creds ClientCredentials) (string, time.Time, error) {
+	scopes := normalizeScopeList(creds.Scopes)
+	if len(scopes) == 0 {
+		scopes = append([]string(nil), defaultClientCredentialScopes...)
+	}
+	values := url.Values{}
+	values.Set("grant_type", "client_credentials")
+	values.Set("client_id", creds.ClientID)
+	values.Set("client_secret", creds.ClientSecret)
+	values.Set("scope", strings.Join(scopes, ","))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.apiBaseURL+"/oauth/token", strings.NewReader(values.Encode()))
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	var resp oauthTokenResponse
+	if err := a.doJSON(req, &resp); err != nil {
+		return "", time.Time{}, fmt.Errorf("linear: fetch client credentials token: %w", err)
+	}
+	if resp.AccessToken == "" {
+		return "", time.Time{}, errors.New("linear: token response did not return access token")
+	}
+	if err := verifyGrantedScopes(scopes, resp.Scope); err != nil {
+		return "", time.Time{}, err
+	}
+	var expiry time.Time
+	if resp.ExpiresIn > 0 {
+		expiry = a.now().Add(time.Duration(resp.ExpiresIn) * time.Second)
+	}
+	return resp.AccessToken, expiry, nil
+}
+
+// tenantToken resolves the access token for one Platform Tenant in multi-tenant
+// mode. A pre-exchanged installation AccessToken is used directly; otherwise the
+// adapter performs the lazy client-credentials exchange and caches the derived
+// token keyed by tenant (ADR-0001), reusing it until near expiry.
+func (a *Adapter) tenantToken(ctx context.Context, tenant string, cred LinearInstall) (string, error) {
+	if cred.AccessToken != "" {
+		return cred.AccessToken, nil
+	}
+	if cred.ClientCredentials.ClientID == "" || cred.ClientCredentials.ClientSecret == "" {
+		return "", errors.New("linear: install credential has neither access token nor client credentials")
+	}
+	a.tenantTokensMu.Lock()
+	cached := a.tenantTokens[tenant]
+	if cached != nil && cached.accessToken != "" && (cached.expiry.IsZero() || a.now().Before(cached.expiry.Add(-tokenRefreshBuffer))) {
+		token := cached.accessToken
+		a.tenantTokensMu.Unlock()
+		return token, nil
+	}
+	a.tenantTokensMu.Unlock()
+
+	token, expiry, err := a.exchangeClientCredentials(ctx, cred.ClientCredentials)
+	if err != nil {
+		return "", err
+	}
+	a.tenantTokensMu.Lock()
+	a.tenantTokens[tenant] = &tenantToken{accessToken: token, expiry: expiry}
+	a.tenantTokensMu.Unlock()
+	return token, nil
+}
+
+// resolveToken returns the bearer token for an outbound call to the given Platform
+// Tenant. Single-install uses the shared lazily-refreshed token; multi-tenant
+// re-fetches the durable install record from the store and resolves a per-tenant
+// derived token, so the post fails cleanly when the install record is gone.
+func (a *Adapter) resolveToken(ctx context.Context, tenant string) (string, error) {
+	if !a.multiTenant() {
+		if err := a.ensureToken(ctx); err != nil {
+			return "", err
+		}
+		a.mu.Lock()
+		token := a.accessToken
+		a.mu.Unlock()
+		return token, nil
+	}
+	if tenant == "" {
+		return "", errors.New("linear: thread organization is required")
+	}
+	install, err := a.installStore.Lookup(ctx, adapterName, tenant)
+	if err != nil {
+		return "", fmt.Errorf("linear: install lookup: %w", err)
+	}
+	cred, err := linearCredential(install.Credential)
+	if err != nil {
+		return "", err
+	}
+	return a.tenantToken(ctx, tenant, cred)
+}
+
+func linearCredential(credential any) (LinearInstall, error) {
+	switch cred := credential.(type) {
+	case LinearInstall:
+		return cred, nil
+	case *LinearInstall:
+		if cred == nil {
+			return LinearInstall{}, errors.New("linear: install credential is nil")
+		}
+		return *cred, nil
+	default:
+		return LinearInstall{}, fmt.Errorf("linear: install credential is not linear.LinearInstall, got %T", credential)
+	}
+}
+
 func (a *Adapter) fetchIdentity(ctx context.Context) (linearIdentity, error) {
+	a.mu.Lock()
+	token := a.accessToken
+	a.mu.Unlock()
 	var resp graphQLResponse[identityData]
-	if err := a.callGraphQL(ctx, `query ViewerIdentity { viewer { id name displayName organization { id } } }`, nil, &resp); err != nil {
+	if err := a.callGraphQLWithToken(ctx, token, `query ViewerIdentity { viewer { id name displayName organization { id } } }`, nil, &resp); err != nil {
 		return linearIdentity{}, err
 	}
 	if err := resp.firstError(); err != nil {
@@ -572,7 +799,7 @@ func (a *Adapter) createAgentActivity(ctx context.Context, thread threadPayload,
 	}
 	variables := map[string]any{"input": input}
 	var resp graphQLResponse[agentActivityData]
-	if err := a.callGraphQL(ctx, `mutation AgentActivityCreate($input: AgentActivityCreateInput!) { agentActivityCreate(input: $input) { success agentActivity { id } } }`, variables, &resp); err != nil {
+	if err := a.callGraphQL(ctx, thread.Organization, `mutation AgentActivityCreate($input: AgentActivityCreateInput!) { agentActivityCreate(input: $input) { success agentActivity { id } } }`, variables, &resp); err != nil {
 		return nil, err
 	}
 	if err := resp.firstError(); err != nil {
@@ -588,10 +815,18 @@ func (a *Adapter) createAgentActivity(ctx context.Context, thread threadPayload,
 	return &chat.SentMessage{ID: resp.Data.AgentActivityCreate.AgentActivity.ID, ThreadID: id, Raw: resp.Data.AgentActivityCreate}, nil
 }
 
-func (a *Adapter) callGraphQL(ctx context.Context, query string, variables any, dest any) error {
-	if err := a.ensureToken(ctx); err != nil {
+// callGraphQL resolves the per-tenant bearer token for the given Platform Tenant
+// and issues the GraphQL request. Single-install resolves the shared lazily
+// refreshed token; multi-tenant resolves a per-tenant derived token.
+func (a *Adapter) callGraphQL(ctx context.Context, tenant string, query string, variables any, dest any) error {
+	token, err := a.resolveToken(ctx, tenant)
+	if err != nil {
 		return err
 	}
+	return a.callGraphQLWithToken(ctx, token, query, variables, dest)
+}
+
+func (a *Adapter) callGraphQLWithToken(ctx context.Context, token string, query string, variables any, dest any) error {
 	body, err := json.Marshal(graphQLRequest{Query: query, Variables: variables})
 	if err != nil {
 		return err
@@ -600,9 +835,6 @@ func (a *Adapter) callGraphQL(ctx context.Context, query string, variables any, 
 	if err != nil {
 		return err
 	}
-	a.mu.Lock()
-	token := a.accessToken
-	a.mu.Unlock()
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
 	return a.doJSON(req, dest)

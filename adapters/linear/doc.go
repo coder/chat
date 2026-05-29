@@ -71,9 +71,47 @@
 // available today (a dedicated cross-adapter Observation Hook is ADR 0010, out of
 // scope here).
 //
+// # Multi-tenant installs (ADR 0006)
+//
+// Multi-tenant is opt-in. By default the adapter is a Single-Install Adapter on
+// static App-Actor Client Credentials serving one org, and that path is unchanged.
+// Supplying Options.InstallStore instead of a WebhookSecret and ClientCredentials
+// selects Multi-Tenant Adapter mode, where one deployment serves many Linear orgs.
+// Supplying a static webhook secret or client credentials alongside an install
+// store, or supplying none of them, is a construction error.
+//
+// The InstallStore is application-implemented: the runtime defines the contract
+// (chat.InstallStore) and the app brings its own install storage, encryption, and
+// OAuth installation flow. The OAuth installation web flow (authorize redirect,
+// callback, token exchange, install button) and account linking / Application
+// Identity stay app-owned and out of the adapter; the OAuth web flow remains
+// deferred here.
+//
+// Linear signs webhooks per install and authorizes per org, so both the
+// verification material and the reply credentials come from the install record.
+// During webhook handling the adapter reads organizationId from the unverified
+// body for routing only, calls InstallStore.Lookup keyed by that Platform Tenant,
+// then re-validates by verifying the Linear-Signature with the install record's
+// webhook secret before any side effect. A chat.ErrInstallNotFound from Lookup
+// (e.g. an uninstalled org) is an Ignored Event (acknowledged, not dispatched);
+// any other Lookup error is a transport failure the platform may retry. Lookup
+// runs per webhook; the adapter does not cache install records.
+//
+// The install credential rides as the adapter-specific linear.LinearInstall
+// payload on chat.Install.Credential (a Platform Escape Hatch for credentials):
+// the per-install webhook secret plus the per-org App-Actor Client Credentials (or
+// a pre-exchanged installation access token), and an optional app actor id for
+// tenant-correct self-filtering. Derived access tokens keep ADR-0001's lazy
+// in-process refresh, but the cache is keyed by Platform Tenant; a revoked install
+// stops resolving once its record is gone. Thread Handle reconstruction
+// (out-of-webhook posting) resolves the same way, keyed by the organizationId
+// decoded from the opaque Thread ID, and fails cleanly when the install record is
+// gone.
+//
 // # Still out of scope
 //
-// Multi-tenant OAuth installs (ADR 0006), token streaming (ADR 0011), Markdown
+// Multi-tenant OAuth installs (ADR 0006) reuse the per-org credential resolution
+// above; the OAuth installation *web flow*, token streaming (ADR 0011), Markdown
 // conversion, reactions, edit/delete, files, repository-suggestion ranking, and
 // issue-workflow automation remain deferred; the latter are reachable through the
 // GraphQL escape hatch. This is an app-owned actor, not a personal-API-key or
