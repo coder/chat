@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted (implementation staged: the `queue` strategy is implemented as the `DispatchDeferred` companion; `burst`, `debounce`, `concurrent`, `lockScope`, and force/steerability remain proposed and unbuilt).
 
 ## Context
 

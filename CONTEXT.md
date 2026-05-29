@@ -161,6 +161,18 @@ _Avoid_: Adapter dispatch, job processing
 The `context.Context` used for runtime dispatch and handler execution.
 _Avoid_: Background work context
 
+**Dispatch Mode**:
+Whether the routed handler runs before or after the adapter acknowledges the platform: synchronous by default, or deferred so the platform is acknowledged first.
+_Avoid_: Concurrency Strategy, async flag
+
+**Ack-Then-Work**:
+The deferred-dispatch contract where the adapter acknowledges within the platform deadline after the synchronous prelude, then the handler runs on the **Detached Work Context**.
+_Avoid_: Synchronous handler, fire-and-forget goroutine
+
+**Detached Work Context**:
+A runtime-derived context that outlives the inbound request so a deferred handler keeps working after acknowledgement; bounded by a detach timeout and cancelled by **Runtime Shutdown**.
+_Avoid_: Request context, context.Background()
+
 **Accepted Event**:
 A verified and normalized inbound event that the runtime has taken responsibility for, regardless of handler success.
 _Avoid_: Successful handler, retriable event
@@ -347,15 +359,15 @@ _Avoid_: Full platform schema, strict external SDK model
 - Default **Runtime Options** use a 24 hour dedupe TTL and a 2 minute **Thread Lock** TTL.
 - **Runtime Options** TTL values must be positive.
 - **Runtime Options** include a **Concurrency Strategy** that defaults to drop.
-- The MVP only implements the drop **Concurrency Strategy**, while keeping names compatible with future queue, debounce, force, or concurrent strategies.
+- The runtime implements the drop (default) and queue **Concurrency Strategy** values; burst, debounce, concurrent, lock-scope, and force/steerability remain reserved for future slices.
 - A **Thread Lock** must not drop distinct **Webhook Events** for the same **Thread**; it only coordinates their processing.
 - A **Thread Lock** is represented as a **Lock Lease** with an ownership token.
 - Releasing or extending a **Lock Lease** must verify the ownership token so an expired holder cannot affect a newer holder.
 - A **Lock Conflict** is acknowledged to the platform by default and recorded as unhandled runtime contention.
 - An adapter accepts and normalizes a **Webhook Event**, but **Runtime Dispatch** decides which handler runs.
 - The **Linear App-Actor Slice** preserves synchronous **Runtime Dispatch** for MVP; long-running Linear agent work should post an early **Agent Activity Thought** and enqueue follow-up work in application code.
-- The initial **Go Chat Runtime** performs **Runtime Dispatch** synchronously while preserving a boundary for future deferred or queued execution.
-- The synchronous **Dispatch Context** comes from the inbound webhook request.
+- **Runtime Dispatch** defaults to synchronous (**Dispatch Mode** sync); a deferred **Dispatch Mode** (**Ack-Then-Work**) is available opt-in and runs the handler on the **Detached Work Context** after acknowledgement.
+- The synchronous **Dispatch Context** comes from the inbound webhook request; under deferred **Dispatch Mode** the **Thread Lock** is held across the detached work and refreshed before its lease expires.
 - Runtime locks must be released when **Dispatch Context** is cancelled or handler execution exits.
 - **Runtime State** mutations performed during synchronous dispatch respect the caller's **Dispatch Context** and fail when it is cancelled.
 - An **Accepted Event** is acknowledged to the platform by default even when its application handler fails.
