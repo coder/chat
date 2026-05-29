@@ -12,7 +12,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +39,9 @@ type Options struct {
 	SignatureTolerance     time.Duration
 	DisableNativeEphemeral bool
 	Logger                 *slog.Logger
+	// Observer receives adapter-facing observations (ObsAdapterCall, ObsRateLimit);
+	// it is adapter-owned wiring, not on the core Adapter interface. Nil is a no-op.
+	Observer chat.Observer
 }
 
 type Adapter struct {
@@ -51,6 +56,7 @@ type Adapter struct {
 	signatureTolerance     time.Duration
 	disableNativeEphemeral bool
 	logger                 *slog.Logger
+	observer               chat.Observer
 }
 
 func New(ctx context.Context, opts Options) (*Adapter, error) {
@@ -86,6 +92,10 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	observer := opts.Observer
+	if observer == nil {
+		observer = noopObserver{}
+	}
 	return &Adapter{
 		signingSecret:          opts.SigningSecret,
 		botToken:               opts.BotToken,
@@ -98,6 +108,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		signatureTolerance:     tolerance,
 		disableNativeEphemeral: opts.DisableNativeEphemeral,
 		logger:                 logger,
+		observer:               observer,
 	}, nil
 }
 
@@ -172,6 +183,13 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			return
 		}
 
+		// Commands and interactivity arrive as x-www-form-urlencoded; event callbacks
+		// arrive as JSON. Branch only after signature verification.
+		if isFormContentType(r.Header.Get("Content-Type")) {
+			a.handleFormWebhook(w, r, dispatch, body)
+			return
+		}
+
 		var envelope eventEnvelope
 		if err := json.Unmarshal(body, &envelope); err != nil {
 			http.Error(w, "invalid slack payload", http.StatusBadRequest)
@@ -198,6 +216,54 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			w.WriteHeader(http.StatusOK)
 		}
 	})
+}
+
+func isFormContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/x-www-form-urlencoded"
+}
+
+// handleFormWebhook decodes a slash command or interactivity payload from the
+// verified form body and dispatches it through the same DispatchFunc seam as
+// messages. The empty 200 is the Ack-Then-Work ack within Slack's 3-second budget.
+func (a *Adapter) handleFormWebhook(w http.ResponseWriter, r *http.Request, dispatch chat.DispatchFunc, body []byte) {
+	form, err := url.ParseQuery(string(body))
+	if err != nil {
+		http.Error(w, "invalid slack form payload", http.StatusBadRequest)
+		return
+	}
+
+	switch {
+	case form.Get("payload") != "":
+		event, ok, err := a.normalizeInteraction(r, form.Get("payload"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if ok {
+			if err := dispatch(r.Context(), event); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	case form.Get("command") != "":
+		event, err := a.normalizeCommand(r, form)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := dispatch(r.Context(), event); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	default:
+		http.Error(w, "unsupported slack form payload", http.StatusBadRequest)
+	}
 }
 
 func (a *Adapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, error) {
@@ -463,6 +529,8 @@ func slackMessageFields(msg chat.PostableMessage) (slackMessage, error) {
 }
 
 func (a *Adapter) call(ctx context.Context, method string, payload any, dest any) error {
+	a.observer.Event(ctx, chat.ObsAdapterCall, chat.AdapterAttr(adapterName))
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("slack: encode %s request: %w", method, err)
@@ -479,6 +547,10 @@ func (a *Adapter) call(ctx context.Context, method string, payload any, dest any
 		return fmt.Errorf("slack: %s request: %w", method, err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusTooManyRequests {
+		a.observer.Event(ctx, chat.ObsRateLimit, chat.AdapterAttr(adapterName))
+		return fmt.Errorf("slack: %s status %d", method, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return fmt.Errorf("slack: %s status %d", method, resp.StatusCode)
 	}
@@ -577,6 +649,7 @@ type postMessagePayload struct {
 	Text         string `json:"text,omitempty"`
 	MarkdownText string `json:"markdown_text,omitempty"`
 	Mrkdwn       *bool  `json:"mrkdwn,omitempty"`
+	Blocks       any    `json:"blocks,omitempty"`
 }
 
 type postMessageResponse struct {

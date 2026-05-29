@@ -34,8 +34,14 @@ quick status map for readers familiar with Vercel Chat SDK:
 | Ephemeral messages | Slack native ephemeral plus explicit DM fallback |
 | Thread handle reconstruction | Implemented with `Chat.Thread` |
 | AI streaming responses | Not yet implemented |
-| Cards, actions, modals, and native rich UI | Not yet implemented |
-| Slash commands and pattern handlers | Not yet implemented |
+| Slash commands | Implemented as `OnCommand` Command Events (Slack) |
+| Interactive components (buttons, menus) | Implemented as `OnInteraction` block_actions (Slack) |
+| Native rich content (Block Kit) | Implemented as `NativeContentPoster` Optional Capability (Slack) |
+| Modal open (`views.open`) | Implemented as a Slack adapter Optional Capability |
+| Modal `view_submission` synchronous response | Deferred (incompatible with ack-then-work) |
+| Cards, JSX-style cards, native payload builders | Not yet implemented |
+| Pattern handlers | Not yet implemented |
+| Observability metrics/tracing | Optional `Observer` seam, no-op default, no OTel dependency in core |
 | Message history and AI-message conversion helpers | Not yet implemented |
 | Multiple production adapters | Not yet implemented |
 | Middleware | Not yet implemented |
@@ -362,6 +368,54 @@ if err := ev.Thread.Subscribe(ctx); err != nil {
 Replying successfully to a new mention does not subscribe the thread. A
 subscription lasts until explicit unsubscribe.
 
+### Command And Interaction Events
+
+A slash command and a button click are **Events**, not **Messages**. They ride the
+same dispatch spine (dedupe by Event Identity, Thread Lock, self-filtering,
+lock-conflict acknowledge-and-drop) but route to their own single-slot hooks:
+
+- `OnCommand(func(ctx, *chat.CommandEvent) error)` for Command Events (Slack slash
+  commands). Command-ness takes precedence over subscription state: a command in a
+  subscribed thread still routes to `OnCommand`, never to `OnSubscribedMessage`. A
+  command does not auto-subscribe its thread.
+- `OnInteraction(func(ctx, *chat.InteractionEvent) error)` for Interaction Events.
+  This slice handles Slack `block_actions` (button clicks, menu selections).
+
+Both hooks are single-slot and no-op-when-unset, like the message hooks; an unset
+handler is still acknowledged. The platform ack is adapter-owned: the Slack adapter
+returns an empty 2xx within Slack's 3-second budget and preserves `response_url` /
+`trigger_id` on the `Raw` Platform Escape Hatch. Long command/interaction work uses
+the same `DispatchDeferred` ack-then-work primitive as messages (ADR 0002); bots
+expecting commands or clicks mid-conversation should select the `queue`
+Concurrency Strategy.
+
+Native command/interaction responses and Block Kit content are NOT added to
+Postable Message, which stays Plain Text + Portable Markdown. They are reached
+deliberately through typed Adapter Access:
+
+- `chat.NativeContentPoster.PostNative` posts opaque Block Kit blocks. A
+  `NativeContent` whose adapter does not match the target is an error, never a
+  silent portable downgrade.
+- The Slack adapter's `OpenModal` opens a modal via `views.open` using a preserved
+  `trigger_id`. The synchronous modal `view_submission` response is deferred
+  because it is incompatible with ack-then-work.
+- The Slack adapter's `RespondURL` posts to a preserved `response_url`.
+
+### Observability
+
+Runtime Observation defaults to structured `slog`, unchanged. An optional
+`WithObserver(Observer)` seam adds counter-style point events (dedupe hit, lock
+conflict, ignored-event-by-reason, handler error, lock-release failure, adapter
+call, rate limit) and a per-dispatch span with a terminal outcome
+(`handled`, `ignored`, `dropped-lock-conflict`, `duplicate`, `error`). The default
+is a no-op Observer, so an unconfigured runtime behaves exactly as before. The core
+imports no OpenTelemetry, Prometheus, or statsd; attribute keys are a closed,
+low-cardinality set (`adapter`, `route`, `reason`, `outcome`, `tenant`) and never
+carry Thread ID, message text, or raw actor IDs. Observer calls are panic-safe: a
+broken Observer can never fail an Accepted Event or alter acknowledgement. Under
+deferred dispatch the span follows the Detached Work Context so ack-then-work
+latency is measured to handler completion.
+
 ## Dispatch And Acknowledgement
 
 MVP dispatch is synchronous and uses the inbound webhook request context.
@@ -578,13 +632,20 @@ These are not bugs in the MVP:
 - no public proactive `OpenDM`, except adapter behavior needed for explicit
   ephemeral fallback
 - no pattern handlers
-- no slash commands
-- no Slack interactions, buttons, shortcuts, or Block Kit workflow
 - no middleware
 - no message history APIs
 - no thread application state APIs
-- no rich cards, JSX cards, modals, files, or native rich payload builders
-- no edit, delete, reaction, or other outbound mutation APIs
+- no JSX cards, files, or typed Block Kit / Adaptive Card payload builders
+  (native Block Kit content ships as an opaque payload via `NativeContentPoster`)
+- no Slack shortcuts or Block Kit workflow steps (block_actions buttons and menus
+  are routed as Interaction Events)
+- no synchronous modal `view_submission` response (modal-open via `views.open`
+  ships; the synchronous `response_action` is incompatible with ack-then-work and
+  is deferred)
+- no edit, delete, reaction, or other outbound mutation APIs beyond what a native
+  interaction response needs
+- no bundled metrics framework, exporters, or scrape endpoint (an optional no-op
+  `Observer` seam is provided; OpenTelemetry stays out of the core import graph)
 - no queue, debounce, force, or concurrent lock-conflict strategies
 - no built-in HTTP server or router integrations
 - no adapter marketplace/package conventions

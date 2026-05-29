@@ -59,6 +59,7 @@ type config struct {
 	state    State
 	adapters []Adapter
 	logger   *slog.Logger
+	observer Observer
 	options  RuntimeOptions
 }
 
@@ -90,11 +91,14 @@ type Chat struct {
 	state    State
 	adapters map[string]Adapter
 	logger   *slog.Logger
+	observer Observer
 	options  RuntimeOptions
 
 	handlersMu        sync.RWMutex
 	newMention        MessageHandler
 	subscribedMessage MessageHandler
+	command           CommandHandler
+	interaction       InteractionHandler
 	acceptancesMu     sync.Mutex
 	eventAcceptances  map[string]*eventAcceptance
 
@@ -121,8 +125,9 @@ type eventAcceptance struct {
 
 func New(ctx context.Context, opts ...Option) (*Chat, error) {
 	cfg := config{
-		logger:  slog.Default(),
-		options: DefaultRuntimeOptions(),
+		logger:   slog.Default(),
+		observer: noopObserver{},
+		options:  DefaultRuntimeOptions(),
 	}
 	for _, opt := range opts {
 		if opt == nil {
@@ -139,6 +144,9 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 	if cfg.logger == nil {
 		return nil, errors.New("chat: logger is required")
 	}
+	if cfg.observer == nil {
+		cfg.observer = noopObserver{}
+	}
 	if err := validateRuntimeOptions(cfg.options); err != nil {
 		return nil, err
 	}
@@ -148,6 +156,7 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		state:            cfg.state,
 		adapters:         map[string]Adapter{},
 		logger:           cfg.logger,
+		observer:         cfg.observer,
 		options:          cfg.options,
 		eventAcceptances: map[string]*eventAcceptance{},
 		baseCtx:          baseCtx,
@@ -220,6 +229,26 @@ func (c *Chat) OnSubscribedMessage(handler MessageHandler) {
 	c.handlersMu.Lock()
 	defer c.handlersMu.Unlock()
 	c.subscribedMessage = handler
+}
+
+// OnCommand installs or atomically replaces the single command handler. A Command
+// Event routes here and never to the message hooks, even in a Subscribed Thread.
+// This intentionally differs from Vercel Chat SDK's multiple-handler hooks.
+func (c *Chat) OnCommand(handler CommandHandler) {
+	assert(c != nil, "OnCommand called on nil runtime")
+	c.handlersMu.Lock()
+	defer c.handlersMu.Unlock()
+	c.command = handler
+}
+
+// OnInteraction installs or atomically replaces the single interaction handler. An
+// Interaction Event routes here and never to the message hooks. This intentionally
+// differs from Vercel Chat SDK's multiple-handler hooks.
+func (c *Chat) OnInteraction(handler InteractionHandler) {
+	assert(c != nil, "OnInteraction called on nil runtime")
+	c.handlersMu.Lock()
+	defer c.handlersMu.Unlock()
+	c.interaction = handler
 }
 
 func (c *Chat) Webhook(adapterName string) (http.Handler, error) {
@@ -334,14 +363,19 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event) error {
 	if work.needsLock {
 		lease, outcome := c.queueForLock(ctx, work.scope, event)
 		if outcome != acquireHeld {
+			c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 			return nil
 		}
 		work.lease = lease
 	}
 	defer c.releaseLock(ctx, work.lease, event.ThreadID)
-	if err := work.handler(ctx, work.msgEvent); err != nil {
+	if err := work.run(ctx); err != nil {
 		c.logger.Error("chat handler failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "route", work.route)
+		c.safeEvent(ctx, ObsHandlerError, AdapterAttr(event.Adapter), RouteAttr(work.route))
+		c.safeEnd(work.span, OutcomeError, RouteAttr(work.route))
+		return nil
 	}
+	c.safeEnd(work.span, OutcomeHandled, RouteAttr(work.route))
 	return nil
 }
 
@@ -360,23 +394,35 @@ func (c *Chat) dispatchDeferred(ctx context.Context, event *Event) error {
 // preludeWork carries the routing decision from the prelude to the dispatch tail
 // for a routed event.
 type preludeWork struct {
-	event   *Event
-	lease   LockLease
-	handler MessageHandler
-	route   string
-	scope   string
+	event *Event
+	lease LockLease
+	// run invokes the routed handler with its typed input (MessageEvent,
+	// CommandEvent, or InteractionEvent); keeping it handler-type agnostic lets the
+	// dispatch tails stay identical across Event kinds.
+	run   func(context.Context) error
+	route string
+	scope string
 	// needsLock is true when the prelude registered the event as pending under the
 	// queue strategy without holding the lock; the tail must wait for and acquire
 	// it before running the handler.
 	needsLock bool
-	msgEvent  *MessageEvent
+	// span is opened in the prelude and closed by the tail, so deferred dispatch
+	// measures Ack-Then-Work latency to handler completion.
+	span DispatchSpan
 }
 
-// prelude runs the synchronous portion of dispatch before ack: validate, dedupe,
-// acquire the Thread Lock, validate the thread id, filter nil/self messages, and
-// route. A resolved event (duplicate, dropped Lock Conflict, ignored, unrouted)
-// returns resolved=true with no work. A failed prelude returns the error and,
-// as today, leaves the event un-marked so a retry is not deduped away.
+// prelude runs the synchronous portion of dispatch before ack: open the dispatch
+// span, validate, dedupe, acquire the Thread Lock, validate the thread id, filter
+// nil/self events, and route. A resolved event (duplicate, dropped Lock Conflict,
+// ignored, unrouted) returns resolved=true with no work and closes the span with
+// its terminal outcome. A failed prelude returns the error and, as today, leaves
+// the event un-marked so a retry is not deduped away; its span is closed with the
+// error outcome.
+//
+// Routing precedence: command-ness and interaction-ness are Event kinds and take
+// precedence over subscription state, so a command/interaction in a Subscribed
+// Thread still routes to its own hook, never to the message hooks. Only an Event
+// with no Message, Command, or Interaction payload remains an Ignored Event.
 //
 // Under the queue strategy a Lock Conflict on a routed event does not block: the
 // event is registered as pending (no lease) and returned with needsLock=true so
@@ -385,9 +431,16 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 	if err := validateEvent(event); err != nil {
 		return preludeWork{}, true, err
 	}
+
+	spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
+	ctx = spanCtx
+
 	acceptance, primary := c.beginEventAcceptance(event.ID)
 	if !primary {
-		return preludeWork{}, true, waitEventAcceptance(ctx, acceptance)
+		// The primary owns the terminal observation for the shared Event Identity.
+		err := waitEventAcceptance(ctx, acceptance)
+		c.safeEnd(span, OutcomeDuplicate)
+		return preludeWork{}, true, err
 	}
 	finish := func(err error) error {
 		c.finishEventAcceptance(event.ID, acceptance, err)
@@ -399,26 +452,41 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 			return false, finish(err)
 		}
 		c.finishEventAcceptance(event.ID, acceptance, nil)
+		if !firstSeen {
+			c.safeEvent(ctx, ObsDedupeHit, AdapterAttr(event.Adapter))
+		}
 		return firstSeen, nil
 	}
 
 	adapter, ok := c.adapters[event.Adapter]
 	if !ok {
-		return preludeWork{}, true, finish(fmt.Errorf("chat: event adapter %q is not registered", event.Adapter))
+		err := finish(fmt.Errorf("chat: event adapter %q is not registered", event.Adapter))
+		c.safeEnd(span, OutcomeError)
+		return preludeWork{}, true, err
 	}
 
 	scope := string(event.ThreadID)
 	lease, acquired, err := c.state.AcquireLock(ctx, scope, c.options.ThreadLockTTL)
 	if err != nil {
-		return preludeWork{}, true, finish(fmt.Errorf("chat: acquire thread lock: %w", err))
+		err := finish(fmt.Errorf("chat: acquire thread lock: %w", err))
+		c.safeEnd(span, OutcomeError)
+		return preludeWork{}, true, err
 	}
 	queued := false
 	if !acquired {
 		if c.options.Concurrency != ConcurrencyQueue {
-			if accepted, err := acceptEvent(); err != nil || !accepted {
+			accepted, err := acceptEvent()
+			if err != nil {
+				c.safeEnd(span, OutcomeError)
 				return preludeWork{}, true, err
 			}
+			if !accepted {
+				c.safeEnd(span, OutcomeDuplicate)
+				return preludeWork{}, true, nil
+			}
 			c.logger.Info("chat lock conflict dropped", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
+			c.safeEvent(ctx, ObsLockConflict, AdapterAttr(event.Adapter))
+			c.safeEnd(span, OutcomeDroppedLockConflict)
 			return preludeWork{}, true, nil
 		}
 		queued = true
@@ -432,47 +500,118 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 		}
 		c.releaseLock(ctx, lease, event.ThreadID)
 	}
+	// resolveError releases the lease and closes the span for a failed prelude.
+	resolveError := func(err error) (preludeWork, bool, error) {
+		releaseOnResolve()
+		c.safeEnd(span, OutcomeError)
+		return preludeWork{}, true, finish(err)
+	}
+	// resolveIgnored accepts (deduping), logs, and closes the span for an Ignored
+	// Event; a duplicate closes as OutcomeDuplicate instead.
+	resolveIgnored := func(reason, logMsg string, level slog.Level) (preludeWork, bool, error) {
+		releaseOnResolve()
+		accepted, err := acceptEvent()
+		if err != nil {
+			c.safeEnd(span, OutcomeError)
+			return preludeWork{}, true, err
+		}
+		if !accepted {
+			c.safeEnd(span, OutcomeDuplicate)
+			return preludeWork{}, true, nil
+		}
+		c.logger.Log(ctx, level, logMsg, "adapter", event.Adapter, "event_id", event.ID)
+		c.safeEvent(ctx, ObsIgnoredEvent, AdapterAttr(event.Adapter), ReasonAttr(reason))
+		c.safeEnd(span, OutcomeIgnored, ReasonAttr(reason))
+		return preludeWork{}, true, nil
+	}
 
 	ref, err := adapter.ValidateThreadID(event.ThreadID)
 	if err != nil {
-		releaseOnResolve()
-		return preludeWork{}, true, finish(fmt.Errorf("chat: validate event thread id: %w", err))
+		return resolveError(fmt.Errorf("chat: validate event thread id: %w", err))
 	}
 	thread := c.newThread(adapter, ref)
-	if event.Message == nil {
-		releaseOnResolve()
-		if accepted, err := acceptEvent(); err != nil || !accepted {
-			return preludeWork{}, true, err
+	bot := adapter.BotActor()
+
+	// Non-message routing precedence: a Command Event or Interaction Event routes
+	// to its own single-slot hook regardless of subscription state. Self-issued
+	// commands/interactions are filtered like self messages so a bot cannot loop.
+	switch {
+	case event.Command != nil:
+		if isSelfActor(event.Command.Actor, bot) {
+			return resolveIgnored("self-command", "chat ignored self command", slog.LevelDebug)
 		}
-		c.logger.Info("chat ignored non-message event", "adapter", event.Adapter, "event_id", event.ID)
-		return preludeWork{}, true, nil
+		c.handlersMu.RLock()
+		handler := c.command
+		c.handlersMu.RUnlock()
+		if handler == nil {
+			return resolveIgnored("no-command-handler", "chat ignored command with no handler", slog.LevelInfo)
+		}
+		cmdEvent := &CommandEvent{Event: event, Thread: thread, Command: event.Command}
+		return c.routedWork(span, event, lease, scope, queued, "command", func(ctx context.Context) error {
+			return handler(ctx, cmdEvent)
+		}, acceptEvent, releaseOnResolve)
+
+	case event.Interaction != nil:
+		if isSelfActor(event.Interaction.Actor, bot) {
+			return resolveIgnored("self-interaction", "chat ignored self interaction", slog.LevelDebug)
+		}
+		c.handlersMu.RLock()
+		handler := c.interaction
+		c.handlersMu.RUnlock()
+		if handler == nil {
+			return resolveIgnored("no-interaction-handler", "chat ignored interaction with no handler", slog.LevelInfo)
+		}
+		intEvent := &InteractionEvent{Event: event, Thread: thread, Interaction: event.Interaction}
+		return c.routedWork(span, event, lease, scope, queued, "interaction", func(ctx context.Context) error {
+			return handler(ctx, intEvent)
+		}, acceptEvent, releaseOnResolve)
 	}
-	if isSelfMessage(event.Message.Author, adapter.BotActor()) {
-		releaseOnResolve()
-		if accepted, err := acceptEvent(); err != nil || !accepted {
-			return preludeWork{}, true, err
-		}
-		c.logger.Debug("chat ignored self message", "adapter", event.Adapter, "event_id", event.ID)
-		return preludeWork{}, true, nil
+
+	if event.Message == nil {
+		return resolveIgnored("non-message", "chat ignored non-message event", slog.LevelInfo)
+	}
+	if isSelfActor(event.Message.Author, bot) {
+		return resolveIgnored("self-message", "chat ignored self message", slog.LevelDebug)
 	}
 
 	handler, route, err := c.route(ctx, event)
 	if err != nil {
-		releaseOnResolve()
-		return preludeWork{}, true, finish(err)
+		return resolveError(err)
 	}
 	if handler == nil {
-		releaseOnResolve()
-		if accepted, err := acceptEvent(); err != nil || !accepted {
-			return preludeWork{}, true, err
-		}
-		c.logger.Info("chat ignored unrouted message", "adapter", event.Adapter, "event_id", event.ID)
-		return preludeWork{}, true, nil
+		return resolveIgnored("unrouted", "chat ignored unrouted message", slog.LevelInfo)
 	}
 
-	if accepted, err := acceptEvent(); err != nil || !accepted {
+	msgEvent := &MessageEvent{Event: event, Thread: thread, Message: event.Message}
+	return c.routedWork(span, event, lease, scope, queued, route, func(ctx context.Context) error {
+		return handler(ctx, msgEvent)
+	}, acceptEvent, releaseOnResolve)
+}
+
+// routedWork accepts a routed event (deduping), registers it as a queue waiter
+// when it is waiting for the lock, and builds the handler-agnostic preludeWork. A
+// duplicate or a dedupe error resolves here instead.
+func (c *Chat) routedWork(
+	span DispatchSpan,
+	event *Event,
+	lease LockLease,
+	scope string,
+	queued bool,
+	route string,
+	run func(context.Context) error,
+	acceptEvent func() (bool, error),
+	releaseOnResolve func(),
+) (preludeWork, bool, error) {
+	accepted, err := acceptEvent()
+	if err != nil {
 		releaseOnResolve()
+		c.safeEnd(span, OutcomeError)
 		return preludeWork{}, true, err
+	}
+	if !accepted {
+		releaseOnResolve()
+		c.safeEnd(span, OutcomeDuplicate)
+		return preludeWork{}, true, nil
 	}
 
 	if queued {
@@ -482,15 +621,11 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 	return preludeWork{
 		event:     event,
 		lease:     lease,
-		handler:   handler,
+		run:       run,
 		route:     route,
 		scope:     scope,
 		needsLock: queued,
-		msgEvent: &MessageEvent{
-			Event:   event,
-			Thread:  thread,
-			Message: event.Message,
-		},
+		span:      span,
 	}, false, nil
 }
 
@@ -510,6 +645,8 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 		if work.needsLock {
 			lease, outcome := c.queueForLock(tailCtx, work.scope, work.event)
 			if outcome != acquireHeld {
+				// A superseded or abandoned waiter never runs the handler.
+				c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 				return
 			}
 			work.lease = lease
@@ -518,7 +655,7 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 		c.logger.Info("chat deferred dispatch started", "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route)
 
 		stopRefresh, leaseLost := c.startLockRefresh(tailCtx, work.lease, work.event.ThreadID)
-		err := work.handler(tailCtx, work.msgEvent)
+		err := work.run(tailCtx)
 		stopRefresh()
 
 		if err != nil {
@@ -527,6 +664,10 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 			} else {
 				c.logger.Error("chat handler failed", "error", err, "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route, "mode", "deferred")
 			}
+			c.safeEvent(tailCtx, ObsHandlerError, AdapterAttr(work.event.Adapter), RouteAttr(work.route))
+			c.safeEnd(work.span, OutcomeError, RouteAttr(work.route))
+		} else {
+			c.safeEnd(work.span, OutcomeHandled, RouteAttr(work.route))
 		}
 
 		// A failed release is expected (lease gone) when the context was cancelled
@@ -687,8 +828,10 @@ func (c *Chat) queuePollInterval() time.Duration {
 func (c *Chat) releaseLock(ctx context.Context, lease LockLease, threadID ThreadID) {
 	if released, err := c.state.ReleaseLock(context.WithoutCancel(ctx), lease); err != nil {
 		c.logger.Error("chat release thread lock failed", "error", err, "thread_id", threadID)
+		c.safeEvent(ctx, ObsLockReleaseFailed)
 	} else if !released {
 		c.logger.Warn("chat thread lock was not released", "thread_id", threadID)
+		c.safeEvent(ctx, ObsLockReleaseFailed)
 	}
 }
 
@@ -698,11 +841,13 @@ func (c *Chat) releaseLock(ctx context.Context, lease LockLease, threadID Thread
 func (c *Chat) releaseTailLock(ctx context.Context, lease LockLease, threadID ThreadID, benign bool) {
 	if released, err := c.state.ReleaseLock(context.WithoutCancel(ctx), lease); err != nil {
 		c.logger.Error("chat release thread lock failed", "error", err, "thread_id", threadID)
+		c.safeEvent(ctx, ObsLockReleaseFailed)
 	} else if !released {
 		if benign {
 			c.logger.Debug("chat thread lock was not released", "thread_id", threadID)
 		} else {
 			c.logger.Warn("chat thread lock was not released", "thread_id", threadID)
+			c.safeEvent(ctx, ObsLockReleaseFailed)
 		}
 	}
 }
@@ -791,9 +936,11 @@ func adapterNameFromThreadID(id ThreadID) (string, error) {
 	return name, nil
 }
 
-func isSelfMessage(author Actor, bot Actor) bool {
-	return author.BotKind == BotBot &&
-		author.Adapter == bot.Adapter &&
-		author.Tenant == bot.Tenant &&
-		author.ID == bot.ID
+// isSelfActor reports whether actor is the adapter's own bot, used to filter
+// self messages, self commands, and self interactions so a bot cannot loop.
+func isSelfActor(actor Actor, bot Actor) bool {
+	return actor.BotKind == BotBot &&
+		actor.Adapter == bot.Adapter &&
+		actor.Tenant == bot.Tenant &&
+		actor.ID == bot.ID
 }

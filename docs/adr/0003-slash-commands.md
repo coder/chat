@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -69,7 +69,8 @@ For native command responses, the handler reaches the adapter deliberately throu
 ```go
 slackAdapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
 if ok {
-    _ = slackAdapter.RespondEphemeral(ctx, ev.Command.Raw, chat.Text("queued"))
+    // RespondURL posts to the preserved response_url (ephemeral by default).
+    _ = slackAdapter.RespondURL(ctx, ev.Command.Raw, chat.Text("queued"))
 }
 ```
 

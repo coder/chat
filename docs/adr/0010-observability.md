@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed
+Accepted
 
 ## Context
 
@@ -32,7 +32,7 @@ The runtime will:
 - wrap every `Observer` call so a panic or slow exporter is best-effort and can never fail an **Accepted Event** or alter acknowledgement;
 - surface **Platform Adapter** API calls and ADR 0005 rate-limit attempts/exhaustion through the same hook, reached via typed **Adapter Access** and adapter-owned `Observer` wiring, NOT by widening the core `Adapter` interface;
 - under deferred dispatch (ADR 0002), follow the **Detached Work Context** so **Ack-Then-Work** latency is measured to handler completion;
-- ship a small separate optional OTel binding module (e.g. `observability/otel`) as the reference mapping to an OpenTelemetry meter and tracer.
+- ship a small separate optional OTel binding module (e.g. `observability/otel`) as the reference mapping to an OpenTelemetry meter and tracer. The no-dependency core `Observer` seam is the load-bearing deliverable and is implemented; the OTel reference binding is deferred to its own module so it cannot pull an OpenTelemetry `go.mod` into the core, and is tracked as a follow-up.
 
 Illustrative shape (design only, not implementation):
 

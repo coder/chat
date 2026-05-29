@@ -36,6 +36,8 @@ func TestDocumentationCoversIntentionalVercelDifferences(t *testing.T) {
 		"OnNewMention installs or atomically replaces the single new-mention handler",
 		"intentionally differs from Vercel Chat SDK",
 		"OnSubscribedMessage installs or atomically replaces the single subscribed-message handler",
+		"OnCommand installs or atomically replaces the single command handler",
+		"OnInteraction installs or atomically replaces the single interaction handler",
 	} {
 		if !strings.Contains(sourceText, phrase) {
 			t.Fatalf("runtime GoDoc does not mention %q", phrase)

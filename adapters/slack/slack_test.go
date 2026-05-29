@@ -594,10 +594,11 @@ func formatUnix(t time.Time) string {
 
 type slackAPIServer struct {
 	*httptest.Server
-	mu           sync.Mutex
-	posts        []slackPost
-	authResponse map[string]any
-	authCalls    int
+	mu             sync.Mutex
+	posts          []slackPost
+	authResponse   map[string]any
+	authCalls      int
+	openViewTrigID string
 }
 
 type slackPost struct {
@@ -607,6 +608,7 @@ type slackPost struct {
 	Text         string `json:"text,omitempty"`
 	MarkdownText string `json:"markdown_text,omitempty"`
 	Mrkdwn       *bool  `json:"mrkdwn,omitempty"`
+	Blocks       any    `json:"blocks,omitempty"`
 }
 
 func newSlackAPIServer(t *testing.T) *slackAPIServer {
@@ -637,6 +639,15 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 			api.posts = append(api.posts, post)
 			api.mu.Unlock()
 			writeJSON(t, w, map[string]any{"ok": true, "message_ts": "998.000"})
+		case "/views.open":
+			var payload struct {
+				TriggerID string `json:"trigger_id"`
+			}
+			decodeJSON(t, r.Body, &payload)
+			api.mu.Lock()
+			api.openViewTrigID = payload.TriggerID
+			api.mu.Unlock()
+			writeJSON(t, w, map[string]any{"ok": true})
 		case "/conversations.open":
 			var payload struct {
 				Users string `json:"users"`
