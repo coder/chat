@@ -467,11 +467,18 @@ func promptedPayload(now time.Time, commentID string, body string, userID string
 
 type linearAPIServer struct {
 	*httptest.Server
-	mu         sync.Mutex
-	tokens     int
-	activity   []linearActivity
-	expires    int64
-	tokenScope string
+	mu           sync.Mutex
+	tokens       int
+	activity     []linearActivity
+	rawActivity  []map[string]any
+	sessionInput []map[string]any
+	comments     []map[string]any
+	expires      int64
+	tokenScope   string
+	// rateLimitOnce, when > 0, makes the next N AgentActivityCreate calls return a
+	// 429 with Retry-After before succeeding.
+	rateLimit     int
+	rateLimitSeen int
 }
 
 type linearActivity struct {
@@ -520,6 +527,16 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 				if !ok {
 					t.Fatalf("variables = %#v", req.Variables)
 				}
+				api.mu.Lock()
+				if api.rateLimit > api.rateLimitSeen {
+					api.rateLimitSeen++
+					api.mu.Unlock()
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTooManyRequests)
+					writeJSON(t, w, map[string]any{"retryAfter": "0.01"})
+					return
+				}
+				api.mu.Unlock()
 				body, err := json.Marshal(input)
 				if err != nil {
 					t.Fatalf("marshal activity: %v", err)
@@ -530,9 +547,27 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 				}
 				api.mu.Lock()
 				api.activity = append(api.activity, activity)
+				api.rawActivity = append(api.rawActivity, input)
 				id := fmt.Sprintf("ACT%d", len(api.activity))
 				api.mu.Unlock()
 				writeJSON(t, w, map[string]any{"data": map[string]any{"agentActivityCreate": map[string]any{"success": true, "agentActivity": map[string]any{"id": id}}}})
+				return
+			}
+			if strings.Contains(req.Query, "AgentSessionUpdate") {
+				input, _ := req.Variables["input"].(map[string]any)
+				api.mu.Lock()
+				api.sessionInput = append(api.sessionInput, input)
+				api.mu.Unlock()
+				writeJSON(t, w, map[string]any{"data": map[string]any{"agentSessionUpdate": map[string]any{"success": true}}})
+				return
+			}
+			if strings.Contains(req.Query, "CommentCreate") {
+				input, _ := req.Variables["input"].(map[string]any)
+				api.mu.Lock()
+				api.comments = append(api.comments, input)
+				id := fmt.Sprintf("CMT%d", len(api.comments))
+				api.mu.Unlock()
+				writeJSON(t, w, map[string]any{"data": map[string]any{"commentCreate": map[string]any{"success": true, "comment": map[string]any{"id": id}}}})
 				return
 			}
 			t.Fatalf("unexpected graphql query: %s", req.Query)
@@ -544,10 +579,102 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 	return api
 }
 
+// newGraphQLErrorServer returns a server whose GraphQL endpoint always responds
+// with a top-level errors array (and never echoes the bearer token into data).
+func newGraphQLErrorServer(t *testing.T) *linearAPIServer {
+	t.Helper()
+	api := &linearAPIServer{expires: 3600, tokenScope: "read write app:mentionable app:assignable"}
+	api.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			api.mu.Lock()
+			api.tokens++
+			api.mu.Unlock()
+			writeJSON(t, w, map[string]any{"access_token": "token-secret", "expires_in": api.expires, "scope": api.tokenScope})
+		case "/graphql":
+			var req graphQLRequest
+			decodeJSON(t, r.Body, &req)
+			if strings.Contains(req.Query, "ViewerIdentity") {
+				writeJSON(t, w, map[string]any{"data": map[string]any{"viewer": map[string]any{"id": "APP1", "name": "Linear Bot", "displayName": "Linear Bot", "organization": map[string]any{"id": "ORG1"}}}})
+				return
+			}
+			writeJSON(t, w, map[string]any{"errors": []map[string]any{{"message": "boom"}}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(api.Close)
+	return api
+}
+
+// containsToken reports whether any string in v contains the fake bearer token,
+// guarding the invariant that GraphQL never leaks the access token into dest.
+func containsToken(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return strings.Contains(t, "token-")
+	case map[string]any:
+		for _, val := range t {
+			if containsToken(val) {
+				return true
+			}
+		}
+	case []any:
+		for _, val := range t {
+			if containsToken(val) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (a *linearAPIServer) tokenRequests() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.tokens
+}
+
+func (a *linearAPIServer) lastRawActivity(t *testing.T) map[string]any {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.rawActivity) == 0 {
+		t.Fatal("no agent activity recorded")
+	}
+	return a.rawActivity[len(a.rawActivity)-1]
+}
+
+func (a *linearAPIServer) activityCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.activity)
+}
+
+func (a *linearAPIServer) lastSessionInput(t *testing.T) map[string]any {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.sessionInput) == 0 {
+		t.Fatal("no session update recorded")
+	}
+	return a.sessionInput[len(a.sessionInput)-1]
+}
+
+func (a *linearAPIServer) lastComment(t *testing.T) map[string]any {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.comments) == 0 {
+		t.Fatal("no comment recorded")
+	}
+	return a.comments[len(a.comments)-1]
+}
+
+func (a *linearAPIServer) commentCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.comments)
 }
 
 func (a *linearAPIServer) assertActivity(t *testing.T, index int, want linearActivity) {

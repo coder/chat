@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/chat"
+	"github.com/coder/chat/adapters/linear"
 	"github.com/coder/chat/state/memory"
 )
 
@@ -112,4 +113,20 @@ func (a *testLinearAdapter) BotActor() chat.Actor {
 
 func (a *testLinearAdapter) PostThought(_ context.Context, id chat.ThreadID, _ string) (*chat.SentMessage, error) {
 	return &chat.SentMessage{ID: "thought-1", ThreadID: id}, nil
+}
+
+func (a *testLinearAdapter) PostAction(_ context.Context, id chat.ThreadID, _ linear.ActionInput) (*chat.SentMessage, error) {
+	return &chat.SentMessage{ID: "action-1", ThreadID: id}, nil
+}
+
+func (a *testLinearAdapter) PostElicitation(_ context.Context, id chat.ThreadID, _ linear.ElicitationInput) (*chat.SentMessage, error) {
+	return &chat.SentMessage{ID: "elicitation-1", ThreadID: id}, nil
+}
+
+func (a *testLinearAdapter) PostError(_ context.Context, id chat.ThreadID, _ linear.ErrorInput) (*chat.SentMessage, error) {
+	return &chat.SentMessage{ID: "error-1", ThreadID: id}, nil
+}
+
+func (a *testLinearAdapter) UpdateSession(context.Context, chat.ThreadID, linear.AgentSessionUpdateInput) error {
+	return nil
 }

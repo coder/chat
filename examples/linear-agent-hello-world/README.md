@@ -4,11 +4,19 @@ This example runs a tiny Linear app-actor bot with in-memory runtime state. When
 someone mentions the installed Linear app in an issue, or delegates an issue to
 the app, Linear creates an agent session and sends an `AgentSessionEvent`
 webhook. The example subscribes the session thread, posts an ephemeral thought,
-posts a final response, and then routes follow-up prompts to
-`OnSubscribedMessage`.
+posts a native tool-call action, publishes an external link via a session
+update, optionally asks the user a `select` question, posts a final response,
+and then routes follow-up prompts to `OnSubscribedMessage`. A follow-up carrying
+a human-to-agent `stop` signal halts cleanly. It runs under deferred dispatch
+(Ack-Then-Work) so follow-up work can outlive the inbound webhook request.
 
-This is a Linear app-actor example, not a personal API key or generic issue
-comment bot.
+The example also demonstrates generic issue comments (ADR 0013): if you enable
+the Linear `Comment` webhook scope, a comment that mentions the app actor routes
+to `OnNewMention` and `Thread.Post` replies with an ordinary issue comment
+rather than an agent activity.
+
+This is a Linear app-actor example (ADR 0008, ADR 0013), not a personal API key
+user bot.
 
 ## Linear App Setup
 
@@ -36,10 +44,13 @@ Configure the app for app-actor agent sessions:
    them as `LINEAR_CLIENT_CREDENTIALS_CLIENT_ID` and
    `LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET`.
 
-Do not enable Comments, Issues, or Emoji reaction webhook categories for this
-example unless you are experimenting. The MVP adapter handles agent session
-webhooks; other valid webhook types, including Inbox Notifications and
-Permission Changes, are acknowledged and ignored.
+Generic issue/comment participation is opt-in (ADR 0013). To exercise it, also
+enable the **Comment** (and as needed **Issue**) webhook category so Linear
+delivers `Comment` events; the adapter normalizes a comment that mentions the
+app actor into a Message Event and `Thread.Post` replies with an ordinary issue
+comment. An agent-session-only deployment can leave these disabled and is
+unchanged. Other valid webhook types, including Emoji reactions, Inbox
+Notifications, and Permission Changes, are acknowledged and ignored.
 
 Treat the webhook secret and client secret like passwords.
 
@@ -163,5 +174,10 @@ Before claiming a live Linear dogfood passed, capture screenshots or video of:
 - Linear request signatures are verified with `LINEAR_WEBHOOK_SECRET`.
 - Client credentials are exchanged during adapter startup and refreshed lazily
   before Linear API calls.
-- Linear thoughts are exposed through typed adapter access rather than a generic
-  runtime typing API.
+- Linear thoughts, actions, elicitations, errors, session updates, and the raw
+  GraphQL escape hatch are exposed through typed adapter access
+  (`chat.AdapterAs[*linear.Adapter]`) rather than a generic runtime API.
+- Inbound signals (including `stop`) and structured session context are preserved
+  on `Message.Raw`; read them with `linear.RawMessageFrom`.
+- This example runs under `chat.DispatchDeferred` so follow-up work runs on the
+  Detached Work Context with the Thread Lock held and lease-refreshed.
