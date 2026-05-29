@@ -23,6 +23,17 @@ import (
 
 var defaultClientCredentialScopes = []string{"read", "write", "app:mentionable", "app:assignable"}
 
+// Linear agent activity content types. Linear validates these server-side; the
+// adapter only enforces the ephemeral-allowed rule and funnels every type
+// through the generic agent-activity codec.
+const (
+	activityTypeThought     = "thought"
+	activityTypeResponse    = "response"
+	activityTypeAction      = "action"
+	activityTypeElicitation = "elicitation"
+	activityTypeError       = "error"
+)
+
 const (
 	adapterName               = "linear"
 	defaultAPIBaseURL         = "https://api.linear.app"
@@ -47,6 +58,10 @@ type Options struct {
 	Now                func() time.Time
 	SignatureTolerance time.Duration
 	Logger             *slog.Logger
+	// RetryPolicy bounds outbound Linear rate-limit retry/backoff. The zero value
+	// applies a conservative default that stays well under the Agent Session
+	// Timing Contract first-thought window (ADR 0005, ADR 0008).
+	RetryPolicy RetryPolicy
 }
 
 var _ chat.Adapter = (*Adapter)(nil)
@@ -60,6 +75,7 @@ type Adapter struct {
 	now                func() time.Time
 	signatureTolerance time.Duration
 	logger             *slog.Logger
+	retryPolicy        RetryPolicy
 
 	mu             sync.Mutex
 	accessToken    string
@@ -105,6 +121,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
+	retryPolicy := opts.RetryPolicy.withDefaults()
 	creds := opts.ClientCredentials
 	creds.Scopes = normalizeScopeList(creds.Scopes)
 	if len(creds.Scopes) == 0 {
@@ -118,6 +135,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		now:                now,
 		signatureTolerance: tolerance,
 		logger:             logger,
+		retryPolicy:        retryPolicy,
 	}, nil
 }
 
@@ -232,6 +250,20 @@ func (a *Adapter) validateThreadPayload(id chat.ThreadID) (threadPayload, error)
 	return payload, nil
 }
 
+// agentSessionPayload validates the thread id, enforces tenant scoping, and
+// rejects any thread kind other than agent-session. Agent-activity methods are
+// agent-session-only (ADR 0008, ADR 0013).
+func (a *Adapter) agentSessionPayload(id chat.ThreadID) (threadPayload, error) {
+	payload, err := a.validateThreadPayload(id)
+	if err != nil {
+		return threadPayload{}, err
+	}
+	if payload.kind() != threadKindAgentSession {
+		return threadPayload{}, fmt.Errorf("linear: agent activities are only valid on agent-session threads, not %q threads", payload.kind())
+	}
+	return payload, nil
+}
+
 func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg chat.PostableMessage) (*chat.SentMessage, error) {
 	if err := validatePostableMessage(msg); err != nil {
 		return nil, err
@@ -240,7 +272,12 @@ func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg ch
 	if err != nil {
 		return nil, err
 	}
-	return a.createAgentActivity(ctx, payload, agentActivityContent{Type: "response", Body: msg.Text}, false)
+	switch payload.kind() {
+	case threadKindComment:
+		return a.createIssueComment(ctx, payload, msg.Text)
+	default:
+		return a.createAgentActivity(ctx, payload, activityRequest{content: map[string]any{"type": activityTypeResponse, "body": msg.Text}})
+	}
 }
 
 // PostThought posts an ephemeral Linear thought activity in an agent session.
@@ -249,11 +286,11 @@ func (a *Adapter) PostThought(ctx context.Context, id chat.ThreadID, text string
 	if strings.TrimSpace(text) == "" {
 		return nil, errors.New("linear: thought text is required")
 	}
-	payload, err := a.validateThreadPayload(id)
+	payload, err := a.agentSessionPayload(id)
 	if err != nil {
 		return nil, err
 	}
-	return a.createAgentActivity(ctx, payload, agentActivityContent{Type: "thought", Body: text}, true)
+	return a.createAgentActivity(ctx, payload, activityRequest{content: map[string]any{"type": activityTypeThought, "body": text}, ephemeral: true})
 }
 
 func (a *Adapter) BotActor() chat.Actor {
@@ -264,11 +301,16 @@ func (a *Adapter) BotActor() chat.Actor {
 }
 
 func (a *Adapter) normalizeEvent(_ context.Context, envelope webhookEnvelope, raw []byte) (*chat.Event, bool, error) {
-	if envelope.Type != "AgentSessionEvent" {
+	switch envelope.Type {
+	case "AgentSessionEvent":
+		event, ok := a.normalizeAgentSessionEvent(envelope, raw)
+		return event, ok, nil
+	case "Comment":
+		event, ok := a.normalizeCommentEvent(envelope, raw)
+		return event, ok, nil
+	default:
 		return nil, false, nil
 	}
-	event, ok := a.normalizeAgentSessionEvent(envelope, raw)
-	return event, ok, nil
 }
 
 func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byte) (*chat.Event, bool) {
@@ -348,19 +390,51 @@ func (a *Adapter) normalizeAgentSessionEvent(envelope webhookEnvelope, raw []byt
 		Issue:        issueID,
 		Comment:      rootCommentID,
 		Session:      envelope.AgentSession.ID,
+		Kind:         threadKindAgentSession,
 	})
 	if err != nil {
 		a.logger.Warn("ignoring Linear agent session event with invalid thread", "error", err)
 		return nil, false
 	}
+	rawMessage := a.agentSessionRawMessage(envelope, raw)
 	return &chat.Event{
 		ID:       "linear:" + envelope.OrganizationID + ":message:" + sourceID,
 		Adapter:  adapterName,
 		Tenant:   envelope.OrganizationID,
 		ThreadID: threadID,
-		Raw:      json.RawMessage(raw),
-		Message:  &chat.Message{ID: sourceID, Text: text, Author: author, Mentioned: true, Raw: json.RawMessage(raw)},
+		Raw:      rawMessage,
+		Message:  &chat.Message{ID: sourceID, Text: text, Author: author, Mentioned: true, Raw: rawMessage},
 	}, true
+}
+
+// agentSessionRawMessage builds the stable Linear Platform Escape Hatch for an
+// agent-session event, preserving inbound signal / signalMetadata and structured
+// session context, and surfacing the first-thought deadline on "created".
+func (a *Adapter) agentSessionRawMessage(envelope webhookEnvelope, raw []byte) *RawMessage {
+	session := &RawAgentSession{
+		ID:               envelope.AgentSession.ID,
+		PromptContext:    envelope.PromptContext,
+		Guidance:         envelope.Guidance,
+		PreviousComments: envelope.PreviousComments,
+		Issue:            envelope.AgentSession.IssueRaw,
+		Comment:          envelope.AgentSession.CommentRaw,
+	}
+	if envelope.Action == "created" {
+		createdAt := firstNonEmpty(envelope.AgentSession.CreatedAt, envelope.CreatedAt)
+		session.FirstThoughtDeadline = newFirstThoughtDeadline(createdAt, a.now)
+	}
+	rawMessage := &RawMessage{
+		Kind:           threadKindAgentSession,
+		Action:         envelope.Action,
+		OrganizationID: envelope.OrganizationID,
+		Session:        session,
+		Envelope:       append(json.RawMessage(nil), raw...),
+	}
+	if envelope.AgentActivity != nil {
+		rawMessage.Signal = envelope.AgentActivity.Signal
+		rawMessage.SignalMetadata = envelope.AgentActivity.SignalMetadata
+	}
+	return rawMessage
 }
 
 func actorFromWebhook(tenant string, actor webhookActor) chat.Actor {
@@ -462,8 +536,41 @@ func (a *Adapter) fetchIdentity(ctx context.Context) (linearIdentity, error) {
 	return linearIdentity{BotUserID: viewer.ID, Name: firstNonEmpty(viewer.DisplayName, viewer.Name), OrganizationID: viewer.Organization.ID}, nil
 }
 
-func (a *Adapter) createAgentActivity(ctx context.Context, thread threadPayload, content agentActivityContent, ephemeral bool) (*chat.SentMessage, error) {
-	variables := map[string]any{"input": map[string]any{"agentSessionId": thread.Session, "content": content, "ephemeral": ephemeral}}
+// activityRequest is the single low-level shape every agent-activity caller
+// funnels through: the public CreateAgentActivity escape hatch, the typed
+// helpers (PostAction / PostElicitation / PostError), PostThought, and the
+// Thread.Post response path. It is the generic agent-activity codec the deep
+// module is built around.
+type activityRequest struct {
+	content        map[string]any
+	signal         string
+	signalMetadata any
+	ephemeral      bool
+}
+
+// createAgentActivity sends an AgentActivityCreate mutation for the given
+// agent-session thread. Callers reach it only after agentSessionPayload (or, for
+// the response path, PostMessage's non-comment branch) has confirmed the kind. It
+// enforces Linear's rule that only thought and action activities may be
+// ephemeral, omits empty signal / signalMetadata, and returns the created
+// activity identity on the agent-session Thread ID.
+func (a *Adapter) createAgentActivity(ctx context.Context, thread threadPayload, req activityRequest) (*chat.SentMessage, error) {
+	contentType, _ := req.content["type"].(string)
+	if req.ephemeral && contentType != activityTypeThought && contentType != activityTypeAction {
+		return nil, fmt.Errorf("linear: ephemeral is only valid for thought and action activities, not %q", contentType)
+	}
+	input := map[string]any{
+		"agentSessionId": thread.Session,
+		"content":        req.content,
+		"ephemeral":      req.ephemeral,
+	}
+	if req.signal != "" {
+		input["signal"] = req.signal
+	}
+	if req.signalMetadata != nil {
+		input["signalMetadata"] = req.signalMetadata
+	}
+	variables := map[string]any{"input": input}
 	var resp graphQLResponse[agentActivityData]
 	if err := a.callGraphQL(ctx, `mutation AgentActivityCreate($input: AgentActivityCreateInput!) { agentActivityCreate(input: $input) { success agentActivity { id } } }`, variables, &resp); err != nil {
 		return nil, err
@@ -502,36 +609,63 @@ func (a *Adapter) callGraphQL(ctx context.Context, query string, variables any, 
 }
 
 func (a *Adapter) doJSON(req *http.Request, dest any) error {
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("status %d", resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {
-		return err
-	}
-	return nil
+	return a.doJSONWithRetry(req, dest)
 }
+
+// Linear thread kinds carried inside the opaque, versioned Thread ID. The empty
+// value decodes as threadKindAgentSession so agent-session Thread IDs minted
+// before the thread-kind discriminator (ADR 0013) keep decoding unchanged.
+const (
+	threadKindAgentSession = "agent_session"
+	threadKindComment      = "comment"
+)
 
 type threadPayload struct {
 	Organization string `json:"org"`
 	Issue        string `json:"issue"`
 	Comment      string `json:"comment,omitempty"`
-	Session      string `json:"session"`
+	Session      string `json:"session,omitempty"`
+	// Kind discriminates agent-session threads (ADR 0008) from generic
+	// issue-comment threads (ADR 0013). Empty means agent-session for backward
+	// compatibility with Thread IDs minted before the discriminator existed.
+	Kind string `json:"kind,omitempty"`
+}
+
+func (p threadPayload) kind() string {
+	if p.Kind == "" {
+		return threadKindAgentSession
+	}
+	return p.Kind
+}
+
+// validate checks the per-kind required identity fields: Organization and Issue
+// for every kind, plus a Session for agent-session threads or a Comment for
+// comment threads.
+func (p threadPayload) validate() error {
+	if p.Organization == "" {
+		return errors.New("linear: thread organization is required")
+	}
+	if p.Issue == "" {
+		return errors.New("linear: thread issue is required")
+	}
+	switch p.kind() {
+	case threadKindAgentSession:
+		if p.Session == "" {
+			return errors.New("linear: thread agent session is required")
+		}
+	case threadKindComment:
+		if p.Comment == "" {
+			return errors.New("linear: thread comment is required")
+		}
+	default:
+		return fmt.Errorf("linear: unsupported thread kind %q", p.Kind)
+	}
+	return nil
 }
 
 func encodeThreadID(payload threadPayload) (chat.ThreadID, error) {
-	if payload.Organization == "" {
-		return "", errors.New("linear: thread organization is required")
-	}
-	if payload.Issue == "" {
-		return "", errors.New("linear: thread issue is required")
-	}
-	if payload.Session == "" {
-		return "", errors.New("linear: thread agent session is required")
+	if err := payload.validate(); err != nil {
+		return "", err
 	}
 	body, err := json.Marshal(payload)
 	if err != nil {
@@ -553,8 +687,8 @@ func decodeThreadID(id chat.ThreadID) (threadPayload, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return threadPayload{}, fmt.Errorf("linear: parse thread id: %w", err)
 	}
-	if payload.Organization == "" || payload.Issue == "" || payload.Session == "" {
-		return threadPayload{}, fmt.Errorf("linear: invalid thread id %q", id)
+	if err := payload.validate(); err != nil {
+		return threadPayload{}, fmt.Errorf("linear: invalid thread id %q: %w", id, err)
 	}
 	return payload, nil
 }
@@ -583,27 +717,64 @@ func validatePostableMessage(msg chat.PostableMessage) error {
 }
 
 type webhookEnvelope struct {
-	Type             string         `json:"type"`
-	Action           string         `json:"action"`
-	OrganizationID   string         `json:"organizationId"`
-	OAuthClientID    string         `json:"oauthClientId"`
-	AppUserID        string         `json:"appUserId"`
-	CreatedAt        string         `json:"createdAt"`
-	PromptContext    string         `json:"promptContext"`
-	WebhookID        string         `json:"webhookId"`
-	WebhookTimestamp int64          `json:"webhookTimestamp"`
-	AgentSession     agentSession   `json:"agentSession"`
-	AgentActivity    *agentActivity `json:"agentActivity"`
+	Type             string          `json:"type"`
+	Action           string          `json:"action"`
+	OrganizationID   string          `json:"organizationId"`
+	OAuthClientID    string          `json:"oauthClientId"`
+	AppUserID        string          `json:"appUserId"`
+	CreatedAt        string          `json:"createdAt"`
+	PromptContext    string          `json:"promptContext"`
+	Guidance         string          `json:"guidance"`
+	PreviousComments json.RawMessage `json:"previousComments"`
+	WebhookID        string          `json:"webhookId"`
+	WebhookTimestamp int64           `json:"webhookTimestamp"`
+	AgentSession     agentSession    `json:"agentSession"`
+	AgentActivity    *agentActivity  `json:"agentActivity"`
+	// Data carries the Comment payload for type=="Comment" webhooks (ADR 0013).
+	Data *commentData `json:"data"`
 }
 
 type agentSession struct {
-	ID        string          `json:"id"`
-	IssueID   string          `json:"issueId"`
-	Issue     issueRef        `json:"issue"`
-	AppUserID string          `json:"appUserId"`
-	Comment   *sessionComment `json:"comment"`
-	Creator   *webhookActor   `json:"creator"`
-	URL       string          `json:"url"`
+	ID         string          `json:"id"`
+	IssueID    string          `json:"issueId"`
+	Issue      issueRef        `json:"issue"`
+	IssueRaw   json.RawMessage `json:"-"`
+	AppUserID  string          `json:"appUserId"`
+	Comment    *sessionComment `json:"comment"`
+	CommentRaw json.RawMessage `json:"-"`
+	Creator    *webhookActor   `json:"creator"`
+	URL        string          `json:"url"`
+	CreatedAt  string          `json:"createdAt"`
+}
+
+// UnmarshalJSON preserves the verbatim issue and comment sub-objects on the
+// Platform Escape Hatch (ADR 0008) while still decoding the typed fields.
+func (s *agentSession) UnmarshalJSON(data []byte) error {
+	type alias agentSession
+	var raw struct {
+		alias
+		Issue   json.RawMessage `json:"issue"`
+		Comment json.RawMessage `json:"comment"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	*s = agentSession(raw.alias)
+	if len(raw.Issue) > 0 && string(raw.Issue) != "null" {
+		s.IssueRaw = append(json.RawMessage(nil), raw.Issue...)
+		if err := json.Unmarshal(raw.Issue, &s.Issue); err != nil {
+			return err
+		}
+	}
+	if len(raw.Comment) > 0 && string(raw.Comment) != "null" {
+		s.CommentRaw = append(json.RawMessage(nil), raw.Comment...)
+		var comment sessionComment
+		if err := json.Unmarshal(raw.Comment, &comment); err != nil {
+			return err
+		}
+		s.Comment = &comment
+	}
+	return nil
 }
 
 type issueRef struct {
@@ -633,6 +804,8 @@ type agentActivity struct {
 	Content         agentActivityContent `json:"content"`
 	User            webhookActor         `json:"user"`
 	CreatedAt       string               `json:"createdAt"`
+	Signal          string               `json:"signal"`
+	SignalMetadata  json.RawMessage      `json:"signalMetadata"`
 }
 
 type agentActivityContent struct {

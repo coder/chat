@@ -34,6 +34,14 @@ func main() {
 		chat.WithState(memory.New()),
 		chat.WithAdapter(linearAdapter),
 		chat.WithLogger(slogLogger),
+		// Deferred dispatch (Ack-Then-Work) lets follow-up work outlive the inbound
+		// webhook request and run inside Linear's ~30-minute follow-up window.
+		chat.WithRuntimeOptions(chat.RuntimeOptions{
+			DedupeTTL:     24 * time.Hour,
+			ThreadLockTTL: 2 * time.Minute,
+			Dispatch:      chat.DispatchDeferred,
+			DetachTimeout: 5 * time.Minute,
+		}),
 	)
 	if err != nil {
 		panic(err)
@@ -52,6 +60,13 @@ func main() {
 	bot.OnNewMention(newMentionHandler(linearAccess))
 
 	bot.OnSubscribedMessage(func(ctx context.Context, ev *chat.MessageEvent) error {
+		// A "comment"-kind thread is an ordinary issue comment (ADR 0013); an
+		// "agent_session" thread is an agent session (ADR 0008). Thread.Post routes
+		// by kind automatically.
+		if raw, ok := linear.RawMessageFrom(ev.Message); ok && raw.StopRequested() {
+			_, err := ev.Thread.Post(ctx, chat.Text("Stopping as requested."))
+			return err
+		}
 		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Reading your follow-up...")
 		_, err := ev.Thread.Post(ctx, chat.Text("Follow-up received: "+ev.Message.Text))
 		return err
@@ -72,24 +87,65 @@ func main() {
 	}
 }
 
-type linearThoughtPoster interface {
+// linearAgentAccess is the Linear-specific surface this example reaches through
+// Adapter Access. It is satisfied by *linear.Adapter and by a test fake.
+type linearAgentAccess interface {
 	PostThought(context.Context, chat.ThreadID, string) (*chat.SentMessage, error)
+	PostAction(context.Context, chat.ThreadID, linear.ActionInput) (*chat.SentMessage, error)
+	PostElicitation(context.Context, chat.ThreadID, linear.ElicitationInput) (*chat.SentMessage, error)
+	PostError(context.Context, chat.ThreadID, linear.ErrorInput) (*chat.SentMessage, error)
+	UpdateSession(context.Context, chat.ThreadID, linear.AgentSessionUpdateInput) error
 }
 
-func newMentionHandler(linearAccess linearThoughtPoster) chat.MessageHandler {
+func newMentionHandler(linearAccess linearAgentAccess) chat.MessageHandler {
 	return func(ctx context.Context, ev *chat.MessageEvent) error {
+		// On a comment thread (ADR 0013), reply with an ordinary comment.
+		if raw, ok := linear.RawMessageFrom(ev.Message); ok && raw.Kind == "comment" {
+			_, err := ev.Thread.Post(ctx, chat.Text("Thanks for the mention — replying as the app actor."))
+			return err
+		}
+
 		if err := ev.Thread.Subscribe(ctx); err != nil {
 			return err
 		}
+
+		// Ack-Then-Work: post a first thought inside the ~10s first-thought window,
+		// then do the rest. Under DispatchDeferred this whole handler already runs on
+		// the Detached Work Context after the webhook is acknowledged.
 		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Thinking...")
+
+		// Show native tool-call progress as an action.
+		_, _ = linearAccess.PostAction(ctx, ev.Thread.ID(), linear.ActionInput{Action: "search-codebase", Parameter: ev.Message.Text})
+
+		// Publish an external link, which also keeps the session responsive.
+		_ = linearAccess.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
+			ExternalURLs: []linear.ExternalURL{{URL: "https://example.com/pr/1", Label: "Draft PR"}},
+		})
+
+		// Ask the user to choose, completing the session via an elicitation.
+		if shouldAsk(ev.Message.Text) {
+			_, err := linearAccess.PostElicitation(ctx, ev.Thread.ID(), linear.ElicitationInput{
+				Body:           "Which environment should I target?",
+				Signal:         "select",
+				SignalMetadata: linear.SelectSignalMetadata{Options: []linear.SelectOption{{Value: "staging"}, {Value: "prod"}}},
+			})
+			return err
+		}
+
 		_, err := ev.Thread.Post(ctx, chat.Markdown(
 			"**hello from Linear app actor**\n\nI subscribed to this agent session. Send a follow-up prompt to test the subscribed route.",
 		))
 		if err != nil {
+			// Ending a failed session cleanly with an error completion signal.
+			_, _ = linearAccess.PostError(ctx, ev.Thread.ID(), linear.ErrorInput{Body: "failed to post response: " + err.Error()})
 			return errors.Join(err, ev.Thread.Unsubscribe(context.WithoutCancel(ctx)))
 		}
 		return nil
 	}
+}
+
+func shouldAsk(text string) bool {
+	return text == "deploy"
 }
 
 func newWebhookServer(addr string, linearWebhook http.Handler) *http.Server {
