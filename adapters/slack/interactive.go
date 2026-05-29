@@ -395,7 +395,6 @@ func (a *Adapter) RespondURL(ctx context.Context, raw any, msg chat.PostableMess
 	if err != nil {
 		return err
 	}
-	a.observer.Event(ctx, chat.ObsAdapterCall, chat.AdapterAttr(adapterName))
 	body, err := json.Marshal(responseURLPayload{
 		Text:         fields.Text,
 		MarkdownText: fields.MarkdownText,
@@ -410,19 +409,11 @@ func (a *Adapter) RespondURL(ctx context.Context, raw any, msg chat.PostableMess
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("slack: response_url request: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		a.observer.Event(ctx, chat.ObsRateLimit, chat.AdapterAttr(adapterName))
-		return fmt.Errorf("slack: response_url status %d", resp.StatusCode)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("slack: response_url status %d", resp.StatusCode)
-	}
-	return nil
+	// The response_url is a pre-authorized webhook returning a plain 200/429, so it
+	// shares the bounded rate-limit retry seam (ADR 0005) with a nil dest: a 429 with
+	// Retry-After is retried within the RetryPolicy and surfaces as a typed
+	// *RateLimited on exhaustion, with no JSON envelope to decode.
+	return a.doWithRetry(ctx, "response_url", req, nil)
 }
 
 // responseURLFromRaw extracts the preserved response_url from a Command.Raw or

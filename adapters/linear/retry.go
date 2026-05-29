@@ -1,7 +1,6 @@
 package linear
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/coder/chat"
+	"github.com/coder/chat/internal/ratelimit"
 )
 
 // RetryPolicy bounds outbound Linear rate-limit retry/backoff (ADR 0005). Retry
@@ -49,7 +51,10 @@ func (p RetryPolicy) withDefaults() RetryPolicy {
 }
 
 // RateLimited is returned when bounded retry is exhausted against a Linear rate
-// limit. It is unwrappable to any underlying transport error.
+// limit, or when a single Retry-After would exceed the caller's deadline. It
+// carries the adapter name, the last Retry-After, the attempt count, and the raw
+// platform response as a Platform Escape Hatch. It is unwrappable to any
+// underlying transport error.
 type RateLimited struct {
 	Adapter    string
 	RetryAfter time.Duration
@@ -71,15 +76,32 @@ func (e *RateLimited) Error() string {
 
 func (e *RateLimited) Unwrap() error { return e.Err }
 
+var _ error = (*RateLimited)(nil)
+
+// noopObserver is the adapter's default Observer when none is configured: it
+// records nothing so an unconfigured adapter keeps structured-slog-only behavior.
+type noopObserver struct{}
+
+func (noopObserver) Event(context.Context, chat.ObservationName, ...chat.Attr) {}
+
+func (noopObserver) Dispatch(ctx context.Context, _ ...chat.Attr) (context.Context, chat.DispatchSpan) {
+	return ctx, noopSpan{}
+}
+
+type noopSpan struct{}
+
+func (noopSpan) End(chat.DispatchOutcome, ...chat.Attr) {}
+
 // doJSONWithRetry sends the request, retrying on Linear throttling (HTTP 429 or
 // a GraphQL RATELIMITED error) within the bounded RetryPolicy. Retry-After is
 // honored and clamped to the policy bounds; the loop never sleeps past the
 // request context deadline. Non-throttling errors return immediately. Every
-// attempt and the final exhaustion are reported as structured slog records, the
-// Runtime Observation surface available today.
+// attempt emits an ObsAdapterCall and every throttle an ObsRateLimit through the
+// configured Observer (ADR 0010); exhaustion is additionally logged as a
+// structured slog record.
 func (a *Adapter) doJSONWithRetry(req *http.Request, dest any) error {
 	policy := a.retryPolicy
-	bodyBytes, err := bufferRequestBody(req)
+	bodyBytes, err := ratelimit.BufferRequestBody(req)
 	if err != nil {
 		return err
 	}
@@ -87,9 +109,11 @@ func (a *Adapter) doJSONWithRetry(req *http.Request, dest any) error {
 
 	var elapsed time.Duration
 	for attempt := 1; ; attempt++ {
+		a.observer.Event(ctx, chat.ObsAdapterCall, chat.AdapterAttr(adapterName))
+
 		attemptReq := req
 		if attempt > 1 {
-			attemptReq = cloneRequest(req, bodyBytes)
+			attemptReq = ratelimit.CloneRequest(req, bodyBytes)
 		}
 		status, payload, doErr := a.sendOnce(attemptReq)
 		if doErr != nil {
@@ -110,25 +134,37 @@ func (a *Adapter) doJSONWithRetry(req *http.Request, dest any) error {
 			return nil
 		}
 
+		a.observer.Event(ctx, chat.ObsRateLimit, chat.AdapterAttr(adapterName))
+
+		rateLimited := &RateLimited{Adapter: adapterName, RetryAfter: retryAfter, Attempts: attempt, Raw: json.RawMessage(payload)}
 		if attempt >= policy.MaxAttempts {
-			a.logger.Warn("linear rate limit retry exhausted",
-				"adapter", adapterName, "attempt", attempt, "retry_after", retryAfter, "outcome", "exhausted")
-			return &RateLimited{Adapter: adapterName, RetryAfter: retryAfter, Attempts: attempt, Raw: json.RawMessage(payload)}
+			a.logRetry(attempt, retryAfter, "exhausted")
+			return rateLimited
 		}
 
-		delay := backoffDelay(policy, attempt, retryAfter)
+		delay := ratelimit.BackoffDelay(policy.BaseDelay, policy.MaxDelay, attempt, retryAfter)
 		if elapsed+delay > policy.MaxElapsed {
-			a.logger.Warn("linear rate limit backoff ceiling reached",
-				"adapter", adapterName, "attempt", attempt, "retry_after", retryAfter, "outcome", "exhausted")
-			return &RateLimited{Adapter: adapterName, RetryAfter: retryAfter, Attempts: attempt, Raw: json.RawMessage(payload)}
+			a.logRetry(attempt, retryAfter, "ceiling")
+			return rateLimited
 		}
-		a.logger.Warn("linear rate limited, retrying",
-			"adapter", adapterName, "attempt", attempt, "retry_after", retryAfter, "delay", delay, "outcome", "retry")
-		if err := sleepCtx(ctx, delay); err != nil {
+		// The single load-bearing invariant: never sleep past the request context
+		// deadline. A Retry-After that would push the first Agent Activity Thought
+		// past the first-thought window exhausts to a typed RateLimited instead.
+		if deadline, ok := ctx.Deadline(); ok && a.now().Add(delay).After(deadline) {
+			a.logRetry(attempt, retryAfter, "deadline")
+			return rateLimited
+		}
+		a.logRetry(attempt, retryAfter, "retry")
+		if err := ratelimit.SleepCtx(ctx, delay); err != nil {
 			return err
 		}
 		elapsed += delay
 	}
+}
+
+func (a *Adapter) logRetry(attempt int, retryAfter time.Duration, outcome string) {
+	a.logger.Warn("linear rate limited",
+		"adapter", adapterName, "attempt", attempt, "retry_after", retryAfter, "outcome", outcome)
 }
 
 func (a *Adapter) sendOnce(req *http.Request) (int, []byte, error) {
@@ -142,29 +178,6 @@ func (a *Adapter) sendOnce(req *http.Request) (int, []byte, error) {
 		return 0, nil, err
 	}
 	return resp.StatusCode, payload, nil
-}
-
-func bufferRequestBody(req *http.Request) ([]byte, error) {
-	if req.Body == nil {
-		return nil, nil
-	}
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
-	}
-	_ = req.Body.Close()
-	req.Body = io.NopCloser(bytes.NewReader(body))
-	req.ContentLength = int64(len(body))
-	return body, nil
-}
-
-func cloneRequest(req *http.Request, body []byte) *http.Request {
-	clone := req.Clone(req.Context())
-	if body != nil {
-		clone.Body = io.NopCloser(bytes.NewReader(body))
-		clone.ContentLength = int64(len(body))
-	}
-	return clone
 }
 
 // rateLimitedResponse reports whether the response indicates Linear throttling,
@@ -219,36 +232,3 @@ func parseRetryAfter(value string) time.Duration {
 	}
 	return 0
 }
-
-func backoffDelay(policy RetryPolicy, attempt int, retryAfter time.Duration) time.Duration {
-	delay := policy.BaseDelay << (attempt - 1)
-	if delay <= 0 || delay > policy.MaxDelay {
-		delay = policy.MaxDelay
-	}
-	if retryAfter > delay {
-		delay = retryAfter
-	}
-	if delay > policy.MaxDelay {
-		delay = policy.MaxDelay
-	}
-	return delay
-}
-
-// sleepCtx sleeps for d but returns the context error if it ends first, so retry
-// never outlasts the request context (and thus never violates the first-thought
-// window).
-func sleepCtx(ctx context.Context, d time.Duration) error {
-	if d <= 0 {
-		return ctx.Err()
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-var _ error = (*RateLimited)(nil)

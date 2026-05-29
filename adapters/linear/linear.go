@@ -85,6 +85,10 @@ type Options struct {
 	// applies a conservative default that stays well under the Agent Session
 	// Timing Contract first-thought window (ADR 0005, ADR 0008).
 	RetryPolicy RetryPolicy
+	// Observer receives adapter-facing observations (ObsAdapterCall, ObsRateLimit);
+	// it is adapter-owned wiring, not on the core Adapter interface (ADR 0010).
+	// Nil is a no-op.
+	Observer chat.Observer
 }
 
 var _ chat.Adapter = (*Adapter)(nil)
@@ -100,6 +104,7 @@ type Adapter struct {
 	signatureTolerance time.Duration
 	logger             *slog.Logger
 	retryPolicy        RetryPolicy
+	observer           chat.Observer
 
 	mu             sync.Mutex
 	accessToken    string
@@ -168,6 +173,10 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	retryPolicy := opts.RetryPolicy.withDefaults()
+	observer := opts.Observer
+	if observer == nil {
+		observer = noopObserver{}
+	}
 	creds := opts.ClientCredentials
 	if !multiTenant {
 		creds.Scopes = normalizeScopeList(creds.Scopes)
@@ -185,6 +194,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		signatureTolerance: tolerance,
 		logger:             logger,
 		retryPolicy:        retryPolicy,
+		observer:           observer,
 		tenantTokens:       map[string]*tenantToken{},
 	}, nil
 }

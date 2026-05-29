@@ -38,4 +38,29 @@
 // context are Thread Application State, owned by the application. Ordering is
 // newest-first, the Before cursor is a Message.ID paging toward older messages, and
 // the page-size limit is clamped to Slack's maximum.
+//
+// # Rate-limit retry (ADR 0005)
+//
+// Outbound posts are hardened against Slack throttling by default. The adapter
+// wraps its Slack Web API call site (chat.postMessage / chat.postEphemeral /
+// conversations.open) with bounded retry on a Slack 429 (honoring the Retry-After
+// header, in seconds) and the ratelimited API error. Retry is bounded three ways:
+// an attempt cap (Options.RetryPolicy.MaxAttempts), a cumulative backoff ceiling
+// (MaxElapsed), and the caller's context deadline. The single load-bearing
+// invariant is that in-line synchronous retry never sleeps past the caller's
+// context deadline, so retry under the default DispatchSync stays inside Slack's
+// 3-second ack window and cannot trigger a platform redelivery storm.
+//
+// The RetryPolicy is per-adapter platform config in Options, never Runtime
+// Options. Its zero value is a conservative default that keeps MaxElapsed under
+// the ack window, so retry is on out of the box; set MaxAttempts: 1 to disable it
+// and get raw single-shot behavior. A throttle whose Retry-After does not fit the
+// window, or exhausted retries, surface as a typed *slack.RateLimited error
+// carrying the adapter name, last Retry-After, attempt count, and the raw platform
+// response as a Platform Escape Hatch. Callers branch on it to defer (onto the
+// ADR 0002 Detached Work Context under DispatchDeferred), drop, or notify rather
+// than string-matching a generic error. Every attempt emits chat.ObsAdapterCall
+// and every throttle emits chat.ObsRateLimit through the configured Observer (ADR
+// 0010), with exhaustion additionally logged as a structured slog record; there is
+// no global or cross-adapter limiter and no runtime-owned outbound queue.
 package slack

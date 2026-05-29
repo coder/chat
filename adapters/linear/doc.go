@@ -62,14 +62,22 @@
 //
 // # Observation and rate limiting
 //
-// Outbound Linear rate-limit retry/backoff lives in the adapter (RetryPolicy). It
-// is bounded by attempt count and cumulative backoff, honors Linear's Retry-After,
-// and never sleeps past the request context deadline so it cannot violate the
-// first-thought window; exhaustion returns a typed *RateLimited error. Timing,
-// signal, ephemeral-rejection, completion, and rate-limit behavior are reported as
-// structured slog records on the adapter's logger, the Runtime Observation surface
-// available today (a dedicated cross-adapter Observation Hook is ADR 0010, out of
-// scope here).
+// Outbound Linear rate-limit retry/backoff lives in the adapter (RetryPolicy,
+// ADR 0005). It is bounded three ways -- an attempt cap (MaxAttempts), a cumulative
+// backoff ceiling (MaxElapsed), and the request context deadline -- and honors
+// Linear's Retry-After. The load-bearing invariant is that retry never sleeps past
+// the request context deadline, so it cannot push the first Agent Activity Thought
+// past the first-thought window (ADR 0008). The zero-value RetryPolicy is a
+// conservative default (retry on by default); MaxAttempts: 1 disables it. Exhaustion,
+// or a backoff that would exceed the deadline, returns a typed *RateLimited error
+// carrying the adapter name, last Retry-After, attempt count, and the raw platform
+// response as a Platform Escape Hatch, so a caller can defer the work onto the
+// ADR 0002 Detached Work Context, drop, or notify. Every attempt emits
+// chat.ObsAdapterCall and every observed throttle emits chat.ObsRateLimit through
+// the configured Observer (ADR 0010), the same Observation Hook the Slack adapter
+// feeds; exhaustion is additionally logged as a structured slog record. Timing,
+// signal, ephemeral-rejection, and completion behavior are likewise reported as
+// structured slog records on the adapter's logger.
 //
 // # Multi-tenant installs (ADR 0006)
 //

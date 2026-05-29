@@ -3,8 +3,10 @@ package slack_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,15 +74,22 @@ func TestSlackReadHistoryEmitsAdapterCallObservation(t *testing.T) {
 	}
 }
 
-// A 429 from the platform read surfaces an error AND emits ObsRateLimit through the
-// shared seam, so read-side rate limiting is observable and never silently dropped
-// (ADR 0005 backoff is adapter-owned and bounded by the caller's context).
+// A persistent 429 on a read exhausts adapter-owned bounded retry (ADR 0005) and
+// surfaces a typed *slack.RateLimited, with the throttled attempt emitting
+// ObsRateLimit through the shared seam, so read-side rate limiting is observable
+// and never silently dropped. The read inherits the same retry path as outbound
+// posts; MaxAttempts: 1 keeps this assertion deterministic and single-shot.
 func TestSlackReadHistoryRateLimitObservedAndErrors(t *testing.T) {
 	t.Parallel()
 
+	var calls int
+	var mu sync.Mutex
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/conversations.replies", "/conversations.history":
+			mu.Lock()
+			calls++
+			mu.Unlock()
 			w.Header().Set("Retry-After", "1")
 			w.WriteHeader(http.StatusTooManyRequests)
 			_, _ = w.Write([]byte(`{"ok":false,"error":"ratelimited"}`))
@@ -92,19 +101,42 @@ func TestSlackReadHistoryRateLimitObservedAndErrors(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	obs := &countingObserver{}
-	bot := newSlackHistoryRuntimeWithObserver(t, server.URL, server.Client(), obs)
+	adapter, err := slack.New(context.Background(), slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		TeamID:        "T1",
+		BotUserID:     "UBOT",
+		BotID:         "BBOT",
+		APIBaseURL:    server.URL,
+		Client:        server.Client(),
+		Observer:      obs,
+		RetryPolicy:   slack.RetryPolicy{MaxAttempts: 1},
+	})
+	if err != nil {
+		t.Fatalf("new slack adapter: %v", err)
+	}
+	bot, err := chat.New(context.Background(), chat.WithState(memory.New()), chat.WithAdapter(adapter))
+	if err != nil {
+		t.Fatalf("new chat runtime: %v", err)
+	}
 	hr := slackHistoryReaderFor(t, bot)
 
 	id := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "111.000")
 	msgs, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Limit: 5})
-	if err == nil {
-		t.Fatal("expected error on 429 rate-limited read")
+	var limited *slack.RateLimited
+	if !errors.As(err, &limited) {
+		t.Fatalf("err = %v, want *slack.RateLimited on a throttled read", err)
 	}
 	if msgs != nil {
 		t.Fatalf("messages = %#v, want nil on rate-limit error", msgs)
 	}
 	if obs.count(chat.ObsRateLimit) == 0 {
 		t.Fatal("expected ObsRateLimit observation on 429 read")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("read calls = %d, want 1 (MaxAttempts: 1 is single-shot)", calls)
 	}
 }
 

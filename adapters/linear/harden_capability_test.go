@@ -173,6 +173,50 @@ func TestRateLimitGraphQLRatelimitedRetries(t *testing.T) {
 	}
 }
 
+// TestRateLimitDeadlineReturnsTypedRateLimited verifies ADR 0005 Decision 5
+// reconciled across adapters: when the next backoff would exceed the caller's
+// context deadline, Linear returns a typed *RateLimited promptly (so the caller
+// can move the work to the Detached Work Context) rather than sleeping into a
+// missed deadline or surfacing a bare context error.
+func TestRateLimitDeadlineReturnsTypedRateLimited(t *testing.T) {
+	t.Parallel()
+
+	api := newLinearAPIServer(t, 3600)
+	api.rateLimit = 100 // always throttle
+	now := func() time.Time { return time.Now() }
+	bot, adapter := newLinearRuntime(t, api, linear.Options{
+		WebhookSecret: "whsec",
+		Now:           now,
+		// Backoff far larger than the deadline so the pre-sleep deadline check fires
+		// on the first retry rather than the attempt cap or MaxElapsed.
+		RetryPolicy: linear.RetryPolicy{MaxAttempts: 5, MaxElapsed: time.Hour, BaseDelay: time.Hour, MaxDelay: time.Hour},
+	})
+	threadID := agentSessionThread(t, bot, api, now())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := adapter.PostThought(ctx, threadID, "thinking")
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		var rl *linear.RateLimited
+		if !errors.As(err, &rl) {
+			t.Fatalf("err = %v, want *linear.RateLimited (deadline-bounded, not slept off)", err)
+		}
+		if elapsed := time.Since(start); elapsed > time.Second {
+			t.Fatalf("PostThought took %s; it must not sleep past the context deadline", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("PostThought slept past its caller deadline: a long backoff was not deadline-bounded")
+	}
+}
+
 // TestRateLimitRetryStopsAtContextCancel verifies bounded retry never sleeps past
 // the request context: a cancelled context aborts the retry loop with the context
 // error rather than a RateLimited (the first-thought window is never violated).

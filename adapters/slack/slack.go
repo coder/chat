@@ -48,6 +48,11 @@ type Options struct {
 	// Observer receives adapter-facing observations (ObsAdapterCall, ObsRateLimit);
 	// it is adapter-owned wiring, not on the core Adapter interface. Nil is a no-op.
 	Observer chat.Observer
+	// RetryPolicy bounds outbound Slack rate-limit retry/backoff (ADR 0005). The
+	// zero value applies a conservative default that stays well under Slack's
+	// 3-second ack window; MaxAttempts: 1 disables retry. It is per-adapter
+	// platform config, never Runtime Options.
+	RetryPolicy RetryPolicy
 }
 
 // SlackInstall is the adapter-specific Install.Credential payload for Slack, a
@@ -75,6 +80,7 @@ type Adapter struct {
 	disableNativeEphemeral bool
 	logger                 *slog.Logger
 	observer               chat.Observer
+	retryPolicy            RetryPolicy
 }
 
 // slackInstall is the resolved per-event credential the webhook and posting paths
@@ -128,6 +134,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	if observer == nil {
 		observer = noopObserver{}
 	}
+	retryPolicy := opts.RetryPolicy.withDefaults()
 	return &Adapter{
 		signingSecret:          opts.SigningSecret,
 		botToken:               opts.BotToken,
@@ -142,6 +149,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		disableNativeEphemeral: opts.DisableNativeEphemeral,
 		logger:                 logger,
 		observer:               observer,
+		retryPolicy:            retryPolicy,
 	}, nil
 }
 
@@ -661,10 +669,11 @@ func (a *Adapter) call(ctx context.Context, method string, payload any, dest any
 }
 
 // callWithToken posts to the Slack Web API authorizing with the given per-workspace
-// bot token. It is the single outbound seam both modes share.
+// bot token. It is the single outbound seam both modes share. Bounded rate-limit
+// retry lives in doWithRetry (ADR 0005): a transient Slack 429 or ratelimited
+// envelope is retried within the per-adapter RetryPolicy and the caller's context
+// deadline, then surfaced as a typed *RateLimited on exhaustion.
 func (a *Adapter) callWithToken(ctx context.Context, token string, method string, payload any, dest any) error {
-	a.observer.Event(ctx, chat.ObsAdapterCall, chat.AdapterAttr(adapterName))
-
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("slack: encode %s request: %w", method, err)
@@ -675,23 +684,7 @@ func (a *Adapter) callWithToken(ctx context.Context, token string, method string
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := a.client.Do(req)
-	if err != nil {
-		return fmt.Errorf("slack: %s request: %w", method, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusTooManyRequests {
-		a.observer.Event(ctx, chat.ObsRateLimit, chat.AdapterAttr(adapterName))
-		return fmt.Errorf("slack: %s status %d", method, resp.StatusCode)
-	}
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("slack: %s status %d", method, resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(dest); err != nil {
-		return fmt.Errorf("slack: decode %s response: %w", method, err)
-	}
-	return nil
+	return a.doWithRetry(ctx, method, req, dest)
 }
 
 type eventEnvelope struct {

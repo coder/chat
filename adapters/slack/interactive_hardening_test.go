@@ -3,6 +3,7 @@ package slack_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -417,6 +418,69 @@ func TestSlackRespondURLPostsToEscapeHatchURL(t *testing.T) {
 	// A Raw escape hatch with no response_url is an explicit error.
 	if err := adapter.RespondURL(context.Background(), struct{}{}, chat.Text("x")); err == nil {
 		t.Fatal("RespondURL with no response_url must error")
+	}
+}
+
+// TestSlackRespondURLRetriesThrottleThenTypedRateLimited proves the response_url
+// escape-hatch post shares the bounded rate-limit retry seam (ADR 0005): a
+// persistent 429 with Retry-After is retried within the RetryPolicy and surfaces a
+// typed *slack.RateLimited on exhaustion, not a generic error, so a caller can
+// defer or notify.
+func TestSlackRespondURLRetriesThrottleThenTypedRateLimited(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+
+	var mu sync.Mutex
+	var hits int
+	respServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		hits++
+		mu.Unlock()
+		w.Header().Set("Retry-After", "0")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer respServer.Close()
+
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+		RetryPolicy:   slack.RetryPolicy{MaxAttempts: 3, MaxElapsed: time.Second, BaseDelay: time.Millisecond, MaxDelay: 5 * time.Millisecond},
+	})
+	adapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
+	if !ok {
+		t.Fatal("typed adapter access failed")
+	}
+
+	var captured any
+	bot.OnCommand(func(ctx context.Context, ev *chat.CommandEvent) error {
+		captured = ev.Command.Raw
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	form := signedCommandForm()
+	form.Set("response_url", respServer.URL)
+	if rec := serveSignedSlackForm(t, handler, now, form); rec.Code != http.StatusOK {
+		t.Fatalf("command status = %d", rec.Code)
+	}
+
+	err = adapter.RespondURL(context.Background(), captured, chat.Text("queued"))
+	var limited *slack.RateLimited
+	if !errors.As(err, &limited) {
+		t.Fatalf("err = %v, want *slack.RateLimited on a throttled response_url", err)
+	}
+	if limited.Attempts != 3 {
+		t.Fatalf("attempts = %d, want 3 (== MaxAttempts)", limited.Attempts)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if hits != 3 {
+		t.Fatalf("response_url hits = %d, want 3 (bounded by MaxAttempts)", hits)
 	}
 }
 
