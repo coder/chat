@@ -76,6 +76,10 @@ _Avoid_: Core routing hook
 A platform command invocation that is distinct from a normal message-created **Event**.
 _Avoid_: Message, pattern match
 
+**Interaction Event**:
+A normalized non-message **Event** for a platform interactive-component action such as a button click or menu select, sibling to a **Command Event**.
+_Avoid_: Message, command event
+
 **Middleware**:
 A user-defined dispatch wrapper that can alter or short-circuit runtime handler flow.
 _Avoid_: Observer, logger
@@ -83,6 +87,10 @@ _Avoid_: Observer, logger
 **Runtime Observation**:
 Structured visibility into runtime decisions such as ignored events, dedupe, lock conflicts, routing, and handler failures.
 _Avoid_: Middleware, metrics framework
+
+**Observation Hook**:
+An optional observe-only metrics and tracing surface beyond structured-log **Runtime Observation**, with a no-op default and no hard telemetry dependency.
+_Avoid_: Metrics framework, middleware, bundled exporter
 
 **Webhook Handler**:
 An `http.Handler` entrypoint exposed by the runtime for one **Platform Adapter**.
@@ -217,9 +225,29 @@ _Avoid_: Typing indicator, final response, generic status update
 A Linear app-actor output that posts the agent's final textual response into an agent session.
 _Avoid_: Generic issue comment, thought, plan update, action log
 
+**Agent Activity Elicitation**:
+A Linear app-actor agent activity that requests input from the user and is one of the three session-completion signals.
+_Avoid_: Thought, final response, error
+
+**Agent Activity Action**:
+A Linear app-actor agent activity that records an external action the agent took.
+_Avoid_: Response, thought, plan update
+
+**Agent Activity Error**:
+A Linear app-actor agent activity that ends a failed agent session as one of the three completion signals.
+_Avoid_: Ignored failure, silent session abandonment
+
+**Agent Session Timing Contract**:
+Linear's expectation that an app posts a first **Agent Activity Thought** within ~10s of session creation and may follow up for ~30 minutes.
+_Avoid_: Unbounded session, single synchronous turn
+
 **Postable Message**:
 A normalized outbound message body that adapters can render to their platform's native posting API.
 _Avoid_: Card DSL, native payload
+
+**Native Content**:
+An explicitly platform-native rich body such as Block Kit or an Adaptive Card, sent through an **Optional Capability** via **Adapter Access** rather than as a **Postable Message**.
+_Avoid_: Cross-platform card model, portable rich body
 
 **Sent Message**:
 A platform-created outbound message record returned by a successful post operation.
@@ -322,7 +350,10 @@ _Avoid_: Full platform schema, strict external SDK model
 - A **Linear App-Actor Slice** may expose **Agent Activity Thought** through **Adapter Access** as a Linear-specific escape hatch instead of adding a generic typing or thinking API to the **Go Chat Runtime**.
 - Failure to post an **Agent Activity Thought** should not prevent posting the eventual **Agent Activity Response** in example application code.
 - Posting to a **Linear Agent Session Thread** in the **Linear App-Actor Slice** creates an **Agent Activity Response** rather than a generic issue comment.
-- The **Linear App-Actor Slice** rejects non-agent-session Linear thread IDs until generic issue/comment posting is separately designed.
+- The Linear adapter supports generic issue/comment participation alongside agent sessions: inbound Linear `Comment` webhooks normalize into **Message Events**, and **Thread.Post** routes by thread kind — an **Agent Activity Response** for agent-session threads, an ordinary issue comment for issue-comment threads — with the thread kind carried inside the opaque adapter-produced **Thread ID**.
+- Linear app-actor agent activities are five types: **Agent Activity Thought**, **Agent Activity Response**, **Agent Activity Elicitation**, **Agent Activity Action**, and **Agent Activity Error**; a session completes via response, elicitation, or error, and only thought and action activities may be ephemeral.
+- The **Agent Session Timing Contract** is honored through the shared deferred-dispatch primitive (**Dispatch Mode** / **Ack-Then-Work** / **Detached Work Context**), not a Linear-private async path.
+- Both Linear participation modes remain **Single-Install** app-actor on **App-Actor Client Credentials**, not a personal-API-key user bot.
 - Posting to a **Thread** replies to that conversation address; it does not create a new root/channel message by default.
 - A **Direct Message Thread** follows normal **Thread** routing and posting semantics once it exists.
 - An inbound **Direct Message Thread** message is treated as an implicit **New Mention** when the thread is not subscribed.
@@ -337,9 +368,10 @@ _Avoid_: Full platform schema, strict external SDK model
 - A **Subscribed Thread** remains subscribed until the application explicitly unsubscribes it.
 - A **New Mention** handler must explicitly subscribe a **Thread**; successful handler completion does not subscribe automatically.
 - A **Pattern Handler** is deferred until the core new-mention and subscribed-message routing semantics are proven.
-- **Command Event** support is deferred until after the **Slack-First Slice** proves message conversation routing.
+- **Command Event** support ships as a non-message **Event** routed by a single-slot OnCommand **Routing Hook** regardless of subscription state; **Interaction Events** cover Slack `block_actions` (button clicks, menu selects) through a single-slot OnInteraction hook, while modal `view_submission` stays deferred because its synchronous response is incompatible with **Ack-Then-Work**.
+- OnCommand and OnInteraction are single-slot **Routing Hooks** like OnNewMention and OnSubscribedMessage (atomic-replace, no-op when unset).
 - **Middleware** is deferred from the MVP public API so runtime dispatch invariants remain simple.
-- The MVP includes **Runtime Observation** through structured logging, not middleware or a metrics framework.
+- **Runtime Observation** defaults to structured logging, not middleware or a metrics framework; an optional **Observation Hook** adds an observe-only metrics and tracing seam with no hard telemetry dependency in the core.
 - The runtime exposes **Webhook Handlers** and does not own HTTP server, router, TLS, or graceful-shutdown concerns.
 - A **Webhook Mount** fails immediately when the named adapter is not registered.
 - A **Platform Adapter** handles its own **Platform Handshake** requests before runtime dispatch.
@@ -384,7 +416,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - A **Platform Escape Hatch** supports platform-specific needs, but common flows should use normalized **Event**, **Message**, and **Thread** fields.
 - **Adapter Access** is the sanctioned path for platform-specific APIs beyond the normalized runtime surface.
 - Adapter parser structs must not become the stable **Platform Escape Hatch** contract by accident.
-- The first **Postable Message** surface is plain text and markdown; rich cards, files, modals, and platform-native payloads are outside the initial compatibility target.
+- The portable **Postable Message** surface stays plain text and markdown; **Native Content** (Block Kit / Adaptive Card) is reachable as an **Optional Capability** via **Adapter Access**, while files and modals stay deferred.
 - Posting returns a **Sent Message**, but **Outbound Mutation** is deferred from the MVP.
 - The **Slack-First Slice** must support **Ephemeral Message** delivery as a core optional capability.
 - An **Ephemeral Message** is not a normal **Thread** reply and must never fall back to a public reply.
