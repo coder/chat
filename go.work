@@ -2,13 +2,17 @@ go 1.26.3
 
 use (
 	.
+	./examples/slack-nats-state
 	./examples/slack-postgres-state
 	./examples/slack-redis-state
+	./state/nats
 	./state/postgres
 	./state/redis
 )
 
 replace github.com/coder/chat v0.0.0 => .
+
+replace github.com/coder/chat/state/nats v0.0.0 => ./state/nats
 
 replace github.com/coder/chat/state/postgres v0.0.0 => ./state/postgres
 

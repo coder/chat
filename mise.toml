@@ -22,9 +22,14 @@ run = [
 description = "Run adapter-focused tests"
 run = [
   "go test ./adapters/...",
+  "cd state/nats && go test ./...",
   "cd state/postgres && go test ./...",
   "cd state/redis && go test ./...",
 ]
+
+[tasks."test:nats"]
+description = "Run NATS JetStream state tests with an embedded server"
+run = "cd state/nats && go test ./..."
 
 [tasks."test:postgres"]
 description = "Run Postgres state integration tests with Testcontainers"
@@ -41,6 +46,7 @@ run = "go test ./..."
 [tasks."test:examples"]
 description = "Run example module tests"
 run = [
+  "cd examples/slack-nats-state && go test ./...",
   "cd examples/slack-redis-state && go test ./...",
   "cd examples/slack-postgres-state && go test ./...",
 ]

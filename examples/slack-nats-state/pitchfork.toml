@@ -1,0 +1,6 @@
+namespace = "chat-sdk-go-slack-nats-state"
+
+[daemons.nats]
+run = "docker compose up nats"
+ready_cmd = "docker compose exec -T nats wget -q -O- http://localhost:8222/healthz"
+auto = ["start", "stop"]

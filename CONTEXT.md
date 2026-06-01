@@ -133,6 +133,11 @@ A production **Runtime State** implementation for deployments that already use
 Postgres as their coordination store.
 _Avoid_: Thread application state, product database schema
 
+**NATS State**:
+A production **Runtime State** implementation for deployments standardized on
+NATS JetStream as their coordination store.
+_Avoid_: Core NATS pub/sub, message bus, per-key TTL
+
 **Webhook Event**:
 A single inbound delivery from a platform adapter before runtime dedupe and handler routing.
 _Avoid_: Message, request
