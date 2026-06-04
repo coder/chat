@@ -8,10 +8,8 @@ import (
 	"github.com/coder/chat"
 )
 
-// activity is the Supported Platform Shape of a Bot Framework Activity: only the
-// fields this slice reads. Decoding is permissive -- unrelated Bot Framework fields
-// are tolerated -- and the full raw JSON is preserved as the Platform Escape Hatch
-// on both Event.Raw and Message.Raw.
+// activity is the supported subset of a Bot Framework Activity; decoding is
+// permissive and the full raw JSON is preserved as the Platform Escape Hatch.
 type activity struct {
 	Type         string              `json:"type"`
 	ID           string              `json:"id"`
@@ -55,16 +53,11 @@ type entity struct {
 	Mentioned channelAccount `json:"mentioned"`
 }
 
-// normalizeActivity converts a decoded Activity into a runtime Event. It returns
-// ok=false for the Ignored Events of this slice: any non-message activity type, and
-// the bot's own messages.
-//
-// Self-filtering is authoritative HERE, not at the runtime's BotActor()/isSelfActor
-// match: a single-install Teams bot can receive activity from more than one Platform
-// Tenant, so the runtime's tenant-scoped isSelfActor cannot catch the bot's own echo
-// (its Tenant is the home tenant, the echo carries the conversation tenant). This is
-// the same reason the Slack multi-tenant path drops self messages in the adapter. It
-// depends on a.botID being the bot's true self id (spike-required, Open Question 10).
+// normalizeActivity converts a message Activity into an Event, returning ok=false
+// for Ignored Events (non-message types and the bot's own messages). The self-drop
+// here is the authoritative Self Message filter: a single-install bot can span
+// tenants, so the runtime's tenant-scoped isSelfActor cannot catch its echo. It
+// relies on a.botID being the bot's true id (spike-required, Open Question 10).
 func (a *Adapter) normalizeActivity(act activity) (*chat.Event, bool, error) {
 	if !strings.EqualFold(act.Type, "message") {
 		return nil, false, nil
@@ -124,11 +117,9 @@ func (a *Adapter) normalizeActivity(act activity) (*chat.Event, bool, error) {
 	}, true, nil
 }
 
-// actorForActivity maps the inbound author. The canonical Actor.ID prefers
-// from.aadObjectId (tenant-stable across conversations) and falls back to from.id;
-// a self-authored message (from.id == the configured bot id) is tagged BotBot with
-// from.id so it matches BotActor() for Self Message filtering. The exact canonical
-// key is spike-required (ADR 0007 Open Question 10).
+// actorForActivity maps the inbound author: Actor.ID prefers the tenant-stable
+// from.aadObjectId, except a self-authored message keeps from.id so it matches
+// a.botID for self-filtering (canonical key spike-required, Open Question 10).
 func (a *Adapter) actorForActivity(act activity) chat.Actor {
 	id := firstNonEmpty(act.From.AADObjectID, act.From.ID)
 	kind := chat.BotHuman
@@ -145,9 +136,8 @@ func (a *Adapter) actorForActivity(act activity) chat.Actor {
 	}
 }
 
-// botMentioned reports whether the bot is @mentioned, derived from the Activity's
-// mention entities (mentioned.id == the bot's recipient id), never from substring
-// matching on display-name text. The inbound recipient is, by definition, the bot.
+// botMentioned reports whether the bot is @mentioned, from the Activity's mention
+// entities (the inbound recipient is the bot), never from substring text matching.
 func botMentioned(act activity) bool {
 	botID := act.Recipient.ID
 	if botID == "" {
@@ -161,15 +151,9 @@ func botMentioned(act activity) bool {
 	return false
 }
 
-// stripBotMention removes the bot mention from the message text so handlers see the
-// user's actual words. Teams embeds the mention as "<at>Bot</at>" both in the text
-// and as an entity carrying that exact substring; the entity text is the reliable
-// thing to strip. Only the first occurrence is removed, so a token the user
-// legitimately repeats later in the message is preserved. The leading-<at> fallback
-// applies only when the bot is mentioned but no entity carried text, so it never
-// strips another user's leading mention. The caller passes the already-computed
-// mentioned flag to avoid re-scanning the entities. Markdown subset fidelity beyond
-// this is spike-required (ADR 0007 Open Question 5).
+// stripBotMention removes the bot's mention so handlers see the user's words: it
+// deletes the mention entity's exact text (first occurrence only), falling back to a
+// leading <at>...</at> only when the bot is mentioned but the entity carried no text.
 func stripBotMention(act activity, mentioned bool) string {
 	text := act.Text
 	botID := act.Recipient.ID

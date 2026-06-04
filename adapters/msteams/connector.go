@@ -46,15 +46,13 @@ func (e *ConnectorError) Error() string {
 
 func (e *ConnectorError) Unwrap() error { return e.Err }
 
-// PostMessage maps a Thread.Post to the Connector "send to conversation" REST call
-// (POST {serviceUrl}/v3/conversations/{conversationId}/activities) using the
-// serviceUrl from the opaque Thread ID as the base URI. Plain Text renders with
-// textFormat=plain and Portable Markdown with textFormat=markdown; the Sent Message
-// id is the ResourceResponse id. Within a turn this is the bot's reply; out of band
-// it is a proactive post -- the same call, which is why proactive 403s surface here
-// as ErrBotNotInstalled / ErrMessageWritesBlocked.
+// PostMessage maps Thread.Post to the Connector "send to conversation" REST call,
+// using the serviceUrl from the opaque Thread ID as the base URI. It is also the
+// proactive-post path, so its 403s surface as ErrBotNotInstalled /
+// ErrMessageWritesBlocked. The conversationReference is decoded from the Thread ID
+// (the authoritative source), not trusted from ThreadRef.Raw.
 func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg chat.PostableMessage) (*chat.SentMessage, error) {
-	ref, err := connRefForThread(thread)
+	ref, err := decodeThreadID(thread.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -77,14 +75,6 @@ func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg ch
 		return nil, err
 	}
 	return &chat.SentMessage{ID: resp.ID, ThreadID: thread.ID, Raw: resp}, nil
-}
-
-// connRefForThread decodes the conversationReference from the opaque Thread ID, the
-// authoritative source. It deliberately does NOT trust ThreadRef.Raw: a caller-built
-// ref whose Raw disagreed with its ID would otherwise post to the wrong conversation
-// while reporting the ID's conversation.
-func connRefForThread(thread chat.ThreadRef) (conversationReference, error) {
-	return decodeThreadID(thread.ID)
 }
 
 func textFormatFor(format chat.MessageFormat) (string, error) {

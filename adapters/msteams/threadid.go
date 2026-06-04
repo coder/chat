@@ -15,16 +15,10 @@ const (
 	threadIDPrefix = "msteams:v1:"
 )
 
-// conversationReference is the minimal, restart-durable subset of the Bot
-// Framework conversationReference needed to post back to a Teams conversation
-// later -- either a reply within the turn or a proactive post after it. It is the
-// payload serialized into the opaque, adapter-produced Thread ID.
-//
-// serviceUrl is carried (unlike Slack's human-style channel+ts id) because Teams
-// proactive posting cannot be reconstructed from a short id, and Microsoft warns
-// serviceUrl can change over time, so the adapter refreshes it from each inbound
-// Activity. tenantId is carried so the Thread ID is Platform Tenant scoped and
-// cross-tenant collisions are impossible.
+// conversationReference is the minimal subset of the Bot Framework
+// conversationReference serialized into the opaque Thread ID -- enough to post back
+// later (reply or proactive). Unlike Slack's short channel+ts id, it must carry
+// serviceUrl (proactive posting can't reconstruct it) and tenantId (tenant scoping).
 type conversationReference struct {
 	ServiceURL       string `json:"service_url"`
 	ConversationID   string `json:"conversation_id"`

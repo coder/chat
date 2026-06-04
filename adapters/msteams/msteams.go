@@ -172,14 +172,11 @@ func (a *Adapter) Init(ctx context.Context) error {
 
 func (a *Adapter) Shutdown(context.Context) error { return nil }
 
-// Webhook handles inbound Activities at the bot messaging endpoint. It decodes the
-// Activity (a Supported Platform Shape), validates the inbound JWT before any
-// normalization or dispatch (there is no path that skips validation), normalizes a
-// message Activity into a runtime Event, dispatches synchronously, then acks with
-// HTTP 200. The reply, if any, was sent by the handler via Thread.Post as a separate
-// authenticated Connector call during dispatch -- there is no webhook-body reply
-// shortcut for message activities. Work exceeding the turn budget is the runtime's
-// Ack-Then-Work concern (ADR 0002), delivered later via a proactive Connector post.
+// Webhook validates the inbound JWT before any normalization or dispatch (no path
+// skips it), normalizes a message Activity into an Event, dispatches synchronously,
+// then acks with HTTP 200. The reply is sent by the handler via Thread.Post as a
+// separate Connector call -- there is no webhook-body reply for message activities;
+// work past the turn budget uses ADR 0002 Ack-Then-Work plus a proactive post.
 func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {

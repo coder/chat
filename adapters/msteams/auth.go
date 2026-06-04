@@ -41,16 +41,12 @@ const (
 // Connector treats as a permanent rejection and drops.
 var errKeysUnavailable = errors.New("msteams: signing keys temporarily unavailable")
 
-// authValidator performs every mandatory inbound Bot Connector JWT check against a
-// JWKS resolved from the Bot Framework OpenID metadata, plus the Bot Framework
-// channel-endorsement check. It is a deep adapter-internal module behind a single
-// validate method; there is deliberately no switch to disable any check. It is
-// testable with a fake metadata+JWKS server and in-test RSA keys.
-//
-// JWT parsing and RS256 verification are stdlib-only (crypto/rsa over a public key
-// rebuilt from the JWK n/e), so the otherwise zero-dependency core module gains no
-// JWT library. This is a deliberate spike finding for ADR 0007 Open Question 9
-// (msbotbuilder-go is not adopted, and even golang-jwt is unnecessary here).
+// authValidator performs every mandatory inbound Bot Connector JWT check against the
+// Bot Framework JWKS, plus the channel-endorsement check; no switch disables any
+// check. JWT parsing and RS256 verification are stdlib-only (crypto/rsa over a key
+// rebuilt from the JWK n/e), so the zero-dependency core gains no JWT library -- a
+// deliberate spike finding for Open Question 9 (msbotbuilder-go not adopted,
+// golang-jwt unnecessary).
 type authValidator struct {
 	appID         string
 	openIDMetaURL string
@@ -258,13 +254,10 @@ func (v *authValidator) getJSON(ctx context.Context, url string, dest any) error
 	return json.Unmarshal(body, dest)
 }
 
-// checkEndorsement enforces that the signing key endorses the required channel: the
-// key's endorsements must contain it, or the request is rejected (HTTP 403 at the
-// caller). Callers pass the adapter's own channel constant, never an Activity-body
-// value, so an empty/spoofed body channelId cannot bypass the check. This is the
-// strict reading of ADR 0007; whether msteams strictly requires the endorsement, and
-// the exact rule, is spike-required (Open Question 3). Failing closed is the safer
-// default for a security check a human will validate before production.
+// checkEndorsement enforces that the signing key endorses the required channel.
+// Callers pass the adapter's own channel constant, never an Activity-body value, so
+// a spoofed/empty channelId cannot bypass it. It fails closed; the exact rule is
+// spike-required (Open Question 3).
 func checkEndorsement(key jwk, channelID string) error {
 	for _, e := range key.Endorsements {
 		if strings.EqualFold(e, channelID) {
