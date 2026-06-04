@@ -67,7 +67,6 @@ type Options struct {
 // minting, Activity normalization, the opaque conversationReference Thread ID, and
 // Connector posting); the runtime is unchanged.
 type Adapter struct {
-	appID       string
 	botID       string
 	botName     string
 	tenantID    string
@@ -132,7 +131,6 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	}
 
 	return &Adapter{
-		appID:       opts.MicrosoftAppID,
 		botID:       botID,
 		botName:     opts.BotName,
 		tenantID:    opts.TenantID,
@@ -206,15 +204,24 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			return
 		}
 
-		if err := a.validator.validate(r.Context(), r.Header.Get("Authorization"), act.ServiceURL, act.ChannelID); err != nil {
+		if err := a.validator.validate(r.Context(), r.Header.Get("Authorization"), act.ServiceURL); err != nil {
 			a.logger.Warn("msteams inbound auth rejected", "error", err)
+			// A transient inability to fetch signing keys is the adapter's failure,
+			// not a bad token: return a retryable 5xx so the Connector redelivers,
+			// rather than a 403 it treats as permanent (silently dropping a valid
+			// Activity).
+			if errors.Is(err, errKeysUnavailable) {
+				http.Error(w, "msteams signing keys unavailable", http.StatusServiceUnavailable)
+				return
+			}
 			http.Error(w, "invalid msteams authorization", http.StatusForbidden)
 			return
 		}
 
 		event, ok, err := a.normalizeActivity(act)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			a.logger.Warn("msteams normalize failed", "error", err)
+			http.Error(w, "invalid msteams activity", http.StatusBadRequest)
 			return
 		}
 		if ok {
@@ -245,9 +252,14 @@ func (a *Adapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, error) {
 	}, nil
 }
 
-// BotActor is the adapter's own identity for runtime Self Message filtering. The
-// Tenant is the configured home tenant (single-install); per-tenant self-filtering
-// is additionally enforced in normalizeActivity because one bot can span tenants.
+// BotActor is the adapter's own identity, exposed for the chat.Adapter contract and
+// Thread Handle use. Note: for Teams, Self Message filtering is done authoritatively
+// in normalizeActivity (it drops the bot's own echo before dispatch), so the
+// runtime's BotActor()/isSelfActor match does not independently fire for Teams
+// messages — its Tenant is the configured home tenant while inbound actors carry the
+// per-Activity conversation tenant. That self-drop is load-bearing and depends on
+// BotID being correct (spike-required, ADR 0007 Open Question 10); set Options.BotID
+// if the real Teams bot id is not "28:"+MicrosoftAppID.
 func (a *Adapter) BotActor() chat.Actor {
 	return chat.Actor{
 		Adapter: adapterName,

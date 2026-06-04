@@ -28,7 +28,18 @@ const (
 	defaultJWKSCacheTTL = 24 * time.Hour
 	// clockSkew is the tolerated exp/nbf skew, per Microsoft guidance.
 	clockSkew = 5 * time.Minute
+	// msteamsChannel is the Bot Framework channel id this adapter serves. The
+	// endorsement check is bound to this constant, NOT to the channelId in the
+	// (unauthenticated) Activity body, so the body cannot weaken or skip it.
+	msteamsChannel = "msteams"
 )
+
+// errKeysUnavailable marks an inbound failure caused by the adapter being unable to
+// fetch signing keys (metadata/JWKS transport failure with no usable cached key),
+// as opposed to a token that is genuinely invalid. The caller maps it to a
+// retryable 5xx so the Bot Connector redelivers, rather than a 403 that the
+// Connector treats as a permanent rejection and drops.
+var errKeysUnavailable = errors.New("msteams: signing keys temporarily unavailable")
 
 // authValidator performs every mandatory inbound Bot Connector JWT check against a
 // JWKS resolved from the Bot Framework OpenID metadata, plus the Bot Framework
@@ -84,7 +95,7 @@ type jwtPayload struct {
 // passes; any failure is an error the caller maps to HTTP 403. The serviceUrl claim
 // is bound to the Activity's serviceUrl so a token minted for one service URL
 // cannot be replayed against a spoofed one.
-func (v *authValidator) validate(ctx context.Context, authzHeader, serviceURL, channelID string) error {
+func (v *authValidator) validate(ctx context.Context, authzHeader, serviceURL string) error {
 	raw, err := bearerToken(authzHeader)
 	if err != nil {
 		return err
@@ -114,6 +125,11 @@ func (v *authValidator) validate(ctx context.Context, authzHeader, serviceURL, c
 	if !audienceMatches(payload.Aud, v.appID) {
 		return errors.New("msteams: jwt audience does not match bot app id")
 	}
+	// exp is mandatory: a token without it must fail closed, never be treated as
+	// never-expiring.
+	if payload.Exp == 0 {
+		return errors.New("msteams: jwt missing exp claim")
+	}
 	if !validAt(payload, v.now(), clockSkew) {
 		return errors.New("msteams: jwt outside validity window")
 	}
@@ -123,7 +139,10 @@ func (v *authValidator) validate(ctx context.Context, authzHeader, serviceURL, c
 	if !serviceURLMatches(payload.ServiceURL, serviceURL) {
 		return errors.New("msteams: jwt serviceurl claim does not match activity")
 	}
-	if err := checkEndorsement(key, channelID); err != nil {
+	// Endorsement is checked against this adapter's own channel constant, never the
+	// channelId in the request body, so a caller cannot skip it by omitting/spoofing
+	// channelId.
+	if err := checkEndorsement(key, msteamsChannel); err != nil {
 		return err
 	}
 	return nil
@@ -146,7 +165,10 @@ func (v *authValidator) keyForKid(ctx context.Context, kid string) (jwk, error) 
 		if ok {
 			return key, nil
 		}
-		return jwk{}, err
+		// No cached key and the metadata/JWKS fetch failed: this is an adapter-side
+		// transient failure, not an invalid token. Mark it so the caller returns a
+		// retryable 5xx instead of permanently dropping a possibly-valid Activity.
+		return jwk{}, fmt.Errorf("%w: %v", errKeysUnavailable, err)
 	}
 
 	v.mu.Lock()
@@ -236,16 +258,14 @@ func (v *authValidator) getJSON(ctx context.Context, url string, dest any) error
 	return json.Unmarshal(body, dest)
 }
 
-// checkEndorsement enforces that an msteams Activity's signing key endorses the
-// msteams channel: the matched key's endorsements must contain the channel id, or
-// the request is rejected (HTTP 403 at the caller). This is the strict reading of
-// ADR 0007; whether msteams strictly requires the endorsement, and the exact rule,
-// is spike-required (Open Question 3). Failing closed is the safer default for a
-// security check a human will validate before production.
+// checkEndorsement enforces that the signing key endorses the required channel: the
+// key's endorsements must contain it, or the request is rejected (HTTP 403 at the
+// caller). Callers pass the adapter's own channel constant, never an Activity-body
+// value, so an empty/spoofed body channelId cannot bypass the check. This is the
+// strict reading of ADR 0007; whether msteams strictly requires the endorsement, and
+// the exact rule, is spike-required (Open Question 3). Failing closed is the safer
+// default for a security check a human will validate before production.
 func checkEndorsement(key jwk, channelID string) error {
-	if channelID == "" {
-		return nil
-	}
 	for _, e := range key.Endorsements {
 		if strings.EqualFold(e, channelID) {
 			return nil
@@ -321,9 +341,19 @@ func rsaPublicKeyFromJWK(k jwk) (*rsa.PublicKey, error) {
 	if len(nBytes) == 0 || len(eBytes) == 0 {
 		return nil, errors.New("msteams: jwk modulus or exponent empty")
 	}
+	// Guard the exponent against silent truncation by int(...) (it is consumed as a
+	// platform int, 32-bit on some builds): reject anything that does not fit a
+	// positive 32-bit int or is implausibly small.
+	e := new(big.Int).SetBytes(eBytes)
+	if !e.IsInt64() {
+		return nil, errors.New("msteams: jwk exponent too large")
+	}
+	if ev := e.Int64(); ev < 2 || ev > 1<<31-1 {
+		return nil, fmt.Errorf("msteams: jwk exponent %d out of range", ev)
+	}
 	return &rsa.PublicKey{
 		N: new(big.Int).SetBytes(nBytes),
-		E: int(new(big.Int).SetBytes(eBytes).Int64()),
+		E: int(e.Int64()),
 	}, nil
 }
 

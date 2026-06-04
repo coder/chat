@@ -59,11 +59,12 @@ type entity struct {
 // ok=false for the Ignored Events of this slice: any non-message activity type, and
 // the bot's own messages.
 //
-// Self-filtering is done here (not left solely to the runtime's BotActor() match)
-// because a single-install Teams bot can receive activity from more than one
-// Platform Tenant, so the runtime's tenant-scoped isSelfActor cannot be relied on
-// to catch the bot's own echo -- the same reason the Slack multi-tenant path drops
-// self messages in the adapter.
+// Self-filtering is authoritative HERE, not at the runtime's BotActor()/isSelfActor
+// match: a single-install Teams bot can receive activity from more than one Platform
+// Tenant, so the runtime's tenant-scoped isSelfActor cannot catch the bot's own echo
+// (its Tenant is the home tenant, the echo carries the conversation tenant). This is
+// the same reason the Slack multi-tenant path drops self messages in the adapter. It
+// depends on a.botID being the bot's true self id (spike-required, Open Question 10).
 func (a *Adapter) normalizeActivity(act activity) (*chat.Event, bool, error) {
 	if !strings.EqualFold(act.Type, "message") {
 		return nil, false, nil
@@ -91,7 +92,7 @@ func (a *Adapter) normalizeActivity(act activity) (*chat.Event, bool, error) {
 		return nil, false, nil
 	}
 
-	threadID, err := encodeThreadID(conversationReference{
+	ref := conversationReference{
 		ServiceURL:       act.ServiceURL,
 		ConversationID:   act.Conversation.ID,
 		TenantID:         tenantID,
@@ -99,26 +100,25 @@ func (a *Adapter) normalizeActivity(act activity) (*chat.Event, bool, error) {
 		ChannelID:        act.ChannelID,
 		ConversationType: act.Conversation.ConversationType,
 		IsGroup:          act.Conversation.IsGroup,
-	})
+	}
+	threadID, err := encodeThreadID(ref)
 	if err != nil {
 		return nil, false, err
 	}
 
-	direct := act.Conversation.ConversationType == "personal" ||
-		(act.Conversation.ConversationType == "" && !act.Conversation.IsGroup)
-
+	mentioned := botMentioned(act)
 	return &chat.Event{
 		ID:            act.ID,
 		Adapter:       adapterName,
 		Tenant:        tenantID,
 		ThreadID:      threadID,
-		DirectMessage: direct,
+		DirectMessage: ref.direct(),
 		Raw:           act.Raw,
 		Message: &chat.Message{
 			ID:        act.ID,
-			Text:      stripBotMention(act),
+			Text:      stripBotMention(act, mentioned),
 			Author:    author,
-			Mentioned: botMentioned(act),
+			Mentioned: mentioned,
 			Raw:       act.Raw,
 		},
 	}, true, nil
@@ -164,20 +164,23 @@ func botMentioned(act activity) bool {
 // stripBotMention removes the bot mention from the message text so handlers see the
 // user's actual words. Teams embeds the mention as "<at>Bot</at>" both in the text
 // and as an entity carrying that exact substring; the entity text is the reliable
-// thing to strip. The leading-<at> fallback applies only when the bot is mentioned
-// but no entity carried text, so it never strips another user's leading mention.
-// Markdown subset fidelity beyond this is spike-required (ADR 0007 Open Question 5).
-func stripBotMention(act activity) string {
+// thing to strip. Only the first occurrence is removed, so a token the user
+// legitimately repeats later in the message is preserved. The leading-<at> fallback
+// applies only when the bot is mentioned but no entity carried text, so it never
+// strips another user's leading mention. The caller passes the already-computed
+// mentioned flag to avoid re-scanning the entities. Markdown subset fidelity beyond
+// this is spike-required (ADR 0007 Open Question 5).
+func stripBotMention(act activity, mentioned bool) string {
 	text := act.Text
 	botID := act.Recipient.ID
 	stripped := false
 	for _, e := range act.Entities {
 		if strings.EqualFold(e.Type, "mention") && e.Mentioned.ID == botID && e.Text != "" {
-			text = strings.ReplaceAll(text, e.Text, "")
+			text = strings.Replace(text, e.Text, "", 1)
 			stripped = true
 		}
 	}
-	if !stripped && botMentioned(act) {
+	if !stripped && mentioned {
 		text = stripLeadingAtTag(text)
 	}
 	return strings.TrimSpace(text)

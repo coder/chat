@@ -79,12 +79,11 @@ func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg ch
 	return &chat.SentMessage{ID: resp.ID, ThreadID: thread.ID, Raw: resp}, nil
 }
 
-// connRefForThread reuses the conversationReference already attached to a verified
-// ThreadRef.Raw and otherwise decodes the opaque Thread ID.
+// connRefForThread decodes the conversationReference from the opaque Thread ID, the
+// authoritative source. It deliberately does NOT trust ThreadRef.Raw: a caller-built
+// ref whose Raw disagreed with its ID would otherwise post to the wrong conversation
+// while reporting the ID's conversation.
 func connRefForThread(thread chat.ThreadRef) (conversationReference, error) {
-	if ref, ok := thread.Raw.(conversationReference); ok {
-		return ref, nil
-	}
 	return decodeThreadID(thread.ID)
 }
 

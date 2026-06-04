@@ -3,10 +3,12 @@ package msteams_test
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/coder/chat"
+	"github.com/coder/chat/adapters/msteams"
 )
 
 // recordingHandler returns a Webhook handler plus a pointer that is set when the
@@ -104,6 +106,15 @@ func TestWebhookInboundAuthMatrix(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 		},
 		{
+			name: "missing exp rejected",
+			auth: func() string {
+				c := bf.validClaims()
+				delete(c, "exp")
+				return "Bearer " + bf.sign(t, c)
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
 			name: "expired within skew accepted",
 			auth: func() string {
 				c := bf.validClaims()
@@ -172,6 +183,44 @@ func TestWebhookChannelEndorsement(t *testing.T) {
 			t.Fatalf("status = %d dispatched = %v, want 403 no dispatch", rec.Code, *dispatched)
 		}
 	})
+
+	// The endorsement gate must bind to the adapter's own channel, not the
+	// Activity-body channelId, so an attacker holding a token signed by a key that
+	// does NOT endorse msteams cannot skip the check by omitting channelId.
+	t.Run("empty body channelId does not bypass endorsement", func(t *testing.T) {
+		bf := newFakeBotConnector(t)
+		bf.endorsements = []string{"directline"} // signing key does NOT endorse msteams
+		a := newTestAdapter(t, bf, nil)
+		h, dispatched := recordingHandler(a)
+		act := messageActivity()
+		act["channelId"] = "" // attempt to short-circuit the endorsement check
+		rec := postActivity(t, h, "Bearer "+bf.sign(t, bf.validClaims()), act)
+		if rec.Code != http.StatusForbidden || *dispatched {
+			t.Fatalf("status = %d dispatched = %v, want 403 no dispatch (endorsement must not be bypassable)", rec.Code, *dispatched)
+		}
+	})
+}
+
+// TestWebhookKeysUnavailableReturns503 proves that a transient inability to fetch
+// signing keys (metadata/JWKS unreachable, cold cache) returns a retryable 5xx, not a
+// 403 the Connector would treat as permanent and drop a possibly-valid Activity.
+func TestWebhookKeysUnavailableReturns503(t *testing.T) {
+	t.Parallel()
+	bf := newFakeBotConnector(t) // used only to sign the token
+
+	dead := httptest.NewServer(http.NotFoundHandler())
+	deadURL := dead.URL
+	dead.Close() // metadata endpoint is now unreachable
+
+	a := newTestAdapter(t, bf, func(o *msteams.Options) { o.OpenIDMetadataURL = deadURL })
+	h, dispatched := recordingHandler(a)
+	rec := postActivity(t, h, "Bearer "+bf.sign(t, bf.validClaims()), messageActivity())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503 (transient key-fetch failure must be retryable)", rec.Code)
+	}
+	if *dispatched {
+		t.Fatal("must not dispatch when signing keys are unavailable")
+	}
 }
 
 // TestWebhookValidationAlwaysOn proves there is no construction path that turns
