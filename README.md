@@ -518,11 +518,29 @@ chat.RuntimeOptions{
 }
 ```
 
-Two concurrency strategies are implemented: `ConcurrencyDrop` (the default)
-acknowledges and drops events that hit a locked thread, and `ConcurrencyQueue`
-waits for the lock and runs only the most recent superseded follow-up, with
-most-recent coalescing scoped per process (ADR 0012). Burst, debounce, force,
-and concurrent strategies remain proposed in ADR 0012 and are not implemented.
+The runtime implements four of the upstream-aligned strategies (ADR 0012):
+
+- `ConcurrencyDrop` (default): a lock conflict is acknowledged and dropped.
+- `ConcurrencyQueue`: the newest follow-up waits for the in-flight handler;
+  superseded follow-ups are observable, never silent.
+- `ConcurrencyDebounce`: each new event resets a `DebounceInterval` timer; only
+  the final event in a quiet period dispatches. Requires deferred dispatch.
+  Coalescing (like queue supersession) is per runtime instance; instances
+  sharing a state are serialized by the thread lock, not coalesced.
+- `ConcurrencyConcurrent`: no thread lock at all; every event dispatches in its
+  own execution, bounded by `MaxConcurrent`.
+
+The remaining ADR 0012 surface — the `burst` strategy and the
+force/steerability (`onLockConflict`) preemption hook — is staged behind the
+deferred-dispatch admission and fenced-coordination design work; the names
+stay reserved.
+
+`LockScope` chooses what the lock guards: per thread (default) or per channel
+(`LockScopeChannel`) for platforms whose model needs channel-wide ordering.
+
+A deferred handler whose lock lease is lost mid-run (released elsewhere,
+expired, or no longer refreshable) is cancelled with `chat.ErrPreempted` as
+its context cause rather than running on unserialized.
 
 Thread locks use token-owned lock leases. Release and extend operations must
 verify the token so an expired handler cannot release or extend another
@@ -795,8 +813,6 @@ include:
   interaction response needs
 - no bundled metrics framework, exporters, or scrape endpoint (an optional no-op
   `Observer` seam is provided; OpenTelemetry stays out of the core import graph)
-- no burst, debounce, force, or concurrent lock-conflict strategies (drop and
-  queue are implemented)
 - no built-in HTTP server or router integrations
 - no adapter marketplace/package conventions
 

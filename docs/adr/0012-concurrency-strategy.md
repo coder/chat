@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (implementation staged: the `queue` strategy is implemented as the `DispatchDeferred` companion; `burst`, `debounce`, `concurrent`, `lockScope`, and force/steerability remain proposed and unbuilt).
+Accepted (implementation staged: `drop`, `queue`, `debounce`, and `concurrent` strategies plus the `LockScope` option ship in the runtime, with `debounce` requiring `DispatchDeferred`; `burst` and force/steerability are staged behind the deferred-dispatch admission-bound and fenced-coordination design work — see the cross-instance coalescing and admission issues — with their names still reserved).
 
 ## Context
 

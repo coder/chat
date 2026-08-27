@@ -26,6 +26,8 @@ type State struct {
 	once   sync.Once
 }
 
+var _ chat.State = (*State)(nil)
+
 func New(ctx context.Context, opts Options) (*State, error) {
 	if opts.Client == nil {
 		return nil, errors.New("redis state: client is required")

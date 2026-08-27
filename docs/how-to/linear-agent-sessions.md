@@ -148,8 +148,10 @@ This check only runs when the stop event reaches your handler, and events on
 one thread are serialized by the thread lock — a stop arriving while a
 handler is still running cannot preempt it (`ConcurrencyDrop` discards it on
 conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
-returns). There is no pre-lock hook, so **Linear's Stop control cannot cancel
-in-flight work through this adapter today**. What you can do: structure long
+returns). The ADR 0012 force/steerability hook that would allow preemption is
+staged behind the deferred-dispatch coordination design work, so **Linear's
+Stop control cannot cancel in-flight work through this adapter today**. What
+you can do: structure long
 sessions as short handler turns (each turn checks `StopRequested` on the
 event that started it before doing more work — `confirmStop` above is exactly
 that turn-boundary check), or receive the stop signal out-of-band through

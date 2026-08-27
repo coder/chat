@@ -44,6 +44,10 @@ const (
 	OutcomeDroppedLockConflict DispatchOutcome = "dropped-lock-conflict"
 	OutcomeDuplicate           DispatchOutcome = "duplicate"
 	OutcomeError               DispatchOutcome = "error"
+	// OutcomePreempted is the terminal outcome of a handler that stopped because
+	// its Lock Lease was lost mid-run: released by another runtime instance,
+	// expired, or no longer refreshable.
+	OutcomePreempted DispatchOutcome = "preempted"
 )
 
 // Attribute key constants form the documented, stable, low-cardinality set.

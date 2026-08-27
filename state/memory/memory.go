@@ -26,6 +26,8 @@ type lockRecord struct {
 	expiry time.Time
 }
 
+var _ chat.State = (*State)(nil)
+
 func New() *State {
 	return &State{
 		subscribed: map[chat.ThreadID]bool{},
