@@ -49,6 +49,10 @@ sent, err := slackAdapter.PostNative(ctx, ref, chat.NativeContent{
 		},
 	},
 })
+if err != nil {
+	return err
+}
+_ = sent // sent.ID identifies the posted message, like portable posting
 ```
 
 The payload is opaque to the runtime: the adapter neither validates nor
@@ -74,11 +78,18 @@ bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
 `ev.Interaction.Kind` is `chat.InteractionBlockAction` for this slice, and
 `ev.Interaction.Raw` preserves the full Slack payload — including
 `response_url`, `trigger_id`, action values, and view state — as the platform
-escape hatch. The normalized `Actor` carries the Slack user ID, not a display
-name (the interactivity payload does not include one). Note that plain
-`chat.Text` is posted with Slack formatting disabled, so `<@USERID>` mention
-syntax renders literally; to render a real mention, resolve the display
-name via the Slack API or post native Block Kit content instead.
+escape hatch. Be aware that the concrete payload type behind `Raw` is
+currently unexported with no public accessor (tracked in
+[#12](https://github.com/coder/chat/issues/12)): routing on `ActionID` works
+for buttons and menus alike, but reading a menu's *selected option value* is
+not yet possible without re-parsing the webhook JSON yourself. Design around
+distinct `action_id`s where you can until #12 lands.
+
+The normalized `Actor` carries the Slack user ID, not a display name (the
+interactivity payload does not include one). Note that plain `chat.Text` is
+posted with Slack formatting disabled, so `<@USERID>` mention syntax renders
+literally; to render a real mention, resolve the display name via the Slack
+API or post native Block Kit content instead.
 
 Mind the acknowledgement timing: under the default `DispatchSync` mode the
 adapter writes the empty 2xx only *after* your handler returns, so a slow

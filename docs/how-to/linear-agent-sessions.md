@@ -48,10 +48,12 @@ bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 ## Mind The Timing Contract
 
 Linear expects a first activity within roughly 10 seconds of a session event
-and further activity within roughly 30 minutes. Post a quick thought or
-response fast, and use [deferred dispatch](deferred-dispatch.md) for real
-work — your handler moves to a detached work context launched at ack time, so
-the webhook acknowledgement no longer waits on it.
+and further activity within roughly 30 minutes. Post a quick **thought**
+(`PostThought`) fast — not a response: a `response` activity is a completion
+signal that ends the session, so reserve `Thread.Post` for the final answer.
+Use [deferred dispatch](deferred-dispatch.md) for the real work — your
+handler moves to a detached work context launched at ack time, so the webhook
+acknowledgement no longer waits on it.
 
 ## Use The Full Activity Surface
 

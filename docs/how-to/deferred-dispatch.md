@@ -15,9 +15,14 @@ retry or time out.
 2. **Detached tail, launched at ack time**: your handler runs on a
    runtime-managed detached work context, concurrently with the webhook
    response — the acknowledgement no longer waits on your handler (though the
-   tail may begin before the 2xx is actually written). The runtime keeps
-   extending the thread lock lease in the background until the handler
-   returns.
+   tail may begin before the 2xx is actually written). The runtime renews the
+   thread lock lease in the background while the handler runs. If the state
+   backend fails to extend the lease (an error or a lost lease), renewal
+   stops and is logged/observed, but the handler keeps running **without
+   exclusivity** — after the original `ThreadLockTTL` expires, another event
+   on the same thread can acquire the lock and run concurrently. Long
+   handlers should therefore be idempotent or tolerate overlap under state
+   backend failures.
 
 ## Enable It
 
