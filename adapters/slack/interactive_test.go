@@ -217,6 +217,12 @@ func TestSlackBlockActionsInteraction(t *testing.T) {
 	if got.Interaction.Kind != chat.InteractionBlockAction {
 		t.Fatalf("kind = %v", got.Interaction.Kind)
 	}
+	if got.Interaction.Value != "yes" {
+		t.Fatalf("button value = %q, want %q", got.Interaction.Value, "yes")
+	}
+	if got.Interaction.Values != nil {
+		t.Fatalf("button values = %#v, want nil", got.Interaction.Values)
+	}
 	wantActor := chat.Actor{Adapter: "slack", Tenant: "T1", ID: "U1", BotKind: chat.BotHuman}
 	if got.Interaction.Actor != wantActor {
 		t.Fatalf("actor = %#v", got.Interaction.Actor)
@@ -236,9 +242,9 @@ func TestSlackMenuSelectionInteraction(t *testing.T) {
 		BotToken:      "xoxb-test",
 		Now:           func() time.Time { return now },
 	})
-	var actionID string
+	var got *chat.Interaction
 	bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
-		actionID = ev.Interaction.ActionID
+		got = ev.Interaction
 		return nil
 	})
 	handler, err := bot.Webhook("slack")
@@ -252,14 +258,21 @@ func TestSlackMenuSelectionInteraction(t *testing.T) {
 		"team":{"id":"T1"},
 		"user":{"id":"U1"},
 		"container":{"channel_id":"C2","thread_ts":"100.000","message_ts":"444.000"},
-		"actions":[{"action_id":"pick","type":"static_select"}]
+		"actions":[{"action_id":"pick","type":"static_select",
+			"selected_option":{"text":{"type":"plain_text","text":"Staging"},"value":"staging"}}]
 	}`
 	rec := serveSignedSlackInteractivity(t, handler, now, payload)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("menu status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if actionID != "pick" {
-		t.Fatalf("action id = %q", actionID)
+	if got == nil {
+		t.Fatal("menu interaction not dispatched")
+	}
+	if got.ActionID != "pick" {
+		t.Fatalf("action id = %q", got.ActionID)
+	}
+	if got.Value != "staging" {
+		t.Fatalf("selected value = %q, want %q", got.Value, "staging")
 	}
 }
 
