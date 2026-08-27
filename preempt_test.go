@@ -243,6 +243,78 @@ func TestPreemptForceReleasesRemoteLeaseWhenNoLocalVictim(t *testing.T) {
 	}
 }
 
+func TestPreemptSeesLocalOwnerAcquiredDuringPrelude(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	routingStarted := make(chan struct{})
+	continueRouting := make(chan struct{})
+	state.isThreadSubscribedStarted = routingStarted
+	state.continueIsThreadSubscribed = continueRouting
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot := newPreemptRuntime(t, state, adapter, &logs, func(ctx context.Context, ev *chat.Event) bool {
+		return true
+	})
+
+	handled := make(chan string, 2)
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		handled <- ev.Event.ID
+		return nil
+	})
+
+	// The first event acquires its lease in the prelude and then parks in
+	// routing: the window between acquisition and its detached tail must
+	// already carry a local ownership reservation.
+	firstDone := make(chan postEventResult, 1)
+	go func() { firstDone <- postEventResultFor(bot, "fake", mentionEvent("first", "fake:v1:thread-1")) }()
+	select {
+	case <-routingStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first event did not reach routing")
+	}
+
+	// The preemptor arrives inside that window: it must wait for the local
+	// owner, never force-release the freshly acquired lease.
+	if status := postEvent(t, bot, "fake", mentionEvent("preemptor", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("preemptor status = %d", status)
+	}
+	time.Sleep(80 * time.Millisecond)
+	select {
+	case id := <-handled:
+		t.Fatalf("handler %q ran while the owner was still in its prelude", id)
+	default:
+	}
+	if strings.Contains(logs.String(), "forced=true") {
+		t.Fatalf("preemptor force released a fresh local lease; logs:\n%s", logs.String())
+	}
+
+	close(continueRouting)
+	res := <-firstDone
+	if res.err != nil || res.status != http.StatusOK {
+		t.Fatalf("first result status=%d err=%v", res.status, res.err)
+	}
+
+	select {
+	case id := <-handled:
+		if id != "preemptor" {
+			t.Fatalf("handled %q, want preemptor (first was preempted before start)", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("preemptor did not dispatch; logs:\n%s", logs.String())
+	}
+	// The preempted-before-start owner must never run its handler.
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case id := <-handled:
+		t.Fatalf("preempted-before-start handler %q still ran", id)
+	default:
+	}
+	if !strings.Contains(logs.String(), "started=false") {
+		t.Fatalf("pre-start preemption not surfaced; logs:\n%s", logs.String())
+	}
+}
+
 func TestPreemptSupersededPreemptorDoesNotForceRelease(t *testing.T) {
 	t.Parallel()
 
