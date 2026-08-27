@@ -233,7 +233,7 @@ func TestBurstCollectingWindowDrainedByShutdown(t *testing.T) {
 	bot := newBurstRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
 		// Only Shutdown can close the collection window.
 		o.DebounceInterval = time.Hour
-		o.DetachTimeout = time.Hour
+		o.DetachTimeout = 2 * time.Hour
 	})
 
 	var mu sync.Mutex
@@ -303,5 +303,13 @@ func TestBurstConstructionValidation(t *testing.T) {
 		o.DetachTimeout = 0
 	}); err == nil {
 		t.Fatal("expected burst under sync dispatch to fail")
+	}
+	// A detach timeout at or below the interval would abandon every window
+	// before it closes.
+	if err := newRuntime(func(o *chat.RuntimeOptions) {
+		o.DebounceInterval = time.Second
+		o.DetachTimeout = time.Second
+	}); err == nil {
+		t.Fatal("expected a detach timeout at or below the collection window to fail")
 	}
 }

@@ -133,6 +133,75 @@ func TestPreemptCancelsInflightHandlerAndDispatchesNewEvent(t *testing.T) {
 	}
 }
 
+func TestPreemptWaitsForLocalVictimBeforeDispatching(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot := newPreemptRuntime(t, state, adapter, &logs, func(ctx context.Context, ev *chat.Event) bool {
+		return true
+	})
+
+	firstStarted := make(chan struct{})
+	var mu sync.Mutex
+	var sequence []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		if ev.Event.ID == "first" {
+			close(firstStarted)
+			<-ctx.Done()
+			// Cancellation-aware cleanup still runs; the preemptor must not
+			// overlap it.
+			time.Sleep(75 * time.Millisecond)
+			mu.Lock()
+			sequence = append(sequence, "victim-cleanup-done")
+			mu.Unlock()
+			return ctx.Err()
+		}
+		mu.Lock()
+		sequence = append(sequence, "preemptor-start")
+		mu.Unlock()
+		return nil
+	})
+
+	if status := postEvent(t, bot, "fake", mentionEvent("first", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("first status = %d", status)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first handler did not start")
+	}
+
+	if status := postEvent(t, bot, "fake", mentionEvent("preemptor", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("preemptor status = %d", status)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(sequence)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			mu.Lock()
+			got := append([]string(nil), sequence...)
+			mu.Unlock()
+			t.Fatalf("preemption did not complete, sequence = %v", got)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !equalStrings(sequence, []string{"victim-cleanup-done", "preemptor-start"}) {
+		t.Fatalf("sequence = %v, want the local victim to finish before the preemptor dispatches", sequence)
+	}
+}
+
 func TestPreemptHookDecliningFallsBackToDrop(t *testing.T) {
 	t.Parallel()
 

@@ -245,7 +245,7 @@ func TestDebounceSleepingWaiterDrainedByShutdown(t *testing.T) {
 	bot := newDebounceRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
 		// Only Shutdown can end the quiet-period sleep.
 		o.DebounceInterval = time.Hour
-		o.DetachTimeout = time.Hour
+		o.DetachTimeout = 2 * time.Hour
 	})
 
 	var mu sync.Mutex
@@ -315,5 +315,60 @@ func TestDebounceConstructionValidation(t *testing.T) {
 		o.DetachTimeout = 0
 	}); err == nil {
 		t.Fatal("expected debounce under sync dispatch to fail")
+	}
+	// A detach timeout at or below the interval would abandon every event
+	// before its quiet period elapses.
+	if err := newRuntime(func(o *chat.RuntimeOptions) {
+		o.DebounceInterval = time.Second
+		o.DetachTimeout = time.Second
+	}); err == nil {
+		t.Fatal("expected a detach timeout at or below the debounce interval to fail")
+	}
+}
+
+func TestDebounceSupersededWaiterExitsBeforeItsInterval(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot := newDebounceRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
+		// The interval is far longer than the test: only the displacement signal
+		// can explain a prompt exit.
+		o.DebounceInterval = time.Hour
+		o.DetachTimeout = 2 * time.Hour
+	})
+
+	var mu sync.Mutex
+	var calls int
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		return nil
+	})
+
+	if status := postEvent(t, bot, "fake", mentionEvent("older", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("older status = %d", status)
+	}
+	if status := postEvent(t, bot, "fake", mentionEvent("newer", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("newer status = %d", status)
+	}
+
+	// The superseded waiter must release its goroutine and event promptly, not
+	// park through the hour-long interval.
+	deadline := time.After(2 * time.Second)
+	for !strings.Contains(logs.String(), "chat debounce waiter superseded") {
+		select {
+		case <-deadline:
+			t.Fatalf("superseded waiter did not exit promptly; logs:\n%s", logs.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("handler ran before any quiet period elapsed, calls = %d", calls)
 	}
 }
