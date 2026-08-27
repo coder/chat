@@ -518,7 +518,7 @@ chat.RuntimeOptions{
 }
 ```
 
-The runtime implements the full upstream-aligned strategy set (ADR 0012):
+The runtime implements four of the upstream-aligned strategies (ADR 0012):
 
 - `ConcurrencyDrop` (default): a lock conflict is acknowledged and dropped.
 - `ConcurrencyQueue`: the newest follow-up waits for the in-flight handler;
@@ -527,22 +527,20 @@ The runtime implements the full upstream-aligned strategy set (ADR 0012):
   the final event in a quiet period dispatches. Requires deferred dispatch.
   Coalescing (like queue supersession) is per runtime instance; instances
   sharing a state are serialized by the thread lock, not coalesced.
-- `ConcurrencyBurst`: events collect for `DebounceInterval` on an idle scope,
-  then the whole batch dispatches — in the order events joined the window —
-  under one lock hold and a fresh `DetachTimeout` that starts when the window
-  closes. Requires deferred dispatch.
 - `ConcurrencyConcurrent`: no thread lock at all; every event dispatches in its
   own execution, bounded by `MaxConcurrent`.
+
+The remaining ADR 0012 surface — the `burst` strategy and the
+force/steerability (`onLockConflict`) preemption hook — is staged behind the
+deferred-dispatch admission and fenced-coordination design work; the names
+stay reserved.
 
 `LockScope` chooses what the lock guards: per thread (default) or per channel
 (`LockScopeChannel`) for platforms whose model needs channel-wide ordering.
 
-`OnLockConflict` is the force/steerability hook: on a lock conflict it can
-preempt the in-flight work. A local handler is cancelled with
-`chat.ErrPreempted` and awaited, after which the new delivery acquires the
-released lock; a lease held by another runtime instance (or orphaned) is
-force released through the optional `LockForcer` state capability instead. It
-requires deferred dispatch and the drop or queue strategy.
+A deferred handler whose lock lease is lost mid-run (released elsewhere,
+expired, or no longer refreshable) is cancelled with `chat.ErrPreempted` as
+its context cause rather than running on unserialized.
 
 Thread locks use token-owned lock leases. Release and extend operations must
 verify the token so an expired handler cannot release or extend another

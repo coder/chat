@@ -757,12 +757,11 @@ func TestDeferredDispatchObservationRecords(t *testing.T) {
 	}
 }
 
-// TestDeferredHandlerCancelledOnLeaseLossWithoutHook proves that every
-// deferred lock holder stops on lease loss, even when the runtime has no
-// OnLockConflict hook of its own: a lease force released elsewhere (or
-// expired) means mutual exclusion is gone, and the handler observes
-// chat.ErrPreempted as its cancellation cause.
-func TestDeferredHandlerCancelledOnLeaseLossWithoutHook(t *testing.T) {
+// TestDeferredHandlerCancelledOnLeaseLoss proves that every deferred lock
+// holder stops on lease loss: a lease released elsewhere (or expired) means
+// mutual exclusion is gone, and the handler observes chat.ErrPreempted as its
+// cancellation cause.
+func TestDeferredHandlerCancelledOnLeaseLoss(t *testing.T) {
 	t.Parallel()
 
 	state := newFakeState()
@@ -803,10 +802,11 @@ func TestDeferredHandlerCancelledOnLeaseLossWithoutHook(t *testing.T) {
 		t.Fatal("handler did not start")
 	}
 
-	// Another runtime instance force releases the lease out from under the
-	// handler; the next refresh must observe the loss and cancel it.
-	if released, err := state.ForceReleaseLock(context.Background(), "fake:v1:thread-1"); err != nil || !released {
-		t.Fatalf("external force release released=%v err=%v", released, err)
+	// The lease vanishes out from under the handler (as if released by another
+	// runtime instance or expired); the next refresh must observe the loss and
+	// cancel it.
+	if released, err := state.expireLock(context.Background(), "fake:v1:thread-1"); err != nil || !released {
+		t.Fatalf("external lease removal released=%v err=%v", released, err)
 	}
 
 	select {

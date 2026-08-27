@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (implemented: `drop`, `queue`, `debounce`, `burst`, and `concurrent` strategies, the `LockScope` option, and force/steerability via `RuntimeOptions.OnLockConflict` + the `LockForcer` **Runtime State** capability all ship in the runtime; `debounce`/`burst` and the steerability hook require `DispatchDeferred`).
+Accepted (implementation staged: `drop`, `queue`, `debounce`, and `concurrent` strategies plus the `LockScope` option ship in the runtime, with `debounce` requiring `DispatchDeferred`; `burst` and force/steerability are staged behind the deferred-dispatch admission-bound and fenced-coordination design work — see the cross-instance coalescing and admission issues — with their names still reserved).
 
 ## Context
 

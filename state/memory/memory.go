@@ -26,10 +26,7 @@ type lockRecord struct {
 	expiry time.Time
 }
 
-var (
-	_ chat.State      = (*State)(nil)
-	_ chat.LockForcer = (*State)(nil)
-)
+var _ chat.State = (*State)(nil)
 
 func New() *State {
 	return &State{
@@ -143,26 +140,6 @@ func (s *State) ExtendLock(ctx context.Context, lease chat.LockLease, ttl time.D
 		return false, nil
 	}
 	s.locks[lease.Key] = lockRecord{token: lease.Token, expiry: now.Add(ttl)}
-	return true, nil
-}
-
-// ForceReleaseLock invalidates the current lock for key regardless of owner
-// (chat.LockForcer): the previous holder's lease token no longer matches
-// anything, so its ExtendLock and ReleaseLock fail cleanly.
-func (s *State) ForceReleaseLock(ctx context.Context, key string) (bool, error) {
-	if key == "" {
-		return false, errors.New("memory state: lock key is required")
-	}
-	if err := s.lockOperation(ctx); err != nil {
-		return false, err
-	}
-	defer s.mu.Unlock()
-
-	s.pruneExpiredLocks(s.now())
-	if _, ok := s.locks[key]; !ok {
-		return false, nil
-	}
-	delete(s.locks, key)
 	return true, nil
 }
 

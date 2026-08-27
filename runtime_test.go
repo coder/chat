@@ -883,7 +883,9 @@ func (s *fakeState) ExtendLock(ctx context.Context, lease chat.LockLease, ttl ti
 	return ok && held.Token == lease.Token, nil
 }
 
-func (s *fakeState) ForceReleaseLock(ctx context.Context, key string) (bool, error) {
+// expireLock simulates the lease for key vanishing out from under its holder
+// (another instance releasing it, or TTL expiry).
+func (s *fakeState) expireLock(ctx context.Context, key string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}

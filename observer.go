@@ -32,11 +32,6 @@ const (
 	// observes platform rate limiting (ADR 0005). Adapter-owned, like
 	// ObsAdapterCall.
 	ObsRateLimit ObservationName = "rate_limit"
-	// ObsLockPreempted is emitted when a new delivery preempts the scope's
-	// in-flight work via the OnLockConflict steerability hook: a local handler
-	// is cancelled and awaited, or a remote/orphaned Lock Lease is force
-	// released.
-	ObsLockPreempted ObservationName = "lock_preempted"
 )
 
 // DispatchOutcome is the closed set of terminal outcomes for one Runtime
@@ -50,7 +45,8 @@ const (
 	OutcomeDuplicate           DispatchOutcome = "duplicate"
 	OutcomeError               DispatchOutcome = "error"
 	// OutcomePreempted is the terminal outcome of a handler that stopped because
-	// a new delivery preempted it via the OnLockConflict steerability hook.
+	// its Lock Lease was lost mid-run: released by another runtime instance,
+	// expired, or no longer refreshable.
 	OutcomePreempted DispatchOutcome = "preempted"
 )
 

@@ -35,10 +35,7 @@ type State struct {
 	once  sync.Once
 }
 
-var (
-	_ chat.State      = (*State)(nil)
-	_ chat.LockForcer = (*State)(nil)
-)
+var _ chat.State = (*State)(nil)
 
 func New(ctx context.Context, opts Options) (*State, error) {
 	if opts.Conn == nil {
@@ -222,54 +219,6 @@ func (s *State) ExtendLock(ctx context.Context, lease chat.LockLease, ttl time.D
 		return false, fmt.Errorf("nats state: extend lock update: %w", err)
 	}
 	return true, nil
-}
-
-// ForceReleaseLock invalidates the current lock for key regardless of owner
-// (chat.LockForcer). The delete is gated by the observed revision, so only the
-// lease observed in this call is invalidated: a lease whose token changes
-// hands between the get and the delete survives (reported as false), matching
-// the single-statement atomicity of the Redis and Postgres implementations. A
-// revision that moved while the token stayed the same is an ordinary renewal
-// (ExtendLock) by the same holder, not a handover, so the delete is retried
-// against the renewed revision. The previous holder's ExtendLock and
-// ReleaseLock fail cleanly on the vanished entry.
-func (s *State) ForceReleaseLock(ctx context.Context, key string) (bool, error) {
-	if key == "" {
-		return false, errors.New("nats state: lock key is required")
-	}
-	encoded := encodeKey(key)
-	entry, err := s.lock.Get(ctx, encoded)
-	if errors.Is(err, jetstream.ErrKeyNotFound) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("nats state: force release lock get: %w", err)
-	}
-	token := string(entry.Value())
-	for {
-		err := s.lock.Delete(ctx, encoded, jetstream.LastRevision(entry.Revision()))
-		if err == nil {
-			return true, nil
-		}
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return false, nil
-		}
-		if !isWrongLastSequence(err) {
-			return false, fmt.Errorf("nats state: force release lock: %w", err)
-		}
-		// The entry moved. Re-read: a same-token renewal retries against the
-		// new revision; a different token means the lease changed hands.
-		entry, err = s.lock.Get(ctx, encoded)
-		if errors.Is(err, jetstream.ErrKeyNotFound) {
-			return false, nil
-		}
-		if err != nil {
-			return false, fmt.Errorf("nats state: force release lock get: %w", err)
-		}
-		if string(entry.Value()) != token {
-			return false, nil
-		}
-	}
 }
 
 func (s *State) ReleaseLock(ctx context.Context, lease chat.LockLease) (bool, error) {

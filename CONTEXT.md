@@ -420,8 +420,9 @@ _Avoid_: Full platform schema, strict external SDK model
 - Default **Runtime Options** use a 24 hour dedupe TTL and a 2 minute **Thread Lock** TTL.
 - **Runtime Options** TTL values must be positive.
 - **Runtime Options** include a **Concurrency Strategy** that defaults to drop.
-- The runtime implements the full upstream-aligned **Concurrency Strategy** set: drop (default), queue, debounce, burst, and concurrent, plus a **Lock Scope** option (thread default, channel opt-in) and a force/steerability hook that preempts an in-flight handler by force-releasing its **Lock Lease** through an optional **Runtime State** capability.
-- Debounce and burst coalesce on a configured interval and require deferred **Dispatch Mode**; concurrent takes no **Thread Lock** and is bounded by a configured maximum; skipped (superseded) events are always observable, never silent.
+- The runtime implements the drop (default), queue, debounce, and concurrent **Concurrency Strategy** values plus a **Lock Scope** option (thread default, channel opt-in); the burst strategy and force/steerability remain reserved pending the deferred-dispatch admission and fenced-coordination design.
+- Debounce coalesces on a configured quiet period and requires deferred **Dispatch Mode**; concurrent takes no **Thread Lock** and is bounded by a configured maximum; skipped (superseded) events are always observable, never silent.
+- A deferred handler whose **Lock Lease** is lost mid-run is cancelled rather than left running unserialized.
 - A **Thread Lock** coordinates processing of distinct **Webhook Events** for the same **Thread**; it never deduplicates them, and what happens to a conflicting event is decided by the **Concurrency Strategy** (drop acknowledges and drops it; queue coalesces waiters per process and runs the most recent after the lock releases).
 - A **Thread Lock** is represented as a **Lock Lease** with an ownership token.
 - Releasing or extending a **Lock Lease** must verify the ownership token so an expired holder cannot affect a newer holder.
