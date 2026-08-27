@@ -84,3 +84,12 @@ waits on your handler, and consider `chat.ConcurrencyQueue` so mid-work
 commands and clicks queue instead of dropping. Slack keeps a command's `response_url`
 valid for 30 minutes, so a deferred handler can finish its work and respond
 through `RespondURL` afterwards.
+
+One coalescing caveat: because every channel command shares the synthetic
+channel-rooted scope, the queue keeps only the single most recent pending
+command per channel — while one command runs, *independent* commands from
+other users (or other command names) in the same channel supersede each
+other, and all but the newest are acknowledged without invoking `OnCommand`.
+If your bot expects concurrent channel commands, keep command handlers fast
+(ack the command, hand real work to your own queue keyed by `response_url`)
+rather than holding the thread lock through long work.

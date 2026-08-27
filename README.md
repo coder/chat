@@ -115,6 +115,20 @@ go get github.com/coder/chat/state/postgres
 go get github.com/coder/chat/state/nats
 ```
 
+Until this repository publishes its first tagged release, the separate state
+modules pin the core module as `v0.0.0`, which module proxies cannot resolve —
+so the commands above fail outside this repository. Until a release is
+tagged, external consumers need a `replace` directive pinning the core module
+to a commit, for example:
+
+```sh
+go mod edit -replace github.com/coder/chat=github.com/coder/chat@main
+go mod tidy
+```
+
+or work from a checkout of this repository, whose `go.work` wires the modules
+together.
+
 Package layout:
 
 ```text

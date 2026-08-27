@@ -58,14 +58,22 @@ The `Credential` field is adapter-specific:
   (either client credentials for token exchange or a pre-exchanged access
   token)
 
-For Linear, treat `BotUserID` (or `Install.BotActorID`) as **required**: in
-multi-tenant mode the adapter does not discover the app's identity per
-install, and that ID is what mention detection and self-message filtering use
-for generic comment participation. An install without it will accept signed
-webhooks but never see its own @-mentions as mentions — and may route the
-app's own comments back to itself. Capture the app user ID during your OAuth
-flow (e.g. query `viewer { id }` with the freshly exchanged token) and store
-it on the install record.
+In multi-tenant mode the adapter does not discover the app's identity per
+install, so treat the per-install bot identity as **required** on both
+adapters:
+
+- Slack: without `SlackInstall.BotUserID` (or `Install.BotActorID`),
+  self-message filtering has no identity to match — if you subscribe to
+  `message.channels` or `message.im`, the bot's own posts re-enter routing
+  and a subscribed thread can loop (reply triggers `OnSubscribedMessage`,
+  which replies again). Slack's `oauth.v2.access` response includes the
+  `bot_user_id`; store it on the install record.
+- Linear: without `LinearInstall.BotUserID` (or `Install.BotActorID`),
+  mention detection and self-comment filtering for generic comment
+  participation have nothing to match — the app never sees its own
+  @-mentions as mentions, and may route its own comments back to itself.
+  Capture the app user ID during your OAuth flow (e.g. query `viewer { id }`
+  with the freshly exchanged token) and store it.
 
 ## Construct The Adapter In Multi-Tenant Mode
 

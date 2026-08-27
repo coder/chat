@@ -22,7 +22,7 @@ hatch rather than typed helpers.
 | Linear capability | Current support | Notes |
 | --- | --- | --- |
 | App actor auth with client credentials | Supported | Default scopes include `read`, `write`, `app:mentionable`, and `app:assignable`; startup verifies Linear granted all requested scopes. |
-| Multi-tenant installs | Supported | Per-install webhook secrets and client credentials or pre-exchanged access tokens through `chat.InstallStore` (ADR 0006), with per-tenant lazy token refresh. |
+| Multi-tenant installs | Supported | Per-install webhook secrets and client credentials or pre-exchanged access tokens through `chat.InstallStore` (ADR 0006). Per-tenant lazy token refresh applies to client-credential installs only; a pre-exchanged `AccessToken` is used as-is until the install store supplies a replacement. |
 | Agent session webhooks | Supported | Handles `AgentSessionEvent` `created` and `prompted`, including Linear-created assignment/delegation sessions. |
 | Generic issue/comment participation | Supported | Comments that @-mention the app route to `OnNewMention` on comment-kind threads; `Thread.Post` replies as an issue comment (ADR 0013). |
 | Inbox notification webhooks | Not normalized | Ignored by the adapter, matching upstream Chat SDK. |
@@ -87,9 +87,13 @@ The `stop` signal arrives as a prompted event on the same thread, so it is
 serialized behind the thread lock like any other event: it cannot preempt a
 handler that is already running (`ConcurrencyDrop` discards it during a
 conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
-returns). Active cancellation needs an application-owned signal — for
-example, a per-thread cancellation flag in your own store that long-running
-handlers poll. A documented example is still to be written.
+returns). There is no pre-lock interception hook, so Linear's Stop control
+cannot drive active cancellation through this adapter today. Workable
+patterns: split sessions into short handler turns that check `StopRequested`
+at each turn boundary, or deliver the stop out-of-band (an application-owned
+webhook/endpoint outside the runtime's serialized dispatch that sets a
+cancellation flag handlers poll). A documented example is still to be
+written.
 
 ### 6. Best-Practice Webhook Categories
 

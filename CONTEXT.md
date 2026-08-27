@@ -417,7 +417,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - **Runtime Options** TTL values must be positive.
 - **Runtime Options** include a **Concurrency Strategy** that defaults to drop.
 - The runtime implements the drop (default) and queue **Concurrency Strategy** values; burst, debounce, concurrent, lock-scope, and force/steerability remain reserved for future slices.
-- A **Thread Lock** must not drop distinct **Webhook Events** for the same **Thread**; it only coordinates their processing.
+- A **Thread Lock** coordinates processing of distinct **Webhook Events** for the same **Thread**; it never deduplicates them, and what happens to a conflicting event is decided by the **Concurrency Strategy** (drop acknowledges and drops it; queue coalesces waiters per process and runs the most recent after the lock releases).
 - A **Thread Lock** is represented as a **Lock Lease** with an ownership token.
 - Releasing or extending a **Lock Lease** must verify the ownership token so an expired holder cannot affect a newer holder.
 - A **Lock Conflict** is acknowledged to the platform by default and recorded as unhandled runtime contention.
