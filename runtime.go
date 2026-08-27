@@ -1289,10 +1289,11 @@ func (c *Chat) lockScopeKey(event *Event, ref ThreadRef) string {
 // does not expire while the detached handler runs. Extend runs under
 // context.WithoutCancel so a refresh in flight at cancellation still completes.
 // stop halts the loop and blocks until it exits; leaseLost reports whether the
-// loop saw the lease already gone, and is safe to read once stop has returned.
-// A lost lease also cancels the handler with ErrPreempted (onLeaseLost): a
-// vanished lease — force released by a preempting delivery on any runtime
-// instance, or expired — means mutual exclusion is already gone, so the
+// loop could no longer vouch for the lease, and is safe to read once stop has
+// returned. A lost lease — vanished (force released by a preempting delivery
+// on any runtime instance, or expired) or unmaintainable (a failed refresh
+// means it expires at TTL mid-handler) — also cancels the handler with
+// ErrPreempted (onLeaseLost): mutual exclusion is gone or going, so the
 // handler must stop rather than run alongside the lease's next holder.
 func (c *Chat) startLockRefresh(ctx context.Context, lease LockLease, threadID ThreadID, onLeaseLost context.CancelCauseFunc) (stop func(), leaseLost func() bool) {
 	interval := c.options.ThreadLockTTL / 2
@@ -1315,7 +1316,14 @@ func (c *Chat) startLockRefresh(ctx context.Context, lease LockLease, threadID T
 			case <-ticker.C:
 				extended, err := c.state.ExtendLock(context.WithoutCancel(ctx), lease, c.options.ThreadLockTTL)
 				if err != nil {
+					// A failed refresh means the lease can no longer be guaranteed:
+					// it will expire at TTL while the handler is still running, so
+					// the handler must stop rather than outlive its serialization.
 					c.logger.Error("chat extend thread lock failed", "error", err, "thread_id", threadID)
+					lost.Store(true)
+					if onLeaseLost != nil {
+						onLeaseLost(ErrPreempted)
+					}
 					return
 				}
 				if !extended {
