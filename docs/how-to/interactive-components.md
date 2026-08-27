@@ -135,7 +135,14 @@ err := slackAdapter.OpenModalForTenantFromRaw(ctx, ev.Event.Tenant, ev.Interacti
 `trigger_id` string.) The same `Raw` values work from `ev.Command.Raw` in a
 slash-command handler.
 
-Slack invalidates `trigger_id` after 3 seconds, so open modals promptly.
+Slack invalidates `trigger_id` after 3 seconds, so open modals promptly —
+and note that under `chat.ConcurrencyQueue` a queued interaction waits for
+the thread lock *before* your handler runs, so an interaction that queues
+behind a long-running handler can arrive with its `trigger_id` already
+expired and the modal open fails no matter how promptly the handler calls
+it. Keep handlers on modal-bearing threads fast, or accept that modals from
+lock-contended interactions may fail.
+
 Modal *submissions* are not part of this slice: the synchronous
 `view_submission` response (`response_action`) requires responding in the
 webhook's HTTP response body, which is incompatible with ack-then-work, so

@@ -33,7 +33,7 @@ design deliberately diverges from Vercel Chat SDK.
 | [0005](adr/0005-rate-limit-handling.md) | Rate-limit retry lives in adapters, with typed `RateLimited` errors | Accepted |
 | [0006](adr/0006-multi-tenant-install.md) | Multi-tenant installs via app-implemented `InstallStore`; OAuth flows stay app-owned | Accepted |
 | [0007](adr/0007-teams-adapter.md) | Microsoft Teams adapter approach (Bot Framework, direct HTTP) | Proposed — gated on a spike |
-| [0008](adr/0008-linear-full-adapter.md) | Full Linear agent activity surface (thought/action/elicitation/error/plans) | Accepted |
+| [0008](adr/0008-linear-full-adapter.md) | Full Linear agent activity surface (thought/response/action/elicitation/error) plus session updates (plans, external URLs) | Accepted |
 | [0009](adr/0009-message-history.md) | Message history stays application-owned; optional storage-free `HistoryReader` | Accepted |
 | [0010](adr/0010-observability.md) | Optional `Observer` seam; no OpenTelemetry in core | Accepted |
 | [0011](adr/0011-resumable-streaming.md) | Resumable streaming deferred from core, not foreclosed | Proposed |

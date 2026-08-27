@@ -4,7 +4,8 @@ The Linear adapter (experimental) turns Linear agent sessions into normal
 Chat SDK Go threads: when a user mentions or delegates to your Linear app, a
 session event arrives as a `MessageEvent`, and `Thread.Post` sends an agent
 activity response. Beyond that portable surface, the full agent activity
-vocabulary — thoughts, actions, elicitations, errors, and plans — is exposed
+vocabulary — thoughts, responses, actions, elicitations, and errors, plus
+session updates carrying plans and external URLs — is exposed
 through typed adapter access (see [ADR 0001](../adr/0001-linear-app-actor-slice.md),
 [ADR 0008](../adr/0008-linear-full-adapter.md), and
 [ADR 0013](../adr/0013-linear-generic-comments.md)).
