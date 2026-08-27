@@ -91,6 +91,16 @@ posted with Slack formatting disabled, so `<@USERID>` mention syntax renders
 literally; to render a real mention, resolve the display name via the Slack
 API or post native Block Kit content instead.
 
+**Known limitation:** the interaction event identity is currently anchored on
+the message timestamp, not the individual activation — so when the same user
+activates the same `action_id` on the same message more than once within
+`DedupeTTL` (default 24 hours), only the first activation reaches
+`OnInteraction`; the rest are dropped as duplicates. This also affects a menu
+whose options share one action ID. Tracked in
+[#43](https://github.com/coder/chat/issues/43). Until it lands, give
+repeat-activatable controls distinct `action_id`s (or replace the message's
+blocks after each click).
+
 Mind the acknowledgement timing: under the default `DispatchSync` mode the
 adapter writes the empty 2xx only *after* your handler returns, so a slow
 handler can miss Slack's 3-second acknowledgement budget. Enable
