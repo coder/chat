@@ -1072,10 +1072,17 @@ func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
 	for {
 		// A waiter superseded (or abandoned) at any point yields silently: the
 		// newest waiter owns the preemption.
-		if ctx.Err() != nil || !c.isPending(work.scope, work.event) {
+		if ctx.Err() != nil {
 			return
 		}
-		victims := c.cancelInflight(work.scope)
+		// Validation and destructive cancellation are atomic under the pending
+		// registry lock: a stale preemptor (displaced by a newer registration)
+		// can never cancel the active holder — or poison a newer waiter's
+		// reservation — on behalf of an event that will not dispatch.
+		victims, stillPending := c.preemptLocalIfPending(work.scope, work.event)
+		if !stillPending {
+			return
+		}
 		if len(victims) == 0 {
 			break
 		}
@@ -1213,21 +1220,31 @@ func (c *Chat) retireInflight(scope string, entry *inflightCancel) {
 	close(entry.done)
 }
 
-// cancelInflight preempts every current local reservation for the scope
-// (holders and in-flight acquirers alike), returning the preempted entries so
-// a preemptor can wait for their completion.
-func (c *Chat) cancelInflight(scope string) []*inflightCancel {
+// preemptLocalIfPending atomically re-validates that event still owns the
+// scope's pending slot and, only then, preempts every current local
+// reservation (holders and in-flight acquirers alike), returning the preempted
+// entries so the preemptor can wait for their completion. The pending registry
+// lock is held across the marking so a newer registration cannot interleave
+// between validation and cancellation. Lock order is queueMu > inflightMu >
+// entry.mu, nested nowhere else in reverse.
+func (c *Chat) preemptLocalIfPending(scope string, event *Event) (victims []*inflightCancel, stillPending bool) {
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	waiter := c.pending[scope]
+	if waiter == nil || waiter.event != event {
+		return nil, false
+	}
 	c.inflightMu.Lock()
 	set := c.inflightCancels[scope]
-	entries := make([]*inflightCancel, 0, len(set))
+	victims = make([]*inflightCancel, 0, len(set))
 	for entry := range set {
-		entries = append(entries, entry)
+		victims = append(victims, entry)
 	}
 	c.inflightMu.Unlock()
-	for _, entry := range entries {
+	for _, entry := range victims {
 		entry.preempt()
 	}
-	return entries
+	return victims, true
 }
 
 // acquireConcurrencySlot blocks until a MaxConcurrent slot frees, bounded by
@@ -1562,7 +1579,16 @@ func (c *Chat) runBurstScope(ctx context.Context, scope string) {
 		}
 		memberCtx, memberCancel := context.WithTimeout(batchCtx, c.options.DetachTimeout)
 		c.logger.Info("chat deferred dispatch started", "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route)
-		c.endHandlerRun(memberCtx, work.event, work.route, work.span, work.run(memberCtx))
+		memberErr := work.run(memberCtx)
+		// Like runLockedTail, the preemption outcome follows the cancellation
+		// cause: a member stopped by lease loss is preempted, whatever it
+		// returned.
+		if errors.Is(context.Cause(memberCtx), ErrPreempted) {
+			c.logger.Info("chat handler preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "route", work.route, "started", true)
+			c.safeEnd(work.span, OutcomePreempted, RouteAttr(work.route))
+		} else {
+			c.endHandlerRun(memberCtx, work.event, work.route, work.span, memberErr)
+		}
 		memberCancel()
 	}
 	stopRefresh()
