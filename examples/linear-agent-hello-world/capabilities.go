@@ -14,36 +14,50 @@ import (
 	"github.com/coder/chat/adapters/linear"
 )
 
-// pendingSelections tracks threads with an outstanding select elicitation and
-// the option values that were offered, so a follow-up is interpreted as an
-// answer only while a choice is actually pending. It is take-once: the next
-// follow-up consumes the pending state, matching Linear's behavior of
-// dismissing the elicitation when the user replies in free text. Durable
+// Selection kinds distinguish which elicitation a pending choice answers, so
+// the answer continues the right workflow instead of a generic acknowledgement.
+const (
+	selectionKindDeploy     = "deploy"
+	selectionKindRepository = "repository"
+)
+
+// pendingSelection is one outstanding select elicitation: which workflow asked
+// (Kind) and the option values that were offered.
+type pendingSelection struct {
+	Kind   string
+	Values []string
+}
+
+// pendingSelections tracks threads with an outstanding select elicitation, so
+// a follow-up is interpreted as an answer only while a choice is actually
+// pending. take consumes the entry; the follow-up handler re-registers it only
+// when a matched choice fails to post, and lets an unmatched free-text reply
+// consume it for good, matching Linear dismissing the elicitation UI. Durable
 // Thread Application State is app-owned; a real bot would persist this
 // alongside its other state.
 type pendingSelections struct {
-	mu      sync.Mutex
-	options map[chat.ThreadID][]string
+	mu        sync.Mutex
+	selection map[chat.ThreadID]pendingSelection
 }
 
 func newPendingSelections() *pendingSelections {
-	return &pendingSelections{options: map[chat.ThreadID][]string{}}
+	return &pendingSelections{selection: map[chat.ThreadID]pendingSelection{}}
 }
 
-// set records the option values offered on the thread's latest elicitation.
-func (p *pendingSelections) set(id chat.ThreadID, optionValues []string) {
+// set records the thread's latest outstanding elicitation.
+func (p *pendingSelections) set(id chat.ThreadID, sel pendingSelection) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.options[id] = optionValues
+	p.selection[id] = sel
 }
 
-// take returns and clears the pending option values for the thread.
-func (p *pendingSelections) take(id chat.ThreadID) ([]string, bool) {
+// take returns and clears the pending selection for the thread.
+func (p *pendingSelections) take(id chat.ThreadID) (pendingSelection, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	optionValues, ok := p.options[id]
-	delete(p.options, id)
-	return optionValues, ok
+	sel, ok := p.selection[id]
+	delete(p.selection, id)
+	return sel, ok
 }
 
 // startProactiveSession creates an agent session on an issue the agent was
@@ -64,7 +78,11 @@ func startProactiveSession(ctx context.Context, la linearAgentAccess, issueID, d
 		return "", err
 	}
 	if _, err := la.PostThought(ctx, created.ThreadID, "Investigating this issue."); err != nil {
-		return "", err
+		// The session already exists on Linear's side (and the seeded external
+		// URL keeps it responsive), so return its handle with the error: the
+		// caller can retry the activity or end the session cleanly instead of
+		// leaking it — re-running the whole helper would create a duplicate.
+		return created.ThreadID, err
 	}
 	return created.ThreadID, nil
 }
@@ -122,9 +140,9 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 	if err != nil {
 		return err
 	}
-	// Record what was offered so the next follow-up on this thread can be
-	// interpreted as the answer (see handleSelection).
-	pending.set(threadID, values)
+	// Record what was offered — and by which workflow — so the next follow-up
+	// on this thread is interpreted as the answer (see handleSelection).
+	pending.set(threadID, pendingSelection{Kind: selectionKindRepository, Values: values})
 	return nil
 }
 
@@ -140,16 +158,28 @@ func repositoryOptionValue(s linear.RepositorySuggestion) string {
 
 // handleSelection handles the follow-up prompt that answers a select
 // elicitation: a chosen option arrives as a regular prompt whose text is the
-// option's value. Users may instead reply in free text, so unmatched answers
-// return handled=false and fall through to normal prompt handling (ideally an
-// LLM interpreting the reply).
-func handleSelection(ctx context.Context, ev *chat.MessageEvent, optionValues []string) (bool, error) {
+// option's value. The pending selection's Kind routes the choice to the right
+// workflow (this example acknowledges; a real bot would continue that
+// workflow). Users may instead reply in free text, so unmatched answers return
+// handled=false and fall through to normal prompt handling (ideally an LLM
+// interpreting the reply).
+func handleSelection(ctx context.Context, ev *chat.MessageEvent, sel pendingSelection) (bool, error) {
 	answer := strings.TrimSpace(ev.Message.Text)
-	for _, value := range optionValues {
-		if answer == value {
-			_, err := ev.Thread.Post(ctx, chat.Markdown("Deploying to **"+value+"** — I'll report back here."))
-			return true, err
+	for _, value := range sel.Values {
+		if answer != value {
+			continue
 		}
+		var ack string
+		switch sel.Kind {
+		case selectionKindDeploy:
+			ack = "Deploying to **" + value + "** — I'll report back here."
+		case selectionKindRepository:
+			ack = "Working in **" + value + "** — I'll open a pull request here when I'm done."
+		default:
+			ack = "Got it: **" + value + "**."
+		}
+		_, err := ev.Thread.Post(ctx, chat.Markdown(ack))
+		return true, err
 	}
 	return false, nil
 }

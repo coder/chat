@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/coder/chat"
@@ -96,9 +97,9 @@ func TestChooseRepositoryElicitsSelectOnLowConfidence(t *testing.T) {
 	}
 	// The offered values become this thread's pending selection so the next
 	// follow-up is interpreted as the answer.
-	optionValues, ok := pending.take(ev.Thread.ID())
-	if !ok || len(optionValues) != 2 || optionValues[0] != "github.com/acme/backend" {
-		t.Fatalf("pending = %#v, %v", optionValues, ok)
+	sel, ok := pending.take(ev.Thread.ID())
+	if !ok || sel.Kind != selectionKindRepository || len(sel.Values) != 2 || sel.Values[0] != "github.com/acme/backend" {
+		t.Fatalf("pending = %#v, %v", sel, ok)
 	}
 }
 
@@ -124,9 +125,9 @@ func TestOfferRepositoryChoiceKeepsSameNameReposOnDifferentHostsDistinct(t *test
 		metadata.Options[2].Value != "acme/orphan" {
 		t.Fatalf("options = %#v", metadata.Options)
 	}
-	optionValues, ok := pending.take(threadID)
-	if !ok || len(optionValues) != 3 || optionValues[1] != "gitlab.example.com/acme/backend" {
-		t.Fatalf("pending = %#v, %v", optionValues, ok)
+	sel, ok := pending.take(threadID)
+	if !ok || sel.Kind != selectionKindRepository || len(sel.Values) != 3 || sel.Values[1] != "gitlab.example.com/acme/backend" {
+		t.Fatalf("pending = %#v, %v", sel, ok)
 	}
 }
 
@@ -134,7 +135,7 @@ func TestFollowUpHandlerClearsPendingSelectionOnStop(t *testing.T) {
 	adapter := &testLinearAdapter{}
 	pending := newPendingSelections()
 	ev := newTestEvent(t, adapter, &chat.Message{Text: "stop", Raw: &linear.RawMessage{Signal: "stop"}})
-	pending.set(ev.Thread.ID(), []string{"staging", "prod"})
+	pending.set(ev.Thread.ID(), pendingSelection{Kind: selectionKindDeploy, Values: []string{"staging", "prod"}})
 
 	if err := newFollowUpHandler(adapter, pending)(context.Background(), ev); err != nil {
 		t.Fatalf("follow-up handler: %v", err)
@@ -156,10 +157,10 @@ func TestPendingSelectionsAreTakeOnce(t *testing.T) {
 	if _, ok := pending.take(threadID); ok {
 		t.Fatal("take on empty registry reported a pending selection")
 	}
-	pending.set(threadID, []string{"staging", "prod"})
-	optionValues, ok := pending.take(threadID)
-	if !ok || len(optionValues) != 2 || optionValues[0] != "staging" {
-		t.Fatalf("take = %#v, %v", optionValues, ok)
+	pending.set(threadID, pendingSelection{Kind: selectionKindDeploy, Values: []string{"staging", "prod"}})
+	sel, ok := pending.take(threadID)
+	if !ok || sel.Kind != selectionKindDeploy || len(sel.Values) != 2 || sel.Values[0] != "staging" {
+		t.Fatalf("take = %#v, %v", sel, ok)
 	}
 	// The next follow-up no longer sees a pending selection: a bare "staging"
 	// message must not be consumed as a choice.
@@ -179,9 +180,9 @@ func TestMentionHandlerRegistersPendingSelectionOnDeployElicitation(t *testing.T
 	if len(adapter.elicitations) != 1 || adapter.elicitations[0].Signal != "select" {
 		t.Fatalf("elicitations = %#v", adapter.elicitations)
 	}
-	optionValues, ok := pending.take(ev.Thread.ID())
-	if !ok || len(optionValues) != 2 {
-		t.Fatalf("pending = %#v, %v", optionValues, ok)
+	sel, ok := pending.take(ev.Thread.ID())
+	if !ok || sel.Kind != selectionKindDeploy || len(sel.Values) != 2 {
+		t.Fatalf("pending = %#v, %v", sel, ok)
 	}
 }
 
@@ -204,9 +205,10 @@ func TestChooseRepositoryAsksFreeFormWithoutSuggestions(t *testing.T) {
 
 func TestHandleSelectionMatchesOptionValueOrFallsThrough(t *testing.T) {
 	adapter := &testLinearAdapter{}
+	deploy := pendingSelection{Kind: selectionKindDeploy, Values: []string{"staging", "prod"}}
 	ev := newTestEvent(t, adapter, &chat.Message{Text: "staging"})
 
-	handled, err := handleSelection(context.Background(), ev, []string{"staging", "prod"})
+	handled, err := handleSelection(context.Background(), ev, deploy)
 	if err != nil || !handled {
 		t.Fatalf("handled = %v, err = %v", handled, err)
 	}
@@ -216,12 +218,48 @@ func TestHandleSelectionMatchesOptionValueOrFallsThrough(t *testing.T) {
 
 	// Free text is not consumed: it falls through to normal prompt handling.
 	free := newTestEvent(t, adapter, &chat.Message{Text: "actually, roll back instead"})
-	handled, err = handleSelection(context.Background(), free, []string{"staging", "prod"})
+	handled, err = handleSelection(context.Background(), free, deploy)
 	if err != nil || handled {
 		t.Fatalf("handled = %v, err = %v", handled, err)
 	}
 	if len(adapter.posted) != 1 {
 		t.Fatalf("free text posted = %#v", adapter.posted)
+	}
+}
+
+func TestHandleSelectionRoutesRepositoryChoicesToRepositoryHandling(t *testing.T) {
+	adapter := &testLinearAdapter{}
+	ev := newTestEvent(t, adapter, &chat.Message{Text: "github.com/acme/backend"})
+
+	handled, err := handleSelection(context.Background(), ev, pendingSelection{
+		Kind:   selectionKindRepository,
+		Values: []string{"github.com/acme/backend", "github.com/acme/frontend"},
+	})
+	if err != nil || !handled {
+		t.Fatalf("handled = %v, err = %v", handled, err)
+	}
+	if len(adapter.posted) != 1 || adapter.posted[0] != "Working in **github.com/acme/backend** — I'll open a pull request here when I'm done." {
+		t.Fatalf("posted = %#v", adapter.posted)
+	}
+}
+
+func TestFollowUpHandlerRetainsPendingChoiceWhenPostFails(t *testing.T) {
+	postErr := errors.New("post failed")
+	adapter := &testLinearAdapter{postErr: postErr}
+	pending := newPendingSelections()
+	ev := newTestEvent(t, adapter, &chat.Message{Text: "staging"})
+	deploy := pendingSelection{Kind: selectionKindDeploy, Values: []string{"staging", "prod"}}
+	pending.set(ev.Thread.ID(), deploy)
+
+	err := newFollowUpHandler(adapter, pending)(context.Background(), ev)
+	if !errors.Is(err, postErr) {
+		t.Fatalf("handler error = %v, want %v", err, postErr)
+	}
+	// The acknowledgement never posted, so the user's retry must still be
+	// interpreted as an answer: the choice stays pending.
+	sel, ok := pending.take(ev.Thread.ID())
+	if !ok || sel.Kind != selectionKindDeploy {
+		t.Fatalf("pending after failed post = %#v, %v", sel, ok)
 	}
 }
 

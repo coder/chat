@@ -104,11 +104,17 @@ func newFollowUpHandler(linearAccess linearAgentAccess, pending *pendingSelectio
 			return err
 		}
 		// A follow-up may answer the latest select elicitation: interpret it as a
-		// choice only while one is pending on this thread. take is take-once: a
-		// free-text follow-up also consumes the pending state, matching Linear
-		// dismissing the elicitation UI.
-		if optionValues, ok := pending.take(ev.Thread.ID()); ok {
-			if handled, err := handleSelection(ctx, ev, optionValues); handled {
+		// choice only while one is pending on this thread. An unmatched free-text
+		// reply consumes the pending state for good (Linear dismisses the
+		// elicitation UI), but a matched choice whose acknowledgement fails to
+		// post is re-registered: under DispatchDeferred a handler error is only
+		// observed, not redelivered, so the user's retry must still be
+		// interpreted as an answer.
+		if sel, ok := pending.take(ev.Thread.ID()); ok {
+			if handled, err := handleSelection(ctx, ev, sel); handled {
+				if err != nil {
+					pending.set(ev.Thread.ID(), sel)
+				}
 				return err
 			}
 		}
@@ -153,7 +159,7 @@ func newMentionHandler(linearAccess linearAgentAccess, pending *pendingSelection
 				SignalMetadata: linear.SelectSignalMetadata{Options: []linear.SelectOption{{Value: "staging"}, {Value: "prod"}}},
 			})
 			if err == nil {
-				pending.set(ev.Thread.ID(), []string{"staging", "prod"})
+				pending.set(ev.Thread.ID(), pendingSelection{Kind: selectionKindDeploy, Values: []string{"staging", "prod"}})
 			}
 			return err
 		}

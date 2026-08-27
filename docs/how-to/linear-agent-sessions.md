@@ -188,7 +188,11 @@ func startProactiveSession(ctx context.Context, la linearAgentAccess, issueID, d
 		return "", err
 	}
 	if _, err := la.PostThought(ctx, created.ThreadID, "Investigating this issue."); err != nil {
-		return "", err
+		// The session already exists on Linear's side (and the seeded external
+		// URL keeps it responsive), so return its handle with the error: the
+		// caller can retry the activity or end the session cleanly instead of
+		// leaking it — re-running the whole helper would create a duplicate.
+		return created.ThreadID, err
 	}
 	return created.ThreadID, nil
 }
@@ -255,9 +259,9 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 	if err != nil {
 		return err
 	}
-	// Record what was offered so the next follow-up on this thread can be
-	// interpreted as the answer (see handleSelection).
-	pending.set(threadID, values)
+	// Record what was offered — and by which workflow — so the next follow-up
+	// on this thread is interpreted as the answer (see handleSelection).
+	pending.set(threadID, pendingSelection{Kind: selectionKindRepository, Values: values})
 	return nil
 }
 ```
@@ -274,33 +278,52 @@ else fall through to your normal prompt handling:
 
 <!-- source: examples/linear-agent-hello-world/capabilities.go -->
 ```go
-func handleSelection(ctx context.Context, ev *chat.MessageEvent, optionValues []string) (bool, error) {
+func handleSelection(ctx context.Context, ev *chat.MessageEvent, sel pendingSelection) (bool, error) {
 	answer := strings.TrimSpace(ev.Message.Text)
-	for _, value := range optionValues {
-		if answer == value {
-			_, err := ev.Thread.Post(ctx, chat.Markdown("Deploying to **"+value+"** — I'll report back here."))
-			return true, err
+	for _, value := range sel.Values {
+		if answer != value {
+			continue
 		}
+		var ack string
+		switch sel.Kind {
+		case selectionKindDeploy:
+			ack = "Deploying to **" + value + "** — I'll report back here."
+		case selectionKindRepository:
+			ack = "Working in **" + value + "** — I'll open a pull request here when I'm done."
+		default:
+			ack = "Got it: **" + value + "**."
+		}
+		_, err := ev.Thread.Post(ctx, chat.Markdown(ack))
+		return true, err
 	}
 	return false, nil
 }
 ```
+
+The registry stores which workflow asked (`pendingSelection.Kind`) alongside
+the offered values, so a repository choice continues the repository workflow
+instead of being misread as, say, a deployment target.
 
 Since free-text replies are natural language, a production agent should
 involve its LLM when interpreting an unmatched answer rather than failing.
 
 Only interpret a follow-up as an answer while a choice is actually pending on
 that thread — otherwise a later message that happens to equal an option value
-would be misread as a selection. The example keeps a small take-once
-per-thread registry (`pendingSelections` in `capabilities.go`), records the
-offered values when it posts the elicitation, and consumes the pending state
-on the next follow-up (take-once matches Linear dismissing the elicitation on
-a free-text reply):
+would be misread as a selection. The example keeps a small per-thread registry
+(`pendingSelections` in `capabilities.go`) and records the offered values when
+it posts the elicitation. An unmatched free-text reply consumes the pending
+state for good (Linear dismisses the elicitation UI), but a matched choice
+whose acknowledgement fails to post is re-registered — under `DispatchDeferred`
+a handler error is only observed, never redelivered, so the user's retry must
+still be interpreted as an answer:
 
 <!-- source: examples/linear-agent-hello-world/main.go -->
 ```go
-		if optionValues, ok := pending.take(ev.Thread.ID()); ok {
-			if handled, err := handleSelection(ctx, ev, optionValues); handled {
+		if sel, ok := pending.take(ev.Thread.ID()); ok {
+			if handled, err := handleSelection(ctx, ev, sel); handled {
+				if err != nil {
+					pending.set(ev.Thread.ID(), sel)
+				}
 				return err
 			}
 		}
