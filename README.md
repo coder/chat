@@ -535,10 +535,11 @@ The runtime implements the full upstream-aligned strategy set (ADR 0012):
 (`LockScopeChannel`) for platforms whose model needs channel-wide ordering.
 
 `OnLockConflict` is the force/steerability hook: on a lock conflict it can
-preempt the in-flight handler, which is cancelled with `chat.ErrPreempted`
-while the lease is force released through the optional `LockForcer` state
-capability so the new delivery acquires a fresh one. It requires deferred
-dispatch and the drop or queue strategy.
+preempt the in-flight work. A local handler is cancelled with
+`chat.ErrPreempted` and awaited, after which the new delivery acquires the
+released lock; a lease held by another runtime instance (or orphaned) is
+force released through the optional `LockForcer` state capability instead. It
+requires deferred dispatch and the drop or queue strategy.
 
 Thread locks use token-owned lock leases. Release and extend operations must
 verify the token so an expired handler cannot release or extend another

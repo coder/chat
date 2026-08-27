@@ -32,9 +32,10 @@ const (
 	// observes platform rate limiting (ADR 0005). Adapter-owned, like
 	// ObsAdapterCall.
 	ObsRateLimit ObservationName = "rate_limit"
-	// ObsLockPreempted is emitted when a new delivery preempts an in-flight
-	// handler via the OnLockConflict steerability hook: the current Lock Lease
-	// is force released and the local Detached Work Context is cancelled.
+	// ObsLockPreempted is emitted when a new delivery preempts the scope's
+	// in-flight work via the OnLockConflict steerability hook: a local handler
+	// is cancelled and awaited, or a remote/orphaned Lock Lease is force
+	// released.
 	ObsLockPreempted ObservationName = "lock_preempted"
 )
 

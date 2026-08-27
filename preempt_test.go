@@ -202,6 +202,47 @@ func TestPreemptWaitsForLocalVictimBeforeDispatching(t *testing.T) {
 	}
 }
 
+func TestPreemptForceReleasesRemoteLeaseWhenNoLocalVictim(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot := newPreemptRuntime(t, state, adapter, &logs, func(ctx context.Context, ev *chat.Event) bool {
+		return true
+	})
+
+	handled := make(chan string, 1)
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		handled <- ev.Event.ID
+		return nil
+	})
+
+	// A lease held outside this runtime (another instance, or orphaned): there
+	// is no local victim to cancel, so preemption must force-release it.
+	if _, acquired, err := state.AcquireLock(context.Background(), "fake:v1:thread-1", time.Hour); err != nil || !acquired {
+		t.Fatalf("seed lock acquired=%v err=%v", acquired, err)
+	}
+
+	if status := postEvent(t, bot, "fake", mentionEvent("preemptor", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("preemptor status = %d", status)
+	}
+
+	select {
+	case id := <-handled:
+		if id != "preemptor" {
+			t.Fatalf("handled %q, want preemptor", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("preemptor did not dispatch after force release; logs:\n%s", logs.String())
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "forced=true") || !strings.Contains(out, "chat lock preempted") {
+		t.Fatalf("remote force release not surfaced; logs:\n%s", out)
+	}
+}
+
 func TestPreemptSupersededPreemptorDoesNotForceRelease(t *testing.T) {
 	t.Parallel()
 

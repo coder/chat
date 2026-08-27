@@ -1000,23 +1000,27 @@ func (c *Chat) waitDebounceQuietPeriod(ctx context.Context, work preludeWork) bo
 }
 
 // preemptScope preempts the scope's in-flight handler on behalf of a new
-// delivery: the local handler (if any) is cancelled with ErrPreempted and,
-// once it has finished, the current Lock Lease is force released so this
-// delivery can acquire a fresh one. The token-owned lease invariant is
-// preserved: the lease is explicitly invalidated through the LockForcer
-// capability, never deleted by presenting another holder's token.
+// delivery. A local victim is cancelled with ErrPreempted and awaited: it
+// releases its own lease, so the preemptor then acquires normally and the
+// force capability is never invoked — a lease acquired by a fresh handler
+// after the victim's release is never destroyed. Only when no local victim is
+// registered (the conflicting lease belongs to another runtime instance or is
+// orphaned) is the lease force released through LockForcer so this delivery
+// can acquire a fresh one. The token-owned lease invariant is preserved: the
+// lease is explicitly invalidated, never deleted by presenting another
+// holder's token.
 //
 // Waiting (bounded by the Detached Work Context) for the local victim keeps
 // drop/queue per-scope serialization intact for handlers on this instance. A
-// remote holder (another runtime instance) can only be fenced by the lease: it
-// observes the force release on its next refresh, which cancels its handler,
-// so cross-instance overlap is bounded by one refresh interval.
+// remote holder can only be fenced by the lease: it observes the force release
+// on its next refresh, which cancels its handler, so cross-instance overlap is
+// bounded by one refresh interval. The same fencing bounds the instruction-
+// scale window in which a fresh holder could acquire between the pending
+// re-check and the force call.
 func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
 	// A waiter superseded between routing and this tail must not destroy the
 	// in-flight handler on behalf of an event that will never dispatch; the
-	// newest waiter performs its own preemption if its hook elected one. The
-	// lock wait that follows re-checks supersession, bounding the residual race
-	// to a preemption that a newest waiter would have been entitled to anyway.
+	// newest waiter performs its own preemption if its hook elected one.
 	if !c.isPending(work.scope, work.event) {
 		return
 	}
@@ -1028,13 +1032,18 @@ func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
 			// keeps its lease.
 			return
 		}
+		// A preemptor displaced while parked on the victim yields silently: the
+		// newest waiter owns the preemption (and this waiter exits superseded
+		// through the lock wait).
+		if !c.isPending(work.scope, work.event) {
+			return
+		}
+		c.logger.Info("chat lock preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "forced", false)
+		c.safeEvent(ctx, ObsLockPreempted, AdapterAttr(work.event.Adapter))
+		return
 	}
-	// Re-validate ownership after the wait: a preemptor displaced while parked
-	// on the victim must not force-release a lease the newer waiter may already
-	// hold. The remaining instruction-scale window between this check and the
-	// state call is fenced by the lease itself: a falsely released holder's
-	// refresh fails and cancels it with ErrPreempted, bounding any overlap to
-	// one refresh interval (the same fencing that governs remote preemptors).
+	// No local victim: re-validate ownership, then force-invalidate the remote
+	// or orphaned lease.
 	if !c.isPending(work.scope, work.event) {
 		return
 	}
@@ -1048,7 +1057,7 @@ func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
 		c.logger.Error("chat force release thread lock failed", "error", err, "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID)
 		return
 	}
-	c.logger.Info("chat lock preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "released", released)
+	c.logger.Info("chat lock preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "forced", true, "released", released)
 	c.safeEvent(ctx, ObsLockPreempted, AdapterAttr(work.event.Adapter))
 }
 
