@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/coder/chat v0.1.0
 	github.com/coder/chat/state/postgres v0.1.0
-	github.com/jackc/pgx/v5 v5.9.2
+	github.com/jackc/pgx/v5 v5.10.0
 )
 
 require (
