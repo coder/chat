@@ -8,10 +8,43 @@ package main
 import (
 	"context"
 	"strings"
+	"sync"
 
 	"github.com/coder/chat"
 	"github.com/coder/chat/adapters/linear"
 )
+
+// pendingSelections tracks threads with an outstanding select elicitation and
+// the option values that were offered, so a follow-up is interpreted as an
+// answer only while a choice is actually pending. It is take-once: the next
+// follow-up consumes the pending state, matching Linear's behavior of
+// dismissing the elicitation when the user replies in free text. Durable
+// Thread Application State is app-owned; a real bot would persist this
+// alongside its other state.
+type pendingSelections struct {
+	mu      sync.Mutex
+	options map[chat.ThreadID][]string
+}
+
+func newPendingSelections() *pendingSelections {
+	return &pendingSelections{options: map[chat.ThreadID][]string{}}
+}
+
+// set records the option values offered on the thread's latest elicitation.
+func (p *pendingSelections) set(id chat.ThreadID, optionValues []string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.options[id] = optionValues
+}
+
+// take returns and clears the pending option values for the thread.
+func (p *pendingSelections) take(id chat.ThreadID) ([]string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	optionValues, ok := p.options[id]
+	delete(p.options, id)
+	return optionValues, ok
+}
 
 // startProactiveSession creates an agent session on an issue the agent was
 // neither mentioned on nor delegated (agentSessionCreateOnIssue) — for example
@@ -75,7 +108,8 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 	}
 	options := make([]linear.SelectOption, 0, len(suggestions))
 	for _, s := range suggestions {
-		options = append(options, linear.SelectOption{Value: s.RepositoryFullName, Label: s.RepositoryFullName})
+		option := repositoryOptionValue(s)
+		options = append(options, linear.SelectOption{Value: option, Label: option})
 	}
 	_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
 		Body:           "Which repository should I work in?",
@@ -83,6 +117,16 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 		SignalMetadata: linear.SelectSignalMetadata{Options: options},
 	})
 	return err
+}
+
+// repositoryOptionValue qualifies the repository with its Git host so two
+// same-named repositories on different hosts stay distinguishable options.
+// Hostname may be empty when Linear does not resolve one.
+func repositoryOptionValue(s linear.RepositorySuggestion) string {
+	if s.Hostname == "" {
+		return s.RepositoryFullName
+	}
+	return s.Hostname + "/" + s.RepositoryFullName
 }
 
 // handleSelection handles the follow-up prompt that answers a select

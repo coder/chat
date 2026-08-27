@@ -57,7 +57,8 @@ func main() {
 		panic("linear adapter is not registered")
 	}
 
-	bot.OnNewMention(newMentionHandler(linearAccess))
+	pending := newPendingSelections()
+	bot.OnNewMention(newMentionHandler(linearAccess, pending))
 
 	bot.OnSubscribedMessage(func(ctx context.Context, ev *chat.MessageEvent) error {
 		// A "comment"-kind thread is an ordinary issue comment (ADR 0013); an
@@ -67,9 +68,14 @@ func main() {
 			return err
 		}
 		// The answer to the mention handler's deploy elicitation arrives here as a
-		// regular follow-up prompt (see capabilities.go).
-		if handled, err := handleSelection(ctx, ev, []string{"staging", "prod"}); handled {
-			return err
+		// regular follow-up prompt — interpret it as a choice only while one is
+		// pending on this thread (see capabilities.go). take is take-once: a
+		// free-text follow-up also consumes the pending state, matching Linear
+		// dismissing the elicitation UI.
+		if optionValues, ok := pending.take(ev.Thread.ID()); ok {
+			if handled, err := handleSelection(ctx, ev, optionValues); handled {
+				return err
+			}
 		}
 		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Reading your follow-up...")
 		_, err := ev.Thread.Post(ctx, chat.Text("Follow-up received: "+ev.Message.Text))
@@ -103,7 +109,7 @@ type linearAgentAccess interface {
 	SuggestRepositories(context.Context, chat.ThreadID, []linear.CandidateRepository) ([]linear.RepositorySuggestion, error)
 }
 
-func newMentionHandler(linearAccess linearAgentAccess) chat.MessageHandler {
+func newMentionHandler(linearAccess linearAgentAccess, pending *pendingSelections) chat.MessageHandler {
 	return func(ctx context.Context, ev *chat.MessageEvent) error {
 		// On a comment thread (ADR 0013), reply with an ordinary comment.
 		if raw, ok := linear.RawMessageFrom(ev.Message); ok && raw.Kind == "comment" {
@@ -128,13 +134,18 @@ func newMentionHandler(linearAccess linearAgentAccess) chat.MessageHandler {
 			ExternalURLs: []linear.ExternalURL{{URL: "https://example.com/pr/1", Label: "Draft PR"}},
 		})
 
-		// Ask the user to choose, completing the session via an elicitation.
+		// Ask the user to choose, completing the session via an elicitation, and
+		// remember what was offered so only a pending thread's follow-up is
+		// interpreted as an answer.
 		if shouldAsk(ev.Message.Text) {
 			_, err := linearAccess.PostElicitation(ctx, ev.Thread.ID(), linear.ElicitationInput{
 				Body:           "Which environment should I target?",
 				Signal:         "select",
 				SignalMetadata: linear.SelectSignalMetadata{Options: []linear.SelectOption{{Value: "staging"}, {Value: "prod"}}},
 			})
+			if err == nil {
+				pending.set(ev.Thread.ID(), []string{"staging", "prod"})
+			}
 			return err
 		}
 

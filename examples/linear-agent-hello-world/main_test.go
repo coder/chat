@@ -63,7 +63,7 @@ func TestNewMentionHandlerRollsBackSubscriptionWhenReplyFails(t *testing.T) {
 		t.Fatalf("thread: %v", err)
 	}
 
-	err = newMentionHandler(adapter)(ctx, &chat.MessageEvent{
+	err = newMentionHandler(adapter, newPendingSelections())(ctx, &chat.MessageEvent{
 		Thread:  thread,
 		Message: &chat.Message{Text: "hello"},
 	})

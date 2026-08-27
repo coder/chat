@@ -90,8 +90,66 @@ func TestChooseRepositoryElicitsSelectOnLowConfidence(t *testing.T) {
 	if !ok || len(metadata.Options) != 2 {
 		t.Fatalf("signal metadata = %#v", elicitation.SignalMetadata)
 	}
-	if metadata.Options[0].Value != "acme/backend" || metadata.Options[1].Value != "acme/frontend" {
+	if metadata.Options[0].Value != "github.com/acme/backend" || metadata.Options[1].Value != "github.com/acme/frontend" {
 		t.Fatalf("options = %#v", metadata.Options)
+	}
+}
+
+func TestOfferRepositoryChoiceKeepsSameNameReposOnDifferentHostsDistinct(t *testing.T) {
+	adapter := &testLinearAdapter{}
+
+	err := offerRepositoryChoice(context.Background(), adapter, chat.ThreadID("linear:v1:thread-1"), []linear.RepositorySuggestion{
+		{Hostname: "github.com", RepositoryFullName: "acme/backend", Confidence: 0.4},
+		{Hostname: "gitlab.example.com", RepositoryFullName: "acme/backend", Confidence: 0.4},
+		{RepositoryFullName: "acme/orphan", Confidence: 0.1}, // hostname unresolved
+	})
+	if err != nil {
+		t.Fatalf("offer repository choice: %v", err)
+	}
+	metadata, ok := adapter.elicitations[0].SignalMetadata.(linear.SelectSignalMetadata)
+	if !ok || len(metadata.Options) != 3 {
+		t.Fatalf("signal metadata = %#v", adapter.elicitations[0].SignalMetadata)
+	}
+	if metadata.Options[0].Value != "github.com/acme/backend" ||
+		metadata.Options[1].Value != "gitlab.example.com/acme/backend" ||
+		metadata.Options[2].Value != "acme/orphan" {
+		t.Fatalf("options = %#v", metadata.Options)
+	}
+}
+
+func TestPendingSelectionsAreTakeOnce(t *testing.T) {
+	pending := newPendingSelections()
+	threadID := chat.ThreadID("linear:v1:thread-1")
+
+	if _, ok := pending.take(threadID); ok {
+		t.Fatal("take on empty registry reported a pending selection")
+	}
+	pending.set(threadID, []string{"staging", "prod"})
+	optionValues, ok := pending.take(threadID)
+	if !ok || len(optionValues) != 2 || optionValues[0] != "staging" {
+		t.Fatalf("take = %#v, %v", optionValues, ok)
+	}
+	// The next follow-up no longer sees a pending selection: a bare "staging"
+	// message must not be consumed as a choice.
+	if _, ok := pending.take(threadID); ok {
+		t.Fatal("pending selection survived take")
+	}
+}
+
+func TestMentionHandlerRegistersPendingSelectionOnDeployElicitation(t *testing.T) {
+	adapter := &testLinearAdapter{}
+	pending := newPendingSelections()
+	ev := newTestEvent(t, adapter, &chat.Message{Text: "deploy"})
+
+	if err := newMentionHandler(adapter, pending)(context.Background(), ev); err != nil {
+		t.Fatalf("mention handler: %v", err)
+	}
+	if len(adapter.elicitations) != 1 || adapter.elicitations[0].Signal != "select" {
+		t.Fatalf("elicitations = %#v", adapter.elicitations)
+	}
+	optionValues, ok := pending.take(ev.Thread.ID())
+	if !ok || len(optionValues) != 2 {
+		t.Fatalf("pending = %#v, %v", optionValues, ok)
 	}
 }
 

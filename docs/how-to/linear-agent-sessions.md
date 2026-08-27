@@ -239,7 +239,8 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 	}
 	options := make([]linear.SelectOption, 0, len(suggestions))
 	for _, s := range suggestions {
-		options = append(options, linear.SelectOption{Value: s.RepositoryFullName, Label: s.RepositoryFullName})
+		option := repositoryOptionValue(s)
+		options = append(options, linear.SelectOption{Value: option, Label: option})
 	}
 	_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
 		Body:           "Which repository should I work in?",
@@ -249,6 +250,10 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 	return err
 }
 ```
+
+Qualify option identities with everything needed to disambiguate them — here
+the Git host, so `github.com/acme/backend` and `gitlab.example.com/acme/backend`
+stay distinct choices.
 
 The user's answer arrives as a **regular follow-up prompt** (routed to
 `OnSubscribedMessage` on a subscribed thread): a picked option delivers the
@@ -272,6 +277,23 @@ func handleSelection(ctx context.Context, ev *chat.MessageEvent, optionValues []
 
 Since free-text replies are natural language, a production agent should
 involve its LLM when interpreting an unmatched answer rather than failing.
+
+Only interpret a follow-up as an answer while a choice is actually pending on
+that thread — otherwise a later message that happens to equal an option value
+would be misread as a selection. The example keeps a small take-once
+per-thread registry (`pendingSelections` in `capabilities.go`), records the
+offered values when it posts the elicitation, and consumes the pending state
+on the next follow-up (take-once matches Linear dismissing the elicitation on
+a free-text reply):
+
+<!-- source: examples/linear-agent-hello-world/main.go -->
+```go
+		if optionValues, ok := pending.take(ev.Thread.ID()); ok {
+			if handled, err := handleSelection(ctx, ev, optionValues); handled {
+				return err
+			}
+		}
+```
 
 ### Ask The User To Link An Account (Auth Elicitation)
 
