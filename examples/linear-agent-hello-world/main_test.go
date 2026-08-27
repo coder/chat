@@ -80,8 +80,17 @@ func TestNewMentionHandlerRollsBackSubscriptionWhenReplyFails(t *testing.T) {
 	}
 }
 
+// testLinearAdapter is a fake chat.Adapter and linearAgentAccess that records
+// what the handlers send so the worked examples in capabilities.go are testable
+// without a live Linear org. Tests drive handlers synchronously, so no locking.
 type testLinearAdapter struct {
-	postErr error
+	postErr        error
+	posted         []string
+	thoughts       []string
+	elicitations   []linear.ElicitationInput
+	sessionUpdates []linear.AgentSessionUpdateInput
+	sessionCreates []linear.CreateSessionOnIssueInput
+	suggestions    []linear.RepositorySuggestion
 }
 
 func (a *testLinearAdapter) Name() string { return "linear" }
@@ -100,10 +109,11 @@ func (a *testLinearAdapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, 
 	return chat.ThreadRef{ID: id, Adapter: "linear"}, nil
 }
 
-func (a *testLinearAdapter) PostMessage(_ context.Context, thread chat.ThreadRef, _ chat.PostableMessage) (*chat.SentMessage, error) {
+func (a *testLinearAdapter) PostMessage(_ context.Context, thread chat.ThreadRef, msg chat.PostableMessage) (*chat.SentMessage, error) {
 	if a.postErr != nil {
 		return nil, a.postErr
 	}
+	a.posted = append(a.posted, msg.Text)
 	return &chat.SentMessage{ID: "sent-1", ThreadID: thread.ID}, nil
 }
 
@@ -111,7 +121,8 @@ func (a *testLinearAdapter) BotActor() chat.Actor {
 	return chat.Actor{Adapter: "linear", Tenant: "org", ID: "bot", BotKind: chat.BotBot}
 }
 
-func (a *testLinearAdapter) PostThought(_ context.Context, id chat.ThreadID, _ string) (*chat.SentMessage, error) {
+func (a *testLinearAdapter) PostThought(_ context.Context, id chat.ThreadID, text string) (*chat.SentMessage, error) {
+	a.thoughts = append(a.thoughts, text)
 	return &chat.SentMessage{ID: "thought-1", ThreadID: id}, nil
 }
 
@@ -119,7 +130,8 @@ func (a *testLinearAdapter) PostAction(_ context.Context, id chat.ThreadID, _ li
 	return &chat.SentMessage{ID: "action-1", ThreadID: id}, nil
 }
 
-func (a *testLinearAdapter) PostElicitation(_ context.Context, id chat.ThreadID, _ linear.ElicitationInput) (*chat.SentMessage, error) {
+func (a *testLinearAdapter) PostElicitation(_ context.Context, id chat.ThreadID, in linear.ElicitationInput) (*chat.SentMessage, error) {
+	a.elicitations = append(a.elicitations, in)
 	return &chat.SentMessage{ID: "elicitation-1", ThreadID: id}, nil
 }
 
@@ -127,6 +139,16 @@ func (a *testLinearAdapter) PostError(_ context.Context, id chat.ThreadID, _ lin
 	return &chat.SentMessage{ID: "error-1", ThreadID: id}, nil
 }
 
-func (a *testLinearAdapter) UpdateSession(context.Context, chat.ThreadID, linear.AgentSessionUpdateInput) error {
+func (a *testLinearAdapter) UpdateSession(_ context.Context, _ chat.ThreadID, in linear.AgentSessionUpdateInput) error {
+	a.sessionUpdates = append(a.sessionUpdates, in)
 	return nil
+}
+
+func (a *testLinearAdapter) CreateSessionOnIssue(_ context.Context, in linear.CreateSessionOnIssueInput) (*linear.CreatedAgentSession, error) {
+	a.sessionCreates = append(a.sessionCreates, in)
+	return &linear.CreatedAgentSession{ThreadID: chat.ThreadID("linear:v1:new-session"), SessionID: "S-NEW", IssueID: "ISSUE-NEW"}, nil
+}
+
+func (a *testLinearAdapter) SuggestRepositories(context.Context, chat.ThreadID, []linear.CandidateRepository) ([]linear.RepositorySuggestion, error) {
+	return a.suggestions, nil
 }

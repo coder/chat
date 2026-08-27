@@ -479,6 +479,17 @@ type linearAPIServer struct {
 	// 429 with Retry-After before succeeding.
 	rateLimit     int
 	rateLimitSeen int
+	// throttleNext, when > 0, makes the next N GraphQL calls (any operation)
+	// return a 429 with Retry-After before succeeding.
+	throttleNext int
+	// sessionCreates records AgentSessionCreateOnIssue/OnComment inputs;
+	// sessionCreateOverride, when non-nil, is returned verbatim instead of the
+	// canned success payload. suggestionVars / suggestionsOverride are the same
+	// pair for IssueRepositorySuggestions.
+	sessionCreates        []map[string]any
+	sessionCreateOverride map[string]any
+	suggestionVars        []map[string]any
+	suggestionsOverride   map[string]any
 	// History read fixtures (see history_test.go): mocked GraphQL responses keyed
 	// by operation name, recorded history requests, and knobs to throttle or block
 	// history reads.
@@ -528,6 +539,48 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 			decodeJSON(t, r.Body, &req)
 			if strings.Contains(req.Query, "ViewerIdentity") {
 				writeJSON(t, w, map[string]any{"data": map[string]any{"viewer": map[string]any{"id": "APP1", "name": "Linear Bot", "displayName": "Linear Bot", "organization": map[string]any{"id": "ORG1"}}}})
+				return
+			}
+			api.mu.Lock()
+			if api.throttleNext > 0 {
+				api.throttleNext--
+				api.mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusTooManyRequests)
+				writeJSON(t, w, map[string]any{"retryAfter": "0.01"})
+				return
+			}
+			api.mu.Unlock()
+			if strings.Contains(req.Query, "AgentSessionCreateOn") {
+				input, _ := req.Variables["input"].(map[string]any)
+				api.mu.Lock()
+				api.sessionCreates = append(api.sessionCreates, input)
+				override := api.sessionCreateOverride
+				api.mu.Unlock()
+				if override != nil {
+					writeJSON(t, w, override)
+					return
+				}
+				if strings.Contains(req.Query, "AgentSessionCreateOnComment") {
+					writeJSON(t, w, map[string]any{"data": map[string]any{"agentSessionCreateOnComment": map[string]any{"success": true, "agentSession": map[string]any{"id": "SNEW2", "issue": map[string]any{"id": "ISSUE7"}, "comment": map[string]any{"id": "CROOT1"}}}}})
+					return
+				}
+				writeJSON(t, w, map[string]any{"data": map[string]any{"agentSessionCreateOnIssue": map[string]any{"success": true, "agentSession": map[string]any{"id": "SNEW1", "issue": map[string]any{"id": "ISSUE7"}, "comment": nil}}}})
+				return
+			}
+			if strings.Contains(req.Query, "IssueRepositorySuggestions") {
+				api.mu.Lock()
+				api.suggestionVars = append(api.suggestionVars, req.Variables)
+				override := api.suggestionsOverride
+				api.mu.Unlock()
+				if override != nil {
+					writeJSON(t, w, override)
+					return
+				}
+				writeJSON(t, w, map[string]any{"data": map[string]any{"issueRepositorySuggestions": map[string]any{"suggestions": []map[string]any{
+					{"hostname": "github.com", "repositoryFullName": "acme/backend", "confidence": 0.92},
+					{"hostname": "github.com", "repositoryFullName": "acme/frontend", "confidence": 0.35},
+				}}}})
 				return
 			}
 			if strings.Contains(req.Query, "AgentActivityCreate") {
@@ -680,6 +733,38 @@ func (a *linearAPIServer) lastComment(t *testing.T) map[string]any {
 		t.Fatal("no comment recorded")
 	}
 	return a.comments[len(a.comments)-1]
+}
+
+func (a *linearAPIServer) sessionCreateCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.sessionCreates)
+}
+
+func (a *linearAPIServer) lastSessionCreate(t *testing.T) map[string]any {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.sessionCreates) == 0 {
+		t.Fatal("no session create recorded")
+	}
+	return a.sessionCreates[len(a.sessionCreates)-1]
+}
+
+func (a *linearAPIServer) suggestionCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.suggestionVars)
+}
+
+func (a *linearAPIServer) lastSuggestionVars(t *testing.T) map[string]any {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.suggestionVars) == 0 {
+		t.Fatal("no repository suggestion request recorded")
+	}
+	return a.suggestionVars[len(a.suggestionVars)-1]
 }
 
 func (a *linearAPIServer) commentCount() int {

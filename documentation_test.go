@@ -2,6 +2,7 @@ package chat_test
 
 import (
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -142,6 +143,45 @@ func TestDocumentationCoversMessageHistoryCapability(t *testing.T) {
 			if !strings.Contains(text, phrase) {
 				t.Fatalf("%s does not mention %q", tc.path, phrase)
 			}
+		}
+	}
+}
+
+// TestLinearHowToSnippetsAreExtractedFromBuildableSource keeps the worked
+// examples in the Linear how-to honest: every fenced Go block annotated with a
+// `<!-- source: path -->` marker must appear verbatim (modulo whitespace) in
+// the referenced buildable, tested source file.
+func TestLinearHowToSnippetsAreExtractedFromBuildableSource(t *testing.T) {
+	t.Parallel()
+
+	doc, err := os.ReadFile("docs/how-to/linear-agent-sessions.md")
+	if err != nil {
+		t.Fatalf("read how-to: %v", err)
+	}
+	pattern := regexp.MustCompile("(?s)<!-- source: ([^>]+?) -->\\s*```go\\n(.*?)```")
+	matches := pattern.FindAllStringSubmatch(string(doc), -1)
+	if len(matches) < 8 {
+		t.Fatalf("marked snippets = %d, want at least 8", len(matches))
+	}
+	normalizedSources := map[string]string{}
+	for _, match := range matches {
+		path := strings.TrimSpace(match[1])
+		snippet := match[2]
+		normalizedSource, ok := normalizedSources[path]
+		if !ok {
+			source, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read snippet source %s: %v", path, err)
+			}
+			normalizedSource = strings.Join(strings.Fields(string(source)), " ")
+			normalizedSources[path] = normalizedSource
+		}
+		normalizedSnippet := strings.Join(strings.Fields(snippet), " ")
+		if normalizedSnippet == "" {
+			t.Fatalf("empty marked snippet for %s", path)
+		}
+		if !strings.Contains(normalizedSource, normalizedSnippet) {
+			t.Fatalf("doc snippet drifted from %s:\n%s", path, snippet)
 		}
 	}
 }

@@ -144,3 +144,192 @@ type agentSessionUpdateData struct {
 		Success bool `json:"success"`
 	} `json:"agentSessionUpdate"`
 }
+
+// CreateSessionOnIssueInput drives the agentSessionCreateOnIssue mutation:
+// proactively creating an agent session on an issue the agent was not mentioned
+// on or delegated. Linear's Agent API is in developer preview upstream and this
+// shape may change with it.
+type CreateSessionOnIssueInput struct {
+	// IssueID is the target issue: a UUID or an issue identifier such as
+	// "ENG-123".
+	IssueID string
+	// ExternalURLs optionally seeds the session's external links at creation,
+	// which also keeps the new session from being marked unresponsive within the
+	// Agent Session Timing Contract window (ADR 0008).
+	ExternalURLs []ExternalURL
+}
+
+// CreateSessionOnCommentInput drives the agentSessionCreateOnComment mutation:
+// proactively creating an agent session rooted on an existing issue comment.
+type CreateSessionOnCommentInput struct {
+	// CommentID is the root comment the session will be associated with.
+	CommentID string
+	// ExternalURLs optionally seeds the session's external links at creation.
+	ExternalURLs []ExternalURL
+}
+
+// CreatedAgentSession identifies a proactively created Linear agent session.
+type CreatedAgentSession struct {
+	// ThreadID is the adapter's opaque agent-session Thread ID for the new
+	// session. It works everywhere a webhook-minted Thread ID does: Thread Handle
+	// reconstruction via chat.Chat.Thread, Thread.Post, PostThought, the other
+	// activity helpers, and UpdateSession.
+	ThreadID chat.ThreadID
+	// SessionID, IssueID, and CommentID are the raw Linear identifiers of the
+	// created session, its issue, and its root comment (empty when the session
+	// was created on an issue without a root comment).
+	SessionID string
+	IssueID   string
+	CommentID string
+}
+
+// CreateSessionOnIssue proactively creates an agent session on an issue when the
+// agent was not mentioned or delegated. It is reached through Adapter Access and
+// requires the single-install identity discovered at Init; multi-tenant callers
+// use CreateSessionOnIssueForTenant.
+func (a *Adapter) CreateSessionOnIssue(ctx context.Context, in CreateSessionOnIssueInput) (*CreatedAgentSession, error) {
+	assertAdapter(a)
+	if a.multiTenant() {
+		return nil, errors.New("linear: CreateSessionOnIssue requires a tenant; use CreateSessionOnIssueForTenant in multi-tenant mode")
+	}
+	return a.createSessionOnIssue(ctx, a.BotActor().Tenant, in)
+}
+
+// CreateSessionOnIssueForTenant is the multi-tenant form of CreateSessionOnIssue:
+// it resolves the per-org access token for the given Platform Tenant (the Linear
+// organizationId) and mints the returned Thread ID for that tenant.
+func (a *Adapter) CreateSessionOnIssueForTenant(ctx context.Context, tenant string, in CreateSessionOnIssueInput) (*CreatedAgentSession, error) {
+	assertAdapter(a)
+	if err := a.validateProactiveTenant(tenant); err != nil {
+		return nil, err
+	}
+	return a.createSessionOnIssue(ctx, tenant, in)
+}
+
+// CreateSessionOnComment proactively creates an agent session rooted on an
+// existing issue comment. It is reached through Adapter Access and requires the
+// single-install identity discovered at Init; multi-tenant callers use
+// CreateSessionOnCommentForTenant.
+func (a *Adapter) CreateSessionOnComment(ctx context.Context, in CreateSessionOnCommentInput) (*CreatedAgentSession, error) {
+	assertAdapter(a)
+	if a.multiTenant() {
+		return nil, errors.New("linear: CreateSessionOnComment requires a tenant; use CreateSessionOnCommentForTenant in multi-tenant mode")
+	}
+	return a.createSessionOnComment(ctx, a.BotActor().Tenant, in)
+}
+
+// CreateSessionOnCommentForTenant is the multi-tenant form of
+// CreateSessionOnComment.
+func (a *Adapter) CreateSessionOnCommentForTenant(ctx context.Context, tenant string, in CreateSessionOnCommentInput) (*CreatedAgentSession, error) {
+	assertAdapter(a)
+	if err := a.validateProactiveTenant(tenant); err != nil {
+		return nil, err
+	}
+	return a.createSessionOnComment(ctx, tenant, in)
+}
+
+// validateProactiveTenant guards proactive session creation, which mints Thread
+// IDs for a tenant instead of validating an existing one: the tenant is required
+// (it becomes the Thread ID's organization), and in single-install mode it must
+// match the initialized organization so the minted Thread ID stays usable.
+func (a *Adapter) validateProactiveTenant(tenant string) error {
+	if tenant == "" {
+		return errors.New("linear: tenant is required")
+	}
+	if !a.multiTenant() {
+		bot := a.BotActor()
+		if bot.Tenant != "" && tenant != bot.Tenant {
+			return fmt.Errorf("linear: tenant %q does not match initialized organization", tenant)
+		}
+	}
+	return nil
+}
+
+func (a *Adapter) createSessionOnIssue(ctx context.Context, tenant string, in CreateSessionOnIssueInput) (*CreatedAgentSession, error) {
+	if in.IssueID == "" {
+		return nil, errors.New("linear: issue id is required")
+	}
+	input := map[string]any{"issueId": in.IssueID}
+	if len(in.ExternalURLs) > 0 {
+		input["externalUrls"] = in.ExternalURLs
+	}
+	var resp graphQLResponse[agentSessionCreateOnIssueData]
+	if err := a.callGraphQL(ctx, tenant, `mutation AgentSessionCreateOnIssue($input: AgentSessionCreateOnIssue!) { agentSessionCreateOnIssue(input: $input) { success agentSession { id issue { id } comment { id } } } }`, map[string]any{"input": input}, &resp); err != nil {
+		return nil, err
+	}
+	if err := resp.firstError(); err != nil {
+		return nil, err
+	}
+	return createdSessionFromPayload(tenant, resp.Data.AgentSessionCreateOnIssue)
+}
+
+func (a *Adapter) createSessionOnComment(ctx context.Context, tenant string, in CreateSessionOnCommentInput) (*CreatedAgentSession, error) {
+	if in.CommentID == "" {
+		return nil, errors.New("linear: comment id is required")
+	}
+	input := map[string]any{"commentId": in.CommentID}
+	if len(in.ExternalURLs) > 0 {
+		input["externalUrls"] = in.ExternalURLs
+	}
+	var resp graphQLResponse[agentSessionCreateOnCommentData]
+	if err := a.callGraphQL(ctx, tenant, `mutation AgentSessionCreateOnComment($input: AgentSessionCreateOnComment!) { agentSessionCreateOnComment(input: $input) { success agentSession { id issue { id } comment { id } } } }`, map[string]any{"input": input}, &resp); err != nil {
+		return nil, err
+	}
+	if err := resp.firstError(); err != nil {
+		return nil, err
+	}
+	return createdSessionFromPayload(tenant, resp.Data.AgentSessionCreateOnComment)
+}
+
+// createdSessionFromPayload converts an agentSessionCreateOn* payload into a
+// CreatedAgentSession, minting the opaque agent-session Thread ID from the
+// canonical identifiers Linear returned (not the caller's input, which may be an
+// issue identifier alias such as "ENG-123").
+func createdSessionFromPayload(tenant string, payload createdSessionPayload) (*CreatedAgentSession, error) {
+	session := payload.AgentSession
+	if !payload.Success || session.ID == "" {
+		return nil, errors.New("linear: failed to create agent session")
+	}
+	if session.Issue.ID == "" {
+		return nil, errors.New("linear: created agent session did not return an issue")
+	}
+	threadID, err := encodeThreadID(threadPayload{
+		Organization: tenant,
+		Issue:        session.Issue.ID,
+		Comment:      session.Comment.ID,
+		Session:      session.ID,
+		Kind:         threadKindAgentSession,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &CreatedAgentSession{
+		ThreadID:  threadID,
+		SessionID: session.ID,
+		IssueID:   session.Issue.ID,
+		CommentID: session.Comment.ID,
+	}, nil
+}
+
+type agentSessionCreateOnIssueData struct {
+	AgentSessionCreateOnIssue createdSessionPayload `json:"agentSessionCreateOnIssue"`
+}
+
+type agentSessionCreateOnCommentData struct {
+	AgentSessionCreateOnComment createdSessionPayload `json:"agentSessionCreateOnComment"`
+}
+
+type createdSessionPayload struct {
+	Success      bool `json:"success"`
+	AgentSession struct {
+		ID      string  `json:"id"`
+		Issue   nodeRef `json:"issue"`
+		Comment nodeRef `json:"comment"`
+	} `json:"agentSession"`
+}
+
+// nodeRef is a minimal Supported Platform Shape for a referenced Linear node: a
+// nullable object read only for its id (JSON null decodes to the zero value).
+type nodeRef struct {
+	ID string `json:"id"`
+}

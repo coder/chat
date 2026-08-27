@@ -34,6 +34,14 @@
 //   - UpdateSession: set/replace externalUrls, add/remove URLs, and replace the
 //     whole plan array. Setting externalUrls can keep a new session from being
 //     marked unresponsive.
+//   - CreateSessionOnIssue / CreateSessionOnComment (and their ForTenant
+//     variants for multi-tenant mode): typed proactive agent session creation
+//     (agentSessionCreateOnIssue / agentSessionCreateOnComment). The returned
+//     CreatedAgentSession carries an opaque ThreadID that works everywhere a
+//     webhook-minted agent-session Thread ID does.
+//   - SuggestRepositories: typed issueRepositorySuggestions ranking of
+//     candidate repositories with confidence scores; a low-confidence result
+//     pairs naturally with a "select" elicitation.
 //   - GraphQL: a deliberate low-level escape hatch for preview Linear APIs. It
 //     reuses the client-credentials token-refresh path, surfaces GraphQL errors,
 //     and never exposes or returns the access token.
@@ -136,8 +144,7 @@
 //
 // Multi-tenant OAuth installs (ADR 0006) reuse the per-org credential resolution
 // above; the OAuth installation *web flow*, token streaming (ADR 0011), Markdown
-// conversion, reactions, edit/delete, files, repository-suggestion ranking, and
-// issue-workflow automation remain deferred; the latter are reachable through the
-// GraphQL escape hatch. This is an app-owned actor, not a personal-API-key or
-// user-OAuth user bot.
+// conversion, reactions, edit/delete, files, and issue-workflow automation
+// remain deferred; the latter is reachable through the GraphQL escape hatch.
+// This is an app-owned actor, not a personal-API-key or user-OAuth user bot.
 package linear

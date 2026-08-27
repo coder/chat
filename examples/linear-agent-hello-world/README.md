@@ -15,6 +15,15 @@ the Linear `Comment` webhook scope, a comment that mentions the app actor routes
 to `OnNewMention` and `Thread.Post` replies with an ordinary issue comment
 rather than an agent activity.
 
+[`capabilities.go`](capabilities.go) holds the worked capability loops behind
+[docs/how-to/linear-agent-sessions.md](../../docs/how-to/linear-agent-sessions.md):
+proactive session creation (`CreateSessionOnIssue`), repository suggestions
+paired with a `select` elicitation (`SuggestRepositories`), auth elicitation
+with the resume-after-linking follow-up, select-answer handling, `externalUrls`
+updates, and stop confirmation. Each helper is exercised by
+[`capabilities_test.go`](capabilities_test.go); the stop and select-answer
+helpers are wired into the running bot's `OnSubscribedMessage` handler.
+
 This is a Linear app-actor example (ADR 0008, ADR 0013), not a personal API key
 user bot.
 

@@ -63,8 +63,12 @@ func main() {
 		// A "comment"-kind thread is an ordinary issue comment (ADR 0013); an
 		// "agent_session" thread is an agent session (ADR 0008). Thread.Post routes
 		// by kind automatically.
-		if raw, ok := linear.RawMessageFrom(ev.Message); ok && raw.StopRequested() {
-			_, err := ev.Thread.Post(ctx, chat.Text("Stopping as requested."))
+		if stopped, err := confirmStop(ctx, ev); stopped {
+			return err
+		}
+		// The answer to the mention handler's deploy elicitation arrives here as a
+		// regular follow-up prompt (see capabilities.go).
+		if handled, err := handleSelection(ctx, ev, []string{"staging", "prod"}); handled {
 			return err
 		}
 		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Reading your follow-up...")
@@ -95,6 +99,8 @@ type linearAgentAccess interface {
 	PostElicitation(context.Context, chat.ThreadID, linear.ElicitationInput) (*chat.SentMessage, error)
 	PostError(context.Context, chat.ThreadID, linear.ErrorInput) (*chat.SentMessage, error)
 	UpdateSession(context.Context, chat.ThreadID, linear.AgentSessionUpdateInput) error
+	CreateSessionOnIssue(context.Context, linear.CreateSessionOnIssueInput) (*linear.CreatedAgentSession, error)
+	SuggestRepositories(context.Context, chat.ThreadID, []linear.CandidateRepository) ([]linear.RepositorySuggestion, error)
 }
 
 func newMentionHandler(linearAccess linearAgentAccess) chat.MessageHandler {
