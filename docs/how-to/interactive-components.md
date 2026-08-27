@@ -62,7 +62,7 @@ bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
 	switch ev.Interaction.ActionID {
 	case "approve":
 		_, err := ev.Thread.Post(ctx, chat.Text(
-			"Approved by " + ev.Interaction.Actor.Name,
+			"Approved by <@" + ev.Interaction.Actor.ID + ">",
 		))
 		return err
 	default:
@@ -74,12 +74,15 @@ bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
 `ev.Interaction.Kind` is `chat.InteractionBlockAction` for this slice, and
 `ev.Interaction.Raw` preserves the full Slack payload — including
 `response_url`, `trigger_id`, action values, and view state — as the platform
-escape hatch.
+escape hatch. The normalized `Actor` carries the Slack user ID, not a display
+name (the interactivity payload does not include one); post a `<@USERID>`
+mention as above, or resolve the name yourself via the Slack API.
 
-The Slack adapter acknowledges the interaction with an empty 2xx inside
-Slack's 3-second budget before your handler posts anything. For slow work,
-combine this with [deferred dispatch](deferred-dispatch.md) and
-`chat.ConcurrencyQueue`.
+Mind the acknowledgement timing: under the default `DispatchSync` mode the
+adapter writes the empty 2xx only *after* your handler returns, so a slow
+handler can miss Slack's 3-second acknowledgement budget. Enable
+[deferred dispatch](deferred-dispatch.md) (with `chat.ConcurrencyQueue`) to
+guarantee the ack goes out before your handler runs.
 
 ## Open A Modal
 
@@ -90,11 +93,20 @@ opening via `views.open`:
 err := slackAdapter.OpenModal(ctx, triggerID, modalView)
 ```
 
-Slack invalidates `trigger_id` after 3 seconds, so open modals promptly. The
-synchronous modal `view_submission` response (`response_action`) is not
-supported: it requires responding in the webhook's HTTP response body, which
-is incompatible with ack-then-work. Submitted view payloads still arrive as
-events you can observe through the escape hatch.
+In multi-tenant mode (`InstallStore` configured), `OpenModal` returns an
+error because there is no single workspace token; use the tenant-aware
+variant with the event's tenant instead:
+
+```go
+err := slackAdapter.OpenModalForTenant(ctx, ev.Event.Tenant, triggerID, modalView)
+```
+
+Slack invalidates `trigger_id` after 3 seconds, so open modals promptly.
+Modal *submissions* are not part of this slice: the synchronous
+`view_submission` response (`response_action`) requires responding in the
+webhook's HTTP response body, which is incompatible with ack-then-work, so
+the adapter acknowledges `view_submission` payloads and drops them —
+application code cannot observe submitted view values today.
 
 ## Respond Via response_url
 

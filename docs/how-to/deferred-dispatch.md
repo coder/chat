@@ -19,15 +19,20 @@ retry or time out.
 
 ## Enable It
 
+`WithRuntimeOptions` replaces the whole options struct (it does not merge), so
+start from `chat.DefaultRuntimeOptions()` to keep the required `DedupeTTL` and
+`ThreadLockTTL` defaults:
+
 ```go
+opts := chat.DefaultRuntimeOptions()
+opts.Dispatch = chat.DispatchDeferred
+opts.DetachTimeout = 5 * time.Minute
+opts.Concurrency = chat.ConcurrencyQueue
+
 bot, err := chat.New(ctx,
 	chat.WithState(state),
 	chat.WithAdapter(adapter),
-	chat.WithRuntimeOptions(chat.RuntimeOptions{
-		Dispatch:      chat.DispatchDeferred,
-		DetachTimeout: 5 * time.Minute,
-		Concurrency:   chat.ConcurrencyQueue,
-	}),
+	chat.WithRuntimeOptions(opts),
 )
 ```
 
@@ -63,12 +68,15 @@ bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 Rules that keep this safe:
 
 - Use the `ctx` you are given for every call. It carries the detach timeout
-  and is what `Shutdown` uses to drain in-flight work.
+  and is how the runtime signals cancellation.
 - Handler errors after ack are recorded and observed, not retried by the
   platform. If your work must not be lost, make it idempotent and consider
   your own queue.
-- `Shutdown(ctx)` waits for detached tails to finish (bounded by the context
-  you pass it), so a rolling deploy does not sever half-finished replies.
+- `Shutdown(ctx)` cancels the detached work contexts first, then waits
+  (bounded by the context you pass it) for handlers to observe cancellation
+  and return. In-flight generation is aborted, not completed — deferred
+  dispatch is not a durable queue, so work that must survive a rolling deploy
+  belongs in application-owned persistence.
 
 ## When Not To Use It
 

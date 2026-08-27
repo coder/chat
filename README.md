@@ -425,11 +425,12 @@ lock-conflict acknowledge-and-drop) but route to their own single-slot hooks:
 
 Both hooks are single-slot and no-op-when-unset, like the message hooks; an unset
 handler is still acknowledged. The platform ack is adapter-owned: the Slack adapter
-returns an empty 2xx within Slack's 3-second budget and preserves `response_url` /
-`trigger_id` on the `Raw` Platform Escape Hatch. Long command/interaction work uses
-the same `DispatchDeferred` ack-then-work primitive as messages (ADR 0002); bots
-expecting commands or clicks mid-conversation should select the `queue`
-Concurrency Strategy.
+returns an empty 2xx and preserves `response_url` / `trigger_id` on the `Raw`
+Platform Escape Hatch. Under the default synchronous dispatch the handler runs
+before that ack, so long command/interaction work should use the same
+`DispatchDeferred` ack-then-work primitive as messages (ADR 0002) to stay inside
+Slack's 3-second budget; bots expecting commands or clicks mid-conversation
+should select the `queue` Concurrency Strategy.
 
 Native command/interaction responses and Block Kit content are NOT added to
 Postable Message, which stays Plain Text + Portable Markdown. They are reached

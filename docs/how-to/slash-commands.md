@@ -16,24 +16,40 @@ already mounted:
 https://YOUR_PUBLIC_HOST/webhooks/slack
 ```
 
-The Slack adapter acknowledges the command with an empty 2xx inside Slack's
-3-second budget; your handler decides what to post.
+The Slack adapter acknowledges the command with an empty 2xx; under the
+default synchronous dispatch mode that happens after your handler returns
+(see [Long-Running Commands](#long-running-commands) for staying inside
+Slack's 3-second budget).
 
 ## Register The Handler
 
+Respond through the `response_url` Slack includes with every slash command,
+reached via the Slack adapter's `RespondURL`:
+
 ```go
+slackAdapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
+if !ok {
+	return errors.New("slack adapter is not registered")
+}
+
 bot.OnCommand(func(ctx context.Context, ev *chat.CommandEvent) error {
 	switch ev.Command.Name {
 	case "/deploy":
-		_, err := ev.Thread.Post(ctx, chat.Text(
-			"Deploying " + strings.Join(ev.Command.Args, " "),
+		return slackAdapter.RespondURL(ctx, ev.Command.Raw, chat.Text(
+			"Deploying "+strings.Join(ev.Command.Args, " "),
 		))
-		return err
 	default:
 		return nil
 	}
 })
 ```
+
+Why not `ev.Thread.Post`? A slash command in a channel carries no message
+timestamp, so its thread is rooted at the channel itself — there is no thread
+to post into, and a regular threaded post to that synthetic root fails.
+`RespondURL` is the channel-command response path (Slack renders it in place,
+ephemeral by default). In a direct-message conversation with the bot,
+`ev.Thread.Post` works normally.
 
 What you get on `ev.Command`:
 
@@ -58,19 +74,10 @@ What you get on `ev.Command`:
 
 ## Long-Running Commands
 
-`ev.Thread.Post` posts a regular thread message. If the command kicks off
-slow work, enable [deferred dispatch](deferred-dispatch.md) so the ack happens
-before your handler runs, and consider `chat.ConcurrencyQueue` so mid-work
-commands and clicks queue instead of dropping. To respond through Slack's
-`response_url` instead of posting to the thread, use the Slack adapter's
-`RespondURL` via typed adapter access:
-
-```go
-slackAdapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
-if ok {
-	err := slackAdapter.RespondURL(ctx, ev.Command.Raw, chat.Text("On it."))
-	if err != nil {
-		return err
-	}
-}
-```
+Under the default `DispatchSync` mode your handler runs before the platform
+acknowledgement, so slow command work risks Slack's 3-second timeout. Enable
+[deferred dispatch](deferred-dispatch.md) so the ack happens before your
+handler runs, and consider `chat.ConcurrencyQueue` so mid-work commands and
+clicks queue instead of dropping. Slack keeps a command's `response_url`
+valid for 30 minutes, so a deferred handler can finish its work and respond
+through `RespondURL` afterwards.
