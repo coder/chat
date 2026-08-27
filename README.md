@@ -44,7 +44,7 @@ quick status map for readers familiar with Vercel Chat SDK:
 | Cards, JSX-style cards, native payload builders | Not yet implemented |
 | Pattern handlers | Not yet implemented |
 | Observability metrics/tracing | Optional `Observer` seam, no-op default, no OTel dependency in core |
-| Message history persistence | App-owned (Thread Application State); thin live read-through via `HistoryReader` Optional Capability (Slack) |
+| Message history persistence | App-owned (Thread Application State); thin live read-through via `HistoryReader` Optional Capability (Slack, Linear) |
 | AI-message conversion helpers | Not yet implemented |
 | Multiple production adapters | Not yet implemented |
 | Middleware | Not yet implemented |
@@ -555,7 +555,10 @@ if ok {
 - Ordering, pagination, and page-size clamping are adapter-owned and documented in
   each adapter's GoDoc. The Slack adapter returns messages newest-first, pages
   toward older messages via a `Before` cursor that is a `Message.ID`, and clamps
-  the limit to Slack's maximum.
+  the limit to Slack's maximum. The Linear adapter reads agent-session threads
+  from the session's agent activities and issue-comment threads from the root
+  comment and its replies, with the same newest-first ordering and `Before`
+  cursor semantics, clamped to Linear's maximum page size.
 - Long fetches run after ack via the ack-then-work seam; the runtime never fetches
   history on the inbound request path.
 

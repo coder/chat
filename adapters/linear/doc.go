@@ -60,6 +60,22 @@
 // to access it and StopRequested to detect a stop signal. The full original
 // webhook body is preserved in RawMessage.Envelope.
 //
+// # Message history (ADR 0009)
+//
+// The adapter implements the HistoryReader Optional Capability, reached only via
+// typed Adapter Access (chat.AdapterAs). ReadHistory is a thin live read-through
+// of the Linear GraphQL read API, keyed by the thread kind inside the opaque
+// Thread ID: agent-session threads read the session's Agent Activities (Linear's
+// frozen-in-time conversation record), and issue-comment threads read the root
+// comment and its reply children, with the root closing the oldest page. It is
+// storage-free: it performs no runtime storage, no dedupe, and no caching.
+// Durable transcripts and LLM context are Thread Application State, owned by the
+// application. Ordering is newest-first, the Before cursor is a Message.ID
+// paging toward older messages (resolved to a createdAt filter, one extra
+// lookup), and the page-size limit is clamped to Linear's maximum. Reads inherit
+// the adapter's rate-limit retry, Observation Hook, and per-tenant token
+// resolution.
+//
 // # Observation and rate limiting
 //
 // Outbound Linear rate-limit retry/backoff lives in the adapter (RetryPolicy,
