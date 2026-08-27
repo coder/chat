@@ -1,0 +1,103 @@
+# How To Install Into Multiple Workspaces (Multi-Tenant)
+
+By default an adapter is single-install: one Slack workspace or one Linear
+organization, with credentials passed directly in the adapter options.
+Multi-tenant mode is opt-in and lets one deployment serve many installs by
+resolving per-tenant credentials at webhook time (see
+[ADR 0006](../adr/0006-multi-tenant-install.md)).
+
+The boundary is deliberate:
+
+- **The runtime resolves credentials.** You provide an
+  `chat.InstallStore` and the adapter calls it with the platform tenant
+  (Slack team ID, Linear organization ID) extracted from each verified
+  webhook.
+- **You own the OAuth web flow.** The authorize redirect, callback route,
+  token exchange, and install database are ordinary application HTTP routes
+  and storage — the runtime does not mount them. App-user account linking and
+  login flows stay app-owned too.
+
+## Implement An InstallStore
+
+```go
+type InstallStore interface {
+	Lookup(ctx context.Context, adapter, tenant string) (Install, error)
+}
+```
+
+Return `chat.ErrInstallNotFound` for tenants you do not know: the adapter
+acknowledges the event and ignores it (an uninstalled workspace is not an
+error). Any other error is treated as a transport failure and surfaces as a
+5xx so the platform retries.
+
+```go
+type installStore struct{ db *sql.DB }
+
+func (s *installStore) Lookup(ctx context.Context, adapter, tenant string) (chat.Install, error) {
+	row, err := s.queryInstall(ctx, adapter, tenant)
+	if errors.Is(err, sql.ErrNoRows) {
+		return chat.Install{}, chat.ErrInstallNotFound
+	}
+	if err != nil {
+		return chat.Install{}, err
+	}
+	return chat.Install{
+		Tenant: tenant,
+		Credential: slack.SlackInstall{
+			BotToken:  row.BotToken,
+			BotUserID: row.BotUserID,
+		},
+	}, nil
+}
+```
+
+The `Credential` field is adapter-specific:
+
+- Slack: `slack.SlackInstall{BotToken, BotUserID}`
+- Linear: `linear.LinearInstall{WebhookSecret, ClientCredentials, AccessToken, BotUserID}`
+  (either client credentials for token exchange or a pre-exchanged access
+  token)
+
+## Construct The Adapter In Multi-Tenant Mode
+
+`InstallStore` is mutually exclusive with the single-install credential
+options:
+
+```go
+slackAdapter, err := slack.New(ctx, slack.Options{
+	SigningSecret: os.Getenv("SLACK_SIGNING_SECRET"), // shared across installs
+	InstallStore:  store,
+})
+```
+
+```go
+linearAdapter, err := linear.New(ctx, linear.Options{
+	InstallStore: store, // per-install webhook secrets and credentials
+})
+```
+
+For Slack, the signing secret is app-level and shared; signature verification
+happens before any store lookup. For Linear, the webhook secret is
+per-install and resolved through the store.
+
+## Wire Up Your OAuth Flow
+
+Sketch of the app-owned part for Slack:
+
+1. Mount `/slack/install` — redirect to Slack's OAuth authorize URL with your
+   client ID and scopes.
+2. Mount `/slack/oauth/callback` — exchange the code via `oauth.v2.access`,
+   then store the returned team ID, bot token, and bot user ID in your
+   install database.
+3. Your `InstallStore.Lookup` reads that row.
+
+Uninstalls: delete the row; subsequent events from that tenant resolve to
+`ErrInstallNotFound` and are acknowledged and ignored.
+
+## What Stays Tenant-Correct Automatically
+
+Thread IDs, actors, and dedupe keys all carry the platform tenant, so two
+workspaces never collide in runtime state. Thread handle reconstruction
+(`bot.Thread(ctx, threadID)`) resolves credentials for the stored tenant
+through the same install store — proactive posts work across installs without
+extra plumbing.
