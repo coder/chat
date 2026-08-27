@@ -27,6 +27,11 @@ type admissionGate struct {
 	// tenant's count reaches zero so an idle tenant retains no map entry.
 	tenants map[tenantKey]int
 	closed  bool
+	// drainDone is created by close and closed once every held slot has been
+	// released, so Runtime Shutdown can wait for admitted deliveries that are
+	// still in their prelude (not yet counted by the tail WaitGroup) as well
+	// as running tails.
+	drainDone chan struct{}
 }
 
 func newAdmissionGate(capacity, perTenant int) *admissionGate {
@@ -67,6 +72,9 @@ func (g *admissionGate) release(key tenantKey) {
 	defer g.mu.Unlock()
 	assert(g.inUse > 0, "admission release without a held slot")
 	g.inUse--
+	if g.closed && g.inUse == 0 && g.drainDone != nil {
+		close(g.drainDone)
+	}
 	if g.perTenant > 0 {
 		count := g.tenants[key]
 		assert(count > 0, "admission release without a held tenant slot")
@@ -79,11 +87,22 @@ func (g *admissionGate) release(key tenantKey) {
 }
 
 // close permanently rejects new admissions. Held slots are unaffected: their
-// releases still run so accounting stays exact while in-flight tails drain.
-func (g *admissionGate) close() {
+// releases still run so accounting stays exact while in-flight work drains.
+// The returned channel is closed once every held slot has been released —
+// including slots held by deliveries still in their synchronous prelude, which
+// the tail WaitGroup cannot see — so Runtime Shutdown does not tear down
+// adapters and state under an admitted delivery that won the shutdown race.
+func (g *admissionGate) close() <-chan struct{} {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.closed = true
+	if g.drainDone == nil {
+		g.drainDone = make(chan struct{})
+		if g.inUse == 0 {
+			close(g.drainDone)
+		}
+	}
+	return g.drainDone
 }
 
 // tenantEntries reports the number of live per-tenant counter entries, for

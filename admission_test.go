@@ -316,6 +316,116 @@ func TestAdmissionClosedOnShutdown(t *testing.T) {
 	}
 }
 
+// shutdownRaceState parks the first MarkEvent so a test can hold a delivery
+// mid-prelude (admission slot held, no tail spawned yet) across a Shutdown
+// call, and records whether state shutdown began before that prelude finished.
+type shutdownRaceState struct {
+	*fakeState
+	markStarted chan struct{}
+	markGate    chan struct{}
+	markOnce    sync.Once
+
+	raceMu                 sync.Mutex
+	markDone               bool
+	shutdownBeforeMarkDone bool
+}
+
+func newShutdownRaceState() *shutdownRaceState {
+	return &shutdownRaceState{
+		fakeState:   newFakeState(),
+		markStarted: make(chan struct{}),
+		markGate:    make(chan struct{}),
+	}
+}
+
+func (s *shutdownRaceState) MarkEvent(ctx context.Context, id string, ttl time.Duration) (bool, error) {
+	blocked := false
+	s.markOnce.Do(func() { blocked = true })
+	if blocked {
+		close(s.markStarted)
+		<-s.markGate
+	}
+	first, err := s.fakeState.MarkEvent(ctx, id, ttl)
+	s.raceMu.Lock()
+	s.markDone = true
+	s.raceMu.Unlock()
+	return first, err
+}
+
+func (s *shutdownRaceState) Shutdown(ctx context.Context) error {
+	s.raceMu.Lock()
+	if !s.markDone {
+		s.shutdownBeforeMarkDone = true
+	}
+	s.raceMu.Unlock()
+	return s.fakeState.Shutdown(ctx)
+}
+
+// TestShutdownDrainsPreludeHeldAdmissions pins the admission/shutdown race: a
+// delivery that passed the admission gate but is still in its synchronous
+// prelude holds no tail WaitGroup count, so the shutdown drain must wait on
+// admission slots — never tearing down adapters and state under an admitted
+// delivery, and never returning before that delivery's retention ends.
+func TestShutdownDrainsPreludeHeldAdmissions(t *testing.T) {
+	t.Parallel()
+
+	state := newShutdownRaceState()
+	adapter := newFakeAdapter("fake")
+	observer := &recordingObserver{}
+	bot := newAdmissionRuntime(t, state, adapter, observer, func(o *chat.RuntimeOptions) {
+		o.MaxDetached = 4
+	})
+	bot.OnNewMention(func(ctx context.Context, _ *chat.MessageEvent) error {
+		return ctx.Err()
+	})
+
+	dispatched := make(chan postEventResult, 1)
+	go func() {
+		dispatched <- postEventResultFor(bot, "fake", mentionEvent("event-1", "fake:v1:thread-1"))
+	}()
+	select {
+	case <-state.markStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("delivery did not reach dedupe marking")
+	}
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- bot.Shutdown(context.Background()) }()
+
+	// The admitted delivery is parked in its prelude: Shutdown must wait for
+	// it, not observe zero tails and proceed.
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown completed under a prelude-held admission (err = %v)", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(state.markGate)
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatalf("shutdown: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("shutdown did not complete after the prelude finished")
+	}
+	if state.shutdownBeforeMarkDone {
+		t.Fatal("state was shut down before the admitted delivery's prelude finished")
+	}
+	result := <-dispatched
+	if result.err != nil {
+		t.Fatalf("dispatch: %v", result.err)
+	}
+	if result.status != http.StatusOK {
+		t.Fatalf("admitted delivery status = %d", result.status)
+	}
+	// No silent loss: the admitted delivery reached an observable terminal
+	// outcome even though shutdown cancelled its detached work.
+	if len(observer.terminalOutcomes()) == 0 {
+		t.Fatal("admitted delivery left no terminal dispatch outcome")
+	}
+}
+
 // TestAdmissionOptionValidation pins constructor validation: MaxDetached must
 // be positive and MaxDetachedPerTenant non-negative under DispatchDeferred,
 // while DispatchSync ignores both (the DetachTimeout precedent).

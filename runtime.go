@@ -443,13 +443,24 @@ func (c *Chat) Shutdown(ctx context.Context) error {
 	// ErrAdmissionRejected (the platform's retry covers it) instead of being
 	// admitted into a runtime about to cancel its work. Then cancel detached
 	// tails and drain (bounded by ctx) before shutting down adapters and state.
+	//
+	// The drain waits on admission slots before the tail WaitGroup: a delivery
+	// that won the admission race is retained from admit until its tail
+	// goroutine returns, so waiting for every slot covers deliveries still in
+	// their synchronous prelude — which hold no WaitGroup count yet — and
+	// guarantees no tail is spawned (and no WaitGroup Add happens) after the
+	// slot drain completes.
+	var admissionDrained <-chan struct{}
 	if c.admission != nil {
-		c.admission.close()
+		admissionDrained = c.admission.close()
 	}
 	c.baseCancel()
 	var drainErr error
 	drained := make(chan struct{})
 	go func() {
+		if admissionDrained != nil {
+			<-admissionDrained
+		}
 		c.inflight.Wait()
 		close(drained)
 	}()
