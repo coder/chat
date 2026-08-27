@@ -2,7 +2,8 @@
 
 ## Status
 
-Proposed
+Proposed — spike implemented (see Spike Findings); pending live validation against a
+real Azure Bot resource and Teams tenant before Accepted.
 
 ## Context
 
@@ -120,3 +121,45 @@ Rejected for this slice. The Slack precedent is a **Single-Install Adapter**, an
 ### Implement now and verify behavior during implementation
 
 Rejected. The inbound ack/turn contract, endorsement enforcement, Markdown fidelity, `serviceUrl`/`conversation.id` persistence stability, proactive-install prerequisites, and the `msbotbuilder-go` auth implementation are documentation-only or unverified. Committing code before a spike confirms them risks building on wrong assumptions about the `msteams` channel. The decision is to design now and gate implementation on the spike.
+
+## Spike Findings
+
+A code spike of the adapter now exists under `adapters/msteams` (behind a draft PR for
+live validation). It implements the full designed shape and is exercised end to end
+against fake Bot Framework servers (OpenID metadata + JWKS, the `client_credentials`
+token endpoint, and the Connector), including a runtime integration test that drives an
+`@mention` through `chat.New` and asserts the reply is delivered as a separate Connector
+call. What the spike **resolved**:
+
+- **The shape holds unchanged.** The small **Adapter** interface, opaque
+  adapter-produced **Thread ID** (a versioned `conversationReference`), **Platform Escape
+  Hatch**, and direct-HTTP pattern absorbed Teams with no change to the runtime or core
+  types.
+- **Open Question 9 (SDK).** `msbotbuilder-go` is not adopted. Further: the inbound
+  JWT/JWKS validation is implemented with the **standard library only** (`crypto/rsa`
+  over a public key rebuilt from the JWK `n`/`e`), so the otherwise zero-dependency core
+  module gains no JWT library at all — `golang-jwt`/`jwx` proved unnecessary. This is a
+  deliberate deviation from the ADR's "use a maintained `golang-jwt`" note, chosen to
+  preserve the repo's zero-dependency, stdlib-direct stance (Slack/Linear precedent).
+- Every mandatory inbound check is enforced with no disable switch (Bearer, RS256-only,
+  `kid`, signature, `iss`, `aud == App ID`, exp/nbf with 5-minute skew, `serviceurl`
+  claim bound to `Activity.serviceUrl`), plus JWKS cache (≥24h) with refresh on `kid`
+  miss / rotation, and the strict (fail-closed) channel-endorsement check.
+
+What still requires **live validation** before this ADR is Accepted (the original Open
+Questions, now the test plan for the human spike) — each is marked `spike-required` inline
+in the code:
+
+1. Exact `msteams` inbound ack semantics and the real turn timeout.
+2. Confirm every reply is a separate Connector REST call (no body-reply shortcut for
+   `message` activities).
+3. The exact channel-endorsement rule (the spike fails closed when `msteams` is absent;
+   confirm this does not reject valid production traffic).
+4. Single-tenant Azure Bot resource specifics (token URL, `aud`/`iss`).
+5. Teams Markdown subset fidelity under `textFormat = markdown`.
+6. `serviceUrl` / `conversation.id` persistence stability for proactive posting.
+7. Proactive-posting prerequisites (inbound-first vs Graph install).
+8. RSC mention behavior (`OnNewMention` only on an explicit bot Mention entity).
+9. Canonical `Actor.ID` key (`from.aadObjectId` vs `from.id`; the spike prefers
+   `aadObjectId`, falling back to `from.id`).
+10. `Activity.id` stability as the dedupe key across Connector redelivery.
