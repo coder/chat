@@ -69,15 +69,18 @@ What you get on `ev.Command`:
 - `OnCommand` is single-slot like the message hooks: registering again
   atomically replaces the handler, and an unset handler is a no-op that still
   acknowledges the platform.
-- Commands are deduped by event identity and take the thread lock, so a
-  command racing a message on the same thread serializes.
+- Commands are deduped by event identity and take a thread lock on the
+  command's own thread scope. In a channel that scope is the synthetic
+  channel-rooted thread, which is distinct from every message thread's scope —
+  so do not rely on a channel command serializing with message handlers.
+  Direct-message commands share the DM conversation's thread scope.
 
 ## Long-Running Commands
 
 Under the default `DispatchSync` mode your handler runs before the platform
 acknowledgement, so slow command work risks Slack's 3-second timeout. Enable
-[deferred dispatch](deferred-dispatch.md) so the ack happens before your
-handler runs, and consider `chat.ConcurrencyQueue` so mid-work commands and
-clicks queue instead of dropping. Slack keeps a command's `response_url`
+[deferred dispatch](deferred-dispatch.md) so the acknowledgement no longer
+waits on your handler, and consider `chat.ConcurrencyQueue` so mid-work
+commands and clicks queue instead of dropping. Slack keeps a command's `response_url`
 valid for 30 minutes, so a deferred handler can finish its work and respond
 through `RespondURL` afterwards.

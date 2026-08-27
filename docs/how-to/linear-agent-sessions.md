@@ -55,7 +55,9 @@ detached context.
 
 ## Use The Full Activity Surface
 
-Everything beyond a plain response goes through typed adapter access:
+Everything beyond a plain response goes through typed adapter access. Each
+call can fail (validation, auth, rate limiting) — check every error before
+issuing the next activity:
 
 ```go
 la, ok := chat.AdapterAs[*linear.Adapter](bot, "linear")
@@ -64,33 +66,43 @@ if !ok {
 }
 
 // Ephemeral progress ("thinking...") activity.
-_, err = la.PostThought(ctx, ev.Thread.ID(), "Reading the issue history.")
+if _, err := la.PostThought(ctx, ev.Thread.ID(), "Reading the issue history."); err != nil {
+	return err
+}
 
 // A tool-call style action with a result.
-_, err = la.PostAction(ctx, ev.Thread.ID(), linear.ActionInput{
+if _, err := la.PostAction(ctx, ev.Thread.ID(), linear.ActionInput{
 	Action:    "ran",
 	Parameter: "go test ./...",
 	Result:    "ok",
-})
+}); err != nil {
+	return err
+}
 
 // Ask the user a question (optionally with a select/auth signal).
-_, err = la.PostElicitation(ctx, ev.Thread.ID(), linear.ElicitationInput{
+if _, err := la.PostElicitation(ctx, ev.Thread.ID(), linear.ElicitationInput{
 	Body: "Which environment should I deploy to?",
-})
+}); err != nil {
+	return err
+}
 
 // Terminal failure state.
-_, err = la.PostError(ctx, ev.Thread.ID(), linear.ErrorInput{
+if _, err := la.PostError(ctx, ev.Thread.ID(), linear.ErrorInput{
 	Body: "The build failed; see the attached log.",
-})
+}); err != nil {
+	return err
+}
 
 // Maintain the session's plan and external links.
-err = la.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
+if err := la.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
 	Plan: []linear.PlanStep{
 		{Title: "Reproduce the bug", Status: "pending"},
 		{Title: "Fix and test", Status: "pending"},
 	},
 	ReplacePlan: true,
-})
+}); err != nil {
+	return err
+}
 ```
 
 Users can press **Stop** on a session. Check for it through the raw message

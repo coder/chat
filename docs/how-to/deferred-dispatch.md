@@ -12,9 +12,11 @@ retry or time out.
 1. **Prelude, before ack**: signature verification, normalization, dedupe
    marking, and thread lock acquisition run synchronously on the request
    context.
-2. **Detached tail, after ack**: your handler runs on a runtime-managed
-   detached work context while the platform already has its 2xx. The runtime
-   keeps extending the thread lock lease in the background until the handler
+2. **Detached tail, launched at ack time**: your handler runs on a
+   runtime-managed detached work context, concurrently with the webhook
+   response — the acknowledgement no longer waits on your handler (though the
+   tail may begin before the 2xx is actually written). The runtime keeps
+   extending the thread lock lease in the background until the handler
    returns.
 
 ## Enable It
@@ -54,7 +56,7 @@ work context, not the HTTP request context:
 
 ```go
 bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
-	// The platform already has its ack. Take your time (within
+	// The acknowledgement is not waiting on you. Take your time (within
 	// DetachTimeout): call the LLM, run tools, then post.
 	answer, err := generate(ctx, ev.Message.Text)
 	if err != nil {

@@ -81,13 +81,13 @@ mention as above, or resolve the name yourself via the Slack API.
 Mind the acknowledgement timing: under the default `DispatchSync` mode the
 adapter writes the empty 2xx only *after* your handler returns, so a slow
 handler can miss Slack's 3-second acknowledgement budget. Enable
-[deferred dispatch](deferred-dispatch.md) (with `chat.ConcurrencyQueue`) to
-guarantee the ack goes out before your handler runs.
+[deferred dispatch](deferred-dispatch.md) (with `chat.ConcurrencyQueue`) so
+the acknowledgement is not blocked on your handler — the handler moves to a
+detached tail launched at ack time.
 
 ## Open A Modal
 
-The Slack adapter preserves `trigger_id` on the raw payload and exposes modal
-opening via `views.open`:
+The Slack adapter exposes modal opening via `views.open`:
 
 ```go
 err := slackAdapter.OpenModal(ctx, triggerID, modalView)
@@ -100,6 +100,13 @@ variant with the event's tenant instead:
 ```go
 err := slackAdapter.OpenModalForTenant(ctx, ev.Event.Tenant, triggerID, modalView)
 ```
+
+**Known gap:** Slack's `trigger_id` is preserved on the `Raw` escape hatch,
+but there is currently no public accessor to extract it — the preserved
+payload types are unexported — so this flow is not yet reachable without
+re-parsing the original webhook JSON yourself. Tracked in
+[#12](https://github.com/coder/chat/issues/12). (`RespondURL` is unaffected:
+it accepts the `Raw` value directly.)
 
 Slack invalidates `trigger_id` after 3 seconds, so open modals promptly.
 Modal *submissions* are not part of this slice: the synchronous
