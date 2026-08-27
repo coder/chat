@@ -72,7 +72,7 @@ func startProactiveSession(ctx context.Context, la linearAgentAccess, issueID, d
 // chooseRepository asks Linear to rank candidate repositories the agent already
 // has access to (issueRepositorySuggestions), then either proceeds confidently
 // or pairs the low-confidence shortlist with a select elicitation.
-func chooseRepository(ctx context.Context, la linearAgentAccess, ev *chat.MessageEvent, candidates []linear.CandidateRepository) error {
+func chooseRepository(ctx context.Context, la linearAgentAccess, ev *chat.MessageEvent, pending *pendingSelections, candidates []linear.CandidateRepository) error {
 	suggestions, err := la.SuggestRepositories(ctx, ev.Thread.ID(), candidates)
 	if err != nil {
 		return err
@@ -81,7 +81,7 @@ func chooseRepository(ctx context.Context, la linearAgentAccess, ev *chat.Messag
 		_, err := la.PostThought(ctx, ev.Thread.ID(), "Working in "+best.RepositoryFullName+".")
 		return err
 	}
-	return offerRepositoryChoice(ctx, la, ev.Thread.ID(), suggestions)
+	return offerRepositoryChoice(ctx, la, ev.Thread.ID(), pending, suggestions)
 }
 
 // bestSuggestion picks the highest-confidence suggestion, or nil when Linear
@@ -98,8 +98,9 @@ func bestSuggestion(suggestions []linear.RepositorySuggestion) *linear.Repositor
 
 // offerRepositoryChoice turns a suggestion shortlist into a select elicitation.
 // The elicitation is a completion signal: the session waits for the user, and
-// their choice comes back as a follow-up prompt (see handleSelection).
-func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID chat.ThreadID, suggestions []linear.RepositorySuggestion) error {
+// their choice comes back as a follow-up prompt (see handleSelection), so the
+// offered values are recorded as this thread's pending selection.
+func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID chat.ThreadID, pending *pendingSelections, suggestions []linear.RepositorySuggestion) error {
 	if len(suggestions) == 0 {
 		_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
 			Body: "I couldn't match a repository — which one should I work in?",
@@ -107,16 +108,24 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 		return err
 	}
 	options := make([]linear.SelectOption, 0, len(suggestions))
+	values := make([]string, 0, len(suggestions))
 	for _, s := range suggestions {
 		option := repositoryOptionValue(s)
 		options = append(options, linear.SelectOption{Value: option, Label: option})
+		values = append(values, option)
 	}
 	_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
 		Body:           "Which repository should I work in?",
 		Signal:         "select",
 		SignalMetadata: linear.SelectSignalMetadata{Options: options},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// Record what was offered so the next follow-up on this thread can be
+	// interpreted as the answer (see handleSelection).
+	pending.set(threadID, values)
+	return nil
 }
 
 // repositoryOptionValue qualifies the repository with its Git host so two

@@ -58,7 +58,7 @@ func TestChooseRepositoryProceedsOnHighConfidence(t *testing.T) {
 	}}
 	ev := newTestEvent(t, adapter, &chat.Message{Text: "fix the bug"})
 
-	if err := chooseRepository(context.Background(), adapter, ev, []linear.CandidateRepository{{Hostname: "github.com", RepositoryFullName: "acme/backend"}}); err != nil {
+	if err := chooseRepository(context.Background(), adapter, ev, newPendingSelections(), []linear.CandidateRepository{{Hostname: "github.com", RepositoryFullName: "acme/backend"}}); err != nil {
 		t.Fatalf("choose repository: %v", err)
 	}
 	if len(adapter.thoughts) != 1 || adapter.thoughts[0] != "Working in acme/backend." {
@@ -75,8 +75,9 @@ func TestChooseRepositoryElicitsSelectOnLowConfidence(t *testing.T) {
 		{Hostname: "github.com", RepositoryFullName: "acme/frontend", Confidence: 0.35},
 	}}
 	ev := newTestEvent(t, adapter, &chat.Message{Text: "fix the bug"})
+	pending := newPendingSelections()
 
-	if err := chooseRepository(context.Background(), adapter, ev, []linear.CandidateRepository{{Hostname: "github.com", RepositoryFullName: "acme/backend"}}); err != nil {
+	if err := chooseRepository(context.Background(), adapter, ev, pending, []linear.CandidateRepository{{Hostname: "github.com", RepositoryFullName: "acme/backend"}}); err != nil {
 		t.Fatalf("choose repository: %v", err)
 	}
 	if len(adapter.elicitations) != 1 {
@@ -93,12 +94,20 @@ func TestChooseRepositoryElicitsSelectOnLowConfidence(t *testing.T) {
 	if metadata.Options[0].Value != "github.com/acme/backend" || metadata.Options[1].Value != "github.com/acme/frontend" {
 		t.Fatalf("options = %#v", metadata.Options)
 	}
+	// The offered values become this thread's pending selection so the next
+	// follow-up is interpreted as the answer.
+	optionValues, ok := pending.take(ev.Thread.ID())
+	if !ok || len(optionValues) != 2 || optionValues[0] != "github.com/acme/backend" {
+		t.Fatalf("pending = %#v, %v", optionValues, ok)
+	}
 }
 
 func TestOfferRepositoryChoiceKeepsSameNameReposOnDifferentHostsDistinct(t *testing.T) {
 	adapter := &testLinearAdapter{}
+	pending := newPendingSelections()
+	threadID := chat.ThreadID("linear:v1:thread-1")
 
-	err := offerRepositoryChoice(context.Background(), adapter, chat.ThreadID("linear:v1:thread-1"), []linear.RepositorySuggestion{
+	err := offerRepositoryChoice(context.Background(), adapter, threadID, pending, []linear.RepositorySuggestion{
 		{Hostname: "github.com", RepositoryFullName: "acme/backend", Confidence: 0.4},
 		{Hostname: "gitlab.example.com", RepositoryFullName: "acme/backend", Confidence: 0.4},
 		{RepositoryFullName: "acme/orphan", Confidence: 0.1}, // hostname unresolved
@@ -114,6 +123,29 @@ func TestOfferRepositoryChoiceKeepsSameNameReposOnDifferentHostsDistinct(t *test
 		metadata.Options[1].Value != "gitlab.example.com/acme/backend" ||
 		metadata.Options[2].Value != "acme/orphan" {
 		t.Fatalf("options = %#v", metadata.Options)
+	}
+	optionValues, ok := pending.take(threadID)
+	if !ok || len(optionValues) != 3 || optionValues[1] != "gitlab.example.com/acme/backend" {
+		t.Fatalf("pending = %#v, %v", optionValues, ok)
+	}
+}
+
+func TestFollowUpHandlerClearsPendingSelectionOnStop(t *testing.T) {
+	adapter := &testLinearAdapter{}
+	pending := newPendingSelections()
+	ev := newTestEvent(t, adapter, &chat.Message{Text: "stop", Raw: &linear.RawMessage{Signal: "stop"}})
+	pending.set(ev.Thread.ID(), []string{"staging", "prod"})
+
+	if err := newFollowUpHandler(adapter, pending)(context.Background(), ev); err != nil {
+		t.Fatalf("follow-up handler: %v", err)
+	}
+	if len(adapter.posted) != 1 {
+		t.Fatalf("posted = %#v", adapter.posted)
+	}
+	// The stopped session will not answer its elicitation: a later "staging"
+	// message must not be misread as a choice.
+	if _, ok := pending.take(ev.Thread.ID()); ok {
+		t.Fatal("pending selection survived the stop")
 	}
 }
 
@@ -156,12 +188,17 @@ func TestMentionHandlerRegistersPendingSelectionOnDeployElicitation(t *testing.T
 func TestChooseRepositoryAsksFreeFormWithoutSuggestions(t *testing.T) {
 	adapter := &testLinearAdapter{}
 	ev := newTestEvent(t, adapter, &chat.Message{Text: "fix the bug"})
+	pending := newPendingSelections()
 
-	if err := chooseRepository(context.Background(), adapter, ev, []linear.CandidateRepository{{Hostname: "github.com", RepositoryFullName: "acme/backend"}}); err != nil {
+	if err := chooseRepository(context.Background(), adapter, ev, pending, []linear.CandidateRepository{{Hostname: "github.com", RepositoryFullName: "acme/backend"}}); err != nil {
 		t.Fatalf("choose repository: %v", err)
 	}
 	if len(adapter.elicitations) != 1 || adapter.elicitations[0].Signal != "" {
 		t.Fatalf("elicitations = %#v", adapter.elicitations)
+	}
+	// A free-form question offers no option values, so nothing is pending.
+	if _, ok := pending.take(ev.Thread.ID()); ok {
+		t.Fatal("free-form elicitation registered a pending selection")
 	}
 }
 

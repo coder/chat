@@ -59,28 +59,7 @@ func main() {
 
 	pending := newPendingSelections()
 	bot.OnNewMention(newMentionHandler(linearAccess, pending))
-
-	bot.OnSubscribedMessage(func(ctx context.Context, ev *chat.MessageEvent) error {
-		// A "comment"-kind thread is an ordinary issue comment (ADR 0013); an
-		// "agent_session" thread is an agent session (ADR 0008). Thread.Post routes
-		// by kind automatically.
-		if stopped, err := confirmStop(ctx, ev); stopped {
-			return err
-		}
-		// The answer to the mention handler's deploy elicitation arrives here as a
-		// regular follow-up prompt — interpret it as a choice only while one is
-		// pending on this thread (see capabilities.go). take is take-once: a
-		// free-text follow-up also consumes the pending state, matching Linear
-		// dismissing the elicitation UI.
-		if optionValues, ok := pending.take(ev.Thread.ID()); ok {
-			if handled, err := handleSelection(ctx, ev, optionValues); handled {
-				return err
-			}
-		}
-		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Reading your follow-up...")
-		_, err := ev.Thread.Post(ctx, chat.Text("Follow-up received: "+ev.Message.Text))
-		return err
-	})
+	bot.OnSubscribedMessage(newFollowUpHandler(linearAccess, pending))
 
 	linearWebhook, err := bot.Webhook("linear")
 	if err != nil {
@@ -107,6 +86,36 @@ type linearAgentAccess interface {
 	UpdateSession(context.Context, chat.ThreadID, linear.AgentSessionUpdateInput) error
 	CreateSessionOnIssue(context.Context, linear.CreateSessionOnIssueInput) (*linear.CreatedAgentSession, error)
 	SuggestRepositories(context.Context, chat.ThreadID, []linear.CandidateRepository) ([]linear.RepositorySuggestion, error)
+}
+
+// newFollowUpHandler routes follow-up prompts on subscribed threads: a stop is
+// confirmed first (also abandoning any pending selection), then a pending
+// select answer is consumed, and everything else is handled as a normal
+// follow-up.
+func newFollowUpHandler(linearAccess linearAgentAccess, pending *pendingSelections) chat.MessageHandler {
+	return func(ctx context.Context, ev *chat.MessageEvent) error {
+		// A "comment"-kind thread is an ordinary issue comment (ADR 0013); an
+		// "agent_session" thread is an agent session (ADR 0008). Thread.Post routes
+		// by kind automatically.
+		if stopped, err := confirmStop(ctx, ev); stopped {
+			// A stopped session will not answer its elicitation: drop any pending
+			// selection so a later message is not misread as a choice.
+			_, _ = pending.take(ev.Thread.ID())
+			return err
+		}
+		// A follow-up may answer the latest select elicitation: interpret it as a
+		// choice only while one is pending on this thread. take is take-once: a
+		// free-text follow-up also consumes the pending state, matching Linear
+		// dismissing the elicitation UI.
+		if optionValues, ok := pending.take(ev.Thread.ID()); ok {
+			if handled, err := handleSelection(ctx, ev, optionValues); handled {
+				return err
+			}
+		}
+		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Reading your follow-up...")
+		_, err := ev.Thread.Post(ctx, chat.Text("Follow-up received: "+ev.Message.Text))
+		return err
+	}
 }
 
 func newMentionHandler(linearAccess linearAgentAccess, pending *pendingSelections) chat.MessageHandler {

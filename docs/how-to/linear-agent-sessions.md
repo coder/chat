@@ -210,7 +210,7 @@ elicitation:
 
 <!-- source: examples/linear-agent-hello-world/capabilities.go -->
 ```go
-func chooseRepository(ctx context.Context, la linearAgentAccess, ev *chat.MessageEvent, candidates []linear.CandidateRepository) error {
+func chooseRepository(ctx context.Context, la linearAgentAccess, ev *chat.MessageEvent, pending *pendingSelections, candidates []linear.CandidateRepository) error {
 	suggestions, err := la.SuggestRepositories(ctx, ev.Thread.ID(), candidates)
 	if err != nil {
 		return err
@@ -219,9 +219,12 @@ func chooseRepository(ctx context.Context, la linearAgentAccess, ev *chat.Messag
 		_, err := la.PostThought(ctx, ev.Thread.ID(), "Working in "+best.RepositoryFullName+".")
 		return err
 	}
-	return offerRepositoryChoice(ctx, la, ev.Thread.ID(), suggestions)
+	return offerRepositoryChoice(ctx, la, ev.Thread.ID(), pending, suggestions)
 }
 ```
+
+(`pendingSelections` is the example's small take-once per-thread registry of
+offered option values — see the select section below.)
 
 ### Offer Choices With A Select Elicitation
 
@@ -230,7 +233,7 @@ completion signal: the session waits for the user after you post it.
 
 <!-- source: examples/linear-agent-hello-world/capabilities.go -->
 ```go
-func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID chat.ThreadID, suggestions []linear.RepositorySuggestion) error {
+func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID chat.ThreadID, pending *pendingSelections, suggestions []linear.RepositorySuggestion) error {
 	if len(suggestions) == 0 {
 		_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
 			Body: "I couldn't match a repository — which one should I work in?",
@@ -238,16 +241,24 @@ func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID c
 		return err
 	}
 	options := make([]linear.SelectOption, 0, len(suggestions))
+	values := make([]string, 0, len(suggestions))
 	for _, s := range suggestions {
 		option := repositoryOptionValue(s)
 		options = append(options, linear.SelectOption{Value: option, Label: option})
+		values = append(values, option)
 	}
 	_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
 		Body:           "Which repository should I work in?",
 		Signal:         "select",
 		SignalMetadata: linear.SelectSignalMetadata{Options: options},
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	// Record what was offered so the next follow-up on this thread can be
+	// interpreted as the answer (see handleSelection).
+	pending.set(threadID, values)
+	return nil
 }
 ```
 
@@ -294,6 +305,10 @@ a free-text reply):
 			}
 		}
 ```
+
+A confirmed stop also abandons any pending selection (`newFollowUpHandler` in
+the example): a stopped session will not answer its elicitation, so a later
+message must not be misread as a choice.
 
 ### Ask The User To Link An Account (Auth Elicitation)
 
