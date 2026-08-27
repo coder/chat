@@ -229,6 +229,59 @@ func TestBurstDispatchBudgetStartsWhenWindowCloses(t *testing.T) {
 	}
 }
 
+func TestBurstEveryMemberGetsItsOwnExecutionBudget(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	// Five 60ms handlers = 300ms total, above the 200ms DetachTimeout: with a
+	// shared batch deadline the tail members would be skipped, but each
+	// accepted member gets its own budget.
+	bot := newBurstRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
+		o.DebounceInterval = 50 * time.Millisecond
+		o.DetachTimeout = 200 * time.Millisecond
+	})
+
+	var mu sync.Mutex
+	var handled []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		time.Sleep(60 * time.Millisecond)
+		mu.Lock()
+		handled = append(handled, ev.Event.ID)
+		mu.Unlock()
+		return nil
+	})
+
+	ids := []string{"a", "b", "c", "d", "e"}
+	for _, id := range ids {
+		if status := postEvent(t, bot, "fake", mentionEvent(id, "fake:v1:thread-1")); status != http.StatusOK {
+			t.Fatalf("%s status = %d", id, status)
+		}
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(handled)
+		mu.Unlock()
+		if n >= len(ids) {
+			break
+		}
+		select {
+		case <-deadline:
+			mu.Lock()
+			got := append([]string(nil), handled...)
+			mu.Unlock()
+			t.Fatalf("accepted batch members were skipped on a shared deadline, handled = %v", got)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if strings.Contains(logs.String(), "chat burst batch abandoned") {
+		t.Fatalf("batch abandoned despite per-member budgets; logs:\n%s", logs.String())
+	}
+}
+
 func TestBurstAbandonedWaiterSurfacesObservation(t *testing.T) {
 	t.Parallel()
 

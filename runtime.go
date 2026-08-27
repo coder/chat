@@ -36,14 +36,14 @@ const (
 	// ConcurrencyBurst collects routed events for a scope while a
 	// DebounceInterval window is open, then dispatches the whole batch — in the
 	// order the events joined the window — under a single Thread Lock hold. No
-	// event is skipped, and the batch dispatch runs under a fresh DetachTimeout
-	// starting when the window closes, so collection time never consumes the
-	// batch's execution budget. Join order follows each event's admission
-	// through the dispatch prelude; ordering of concurrent webhook deliveries
-	// is platform-dependent and not re-established by the runtime. Windows are
-	// per runtime instance (like debounce coalescing), serialized across
-	// instances by the Thread Lock. Requires deferred dispatch, like
-	// ConcurrencyDebounce.
+	// event is skipped: every batch member runs under its own DetachTimeout
+	// execution budget (collection time and earlier members never consume it),
+	// with the batch as a whole bounded by Shutdown and by Lock Lease loss.
+	// Join order follows each event's admission through the dispatch prelude;
+	// ordering of concurrent webhook deliveries is platform-dependent and not
+	// re-established by the runtime. Windows are per runtime instance (like
+	// debounce coalescing), serialized across instances by the Thread Lock.
+	// Requires deferred dispatch, like ConcurrencyDebounce.
 	ConcurrencyBurst
 	// ConcurrencyConcurrent is the explicit opt-out of per-scope serialization:
 	// every routed event dispatches immediately in its own execution, bounded by
@@ -188,10 +188,10 @@ type Chat struct {
 	burstMu     sync.Mutex
 	burstScopes map[string]*burstScope
 
-	// inflightMu guards inflightCancels, the per-scope cancel functions for
-	// running lock-holding handlers, used by preemption.
+	// inflightMu guards inflightCancels, the per-scope local lease ownership
+	// reservations (acquiring or holding), used by preemption.
 	inflightMu      sync.Mutex
-	inflightCancels map[string]*inflightCancel
+	inflightCancels map[string]map[*inflightCancel]struct{}
 
 	// concurrencySlots bounds simultaneous handler executions under
 	// ConcurrencyConcurrent; nil under every other strategy.
@@ -252,7 +252,7 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		baseCancel:       baseCancel,
 		pending:          map[string]*pendingWaiter{},
 		burstScopes:      map[string]*burstScope{},
-		inflightCancels:  map[string]*inflightCancel{},
+		inflightCancels:  map[string]map[*inflightCancel]struct{}{},
 	}
 	if cfg.options.Concurrency == ConcurrencyConcurrent {
 		chat.concurrencySlots = make(chan struct{}, cfg.options.MaxConcurrent)
@@ -644,20 +644,31 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 	conflicted := false
 	switch c.options.Concurrency {
 	case ConcurrencyDrop, ConcurrencyQueue:
+		if c.options.OnLockConflict != nil {
+			// Local ownership is reserved BEFORE the acquire so a lease can never
+			// exist locally without a visible reservation: a preemptor arriving at
+			// any point after acquisition finds the local owner and waits instead
+			// of force-releasing the fresh lease.
+			reservation = c.reserveInflight(scope)
+		}
 		acquiredLease, acquired, err := c.state.AcquireLock(ctx, scope, c.options.ThreadLockTTL)
 		if err != nil {
+			if reservation != nil {
+				c.retireInflight(scope, reservation)
+			}
 			err := finish(fmt.Errorf("chat: acquire thread lock: %w", err))
 			c.safeEnd(span, OutcomeError)
 			return preludeWork{}, true, err
 		}
 		lease = acquiredLease
-		if acquired && c.options.OnLockConflict != nil {
-			// Local ownership is reserved the moment the lease is acquired so a
-			// preemptor arriving during routing/dedupe can never mistake this
-			// fresh local lease for a remote one and force-release it.
-			reservation = c.reserveInflight(scope)
+		if acquired && reservation != nil {
+			reservation.markHeld()
 		}
 		if !acquired {
+			if reservation != nil {
+				c.retireInflight(scope, reservation)
+				reservation = nil
+			}
 			if c.options.Concurrency == ConcurrencyDrop && c.options.OnLockConflict == nil {
 				accepted, err := acceptEvent()
 				if err != nil {
@@ -951,14 +962,15 @@ func waitOutcome(outcome acquireOutcome) DispatchOutcome {
 // released on exit. The reservation is retired only after the lease release so
 // a waiting preemptor observes a scope whose lock is genuinely free.
 func (c *Chat) runLockedTail(tailCtx context.Context, work preludeWork) {
-	runCtx := tailCtx
-	preemptible := c.options.OnLockConflict != nil
-	var onLeaseLost context.CancelCauseFunc
-	if preemptible {
+	// Every deferred lock holder is cancellable on lease loss (with cause
+	// ErrPreempted), regardless of the local hook configuration: a lease force
+	// released by another runtime instance — or expired — means mutual
+	// exclusion is already gone, so the handler must stop rather than run
+	// alongside the lease's next holder.
+	runCtx, cancel := context.WithCancelCause(tailCtx)
+	defer cancel(nil)
+	if c.options.OnLockConflict != nil {
 		assert(work.inflight != nil, "preemptible lock-holding work must carry an ownership reservation")
-		var cancel context.CancelCauseFunc
-		runCtx, cancel = context.WithCancelCause(tailCtx)
-		defer cancel(nil)
 		if !work.inflight.arm(cancel) {
 			// Preempted between acquisition and start: the handler never runs.
 			c.logger.Info("chat handler preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "route", work.route, "started", false)
@@ -967,17 +979,16 @@ func (c *Chat) runLockedTail(tailCtx context.Context, work preludeWork) {
 			c.retireInflight(work.scope, work.inflight)
 			return
 		}
-		onLeaseLost = cancel
 	}
 
-	stopRefresh, leaseLost := c.startLockRefresh(tailCtx, work.lease, work.event.ThreadID, onLeaseLost)
+	stopRefresh, leaseLost := c.startLockRefresh(tailCtx, work.lease, work.event.ThreadID, cancel)
 	err := work.run(runCtx)
 	stopRefresh()
 
 	// The preemption outcome follows the cancellation cause, not the handler's
 	// return convention: a handler that observes ctx.Done, shuts down cleanly,
-	// and returns nil was still preempted.
-	preempted := preemptible && errors.Is(context.Cause(runCtx), ErrPreempted)
+	// and returns nil was still preempted (or lost its lease).
+	preempted := errors.Is(context.Cause(runCtx), ErrPreempted)
 	if preempted && tailCtx.Err() == nil {
 		c.logger.Info("chat handler preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "route", work.route, "started", true)
 		c.safeEnd(work.span, OutcomePreempted, RouteAttr(work.route))
@@ -1058,29 +1069,44 @@ func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
 	// A waiter superseded between routing and this tail must not destroy the
 	// in-flight handler on behalf of an event that will never dispatch; the
 	// newest waiter performs its own preemption if its hook elected one.
-	if !c.isPending(work.scope, work.event) {
-		return
-	}
-	if victimDone := c.cancelInflight(work.scope); victimDone != nil {
-		select {
-		case <-victimDone:
-		case <-ctx.Done():
-			// The abandoned preemptor exits through the lock wait; the victim
-			// keeps its lease.
+	for {
+		// A waiter superseded (or abandoned) at any point yields silently: the
+		// newest waiter owns the preemption.
+		if ctx.Err() != nil || !c.isPending(work.scope, work.event) {
 			return
 		}
-		// A preemptor displaced while parked on the victim yields silently: the
-		// newest waiter owns the preemption (and this waiter exits superseded
-		// through the lock wait).
-		if !c.isPending(work.scope, work.event) {
+		victims := c.cancelInflight(work.scope)
+		if len(victims) == 0 {
+			break
+		}
+		anyHeld := false
+		for _, victim := range victims {
+			select {
+			case <-victim.done:
+			case <-ctx.Done():
+				// The abandoned preemptor exits through the lock wait; the victim
+				// keeps its lease.
+				return
+			}
+			if victim.wasHeld() {
+				anyHeld = true
+			}
+		}
+		if anyHeld {
+			// A local owner was preempted and has released; this delivery
+			// acquires through the normal lock wait — never by force.
+			if !c.isPending(work.scope, work.event) {
+				return
+			}
+			c.logger.Info("chat lock preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "forced", false)
+			c.safeEvent(ctx, ObsLockPreempted, AdapterAttr(work.event.Adapter))
 			return
 		}
-		c.logger.Info("chat lock preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "forced", false)
-		c.safeEvent(ctx, ObsLockPreempted, AdapterAttr(work.event.Adapter))
-		return
+		// Only non-holding acquirers came and went; look again for a holder
+		// before concluding the conflicting lease is remote.
 	}
-	// No local victim: re-validate ownership, then force-invalidate the remote
-	// or orphaned lease.
+	// No local reservation: re-validate ownership, then force-invalidate the
+	// remote or orphaned lease.
 	if !c.isPending(work.scope, work.event) {
 		return
 	}
@@ -1098,19 +1124,36 @@ func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
 	c.safeEvent(ctx, ObsLockPreempted, AdapterAttr(work.event.Adapter))
 }
 
-// inflightCancel is one scope's local lease ownership reservation, registered
-// the moment a Lock Lease is acquired (preemptible runtimes only) so a
-// preemptor can never mistake a freshly acquired local lease for a remote one.
-// Entries are compared by identity so an old holder can never retire a newer
-// holder's reservation. done closes once the holder has finished and released
-// its lease, so a preemptor can wait for local completion.
+// inflightCancel is one local lease ownership reservation for a scope,
+// registered BEFORE AcquireLock is attempted (preemptible runtimes only) so a
+// lease can never exist locally without a visible reservation: a preemptor can
+// never mistake a freshly acquired (or still-acquiring) local lease for a
+// remote one. held records whether the reservation's acquisition succeeded.
+// done closes once the reservation is retired (its lease, if any, released),
+// so a preemptor can wait for local completion.
 type inflightCancel struct {
 	mu sync.Mutex
 	// cancel is nil until the handler starts running (arm); a reservation
 	// preempted before arming prevents the handler from starting at all.
 	cancel    context.CancelCauseFunc
 	preempted bool
+	held      bool
 	done      chan struct{}
+}
+
+// markHeld records that the reservation's AcquireLock succeeded.
+func (e *inflightCancel) markHeld() {
+	e.mu.Lock()
+	e.held = true
+	e.mu.Unlock()
+}
+
+// wasHeld reports whether the reservation ever held the lease; stable once
+// done has closed.
+func (e *inflightCancel) wasHeld() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.held
 }
 
 // preempt marks the reservation preempted, cancelling the running handler when
@@ -1138,41 +1181,53 @@ func (e *inflightCancel) arm(cancel context.CancelCauseFunc) bool {
 	return true
 }
 
-// reserveInflight registers local ownership of the scope's just-acquired Lock
-// Lease. It must be called immediately after every successful acquisition on a
-// preemptible runtime, and retired (retireInflight) after the lease is
-// released.
+// reserveInflight registers a local ownership reservation for the scope. It
+// must be called BEFORE every AcquireLock attempt on a preemptible runtime
+// (so acquisition and registration cannot be reordered by scheduling), marked
+// held on success, and retired (retireInflight) once the reservation ends —
+// after the lease release when one was held.
 func (c *Chat) reserveInflight(scope string) *inflightCancel {
 	entry := &inflightCancel{done: make(chan struct{})}
 	c.inflightMu.Lock()
-	c.inflightCancels[scope] = entry
+	set := c.inflightCancels[scope]
+	if set == nil {
+		set = map[*inflightCancel]struct{}{}
+		c.inflightCancels[scope] = set
+	}
+	set[entry] = struct{}{}
 	c.inflightMu.Unlock()
 	return entry
 }
 
-// retireInflight removes the reservation (identity-safe) and signals waiting
-// preemptors. Call it only after the reserved lease has been released.
+// retireInflight removes the reservation and signals waiting preemptors. Call
+// it only after the reserved lease (if any) has been released.
 func (c *Chat) retireInflight(scope string, entry *inflightCancel) {
 	c.inflightMu.Lock()
-	if c.inflightCancels[scope] == entry {
-		delete(c.inflightCancels, scope)
+	if set := c.inflightCancels[scope]; set != nil {
+		delete(set, entry)
+		if len(set) == 0 {
+			delete(c.inflightCancels, scope)
+		}
 	}
 	c.inflightMu.Unlock()
 	close(entry.done)
 }
 
-// cancelInflight preempts the scope's local lease reservation, if any,
-// returning a channel that closes when the holder has finished and released
-// (nil when no local holder is registered).
-func (c *Chat) cancelInflight(scope string) <-chan struct{} {
+// cancelInflight preempts every current local reservation for the scope
+// (holders and in-flight acquirers alike), returning the preempted entries so
+// a preemptor can wait for their completion.
+func (c *Chat) cancelInflight(scope string) []*inflightCancel {
 	c.inflightMu.Lock()
-	entry := c.inflightCancels[scope]
-	c.inflightMu.Unlock()
-	if entry == nil {
-		return nil
+	set := c.inflightCancels[scope]
+	entries := make([]*inflightCancel, 0, len(set))
+	for entry := range set {
+		entries = append(entries, entry)
 	}
-	entry.preempt()
-	return entry.done
+	c.inflightMu.Unlock()
+	for _, entry := range entries {
+		entry.preempt()
+	}
+	return entries
 }
 
 // acquireConcurrencySlot blocks until a MaxConcurrent slot frees, bounded by
@@ -1218,10 +1273,10 @@ func (c *Chat) lockScopeKey(event *Event, ref ThreadRef) string {
 // context.WithoutCancel so a refresh in flight at cancellation still completes.
 // stop halts the loop and blocks until it exits; leaseLost reports whether the
 // loop saw the lease already gone, and is safe to read once stop has returned.
-// When onLeaseLost is non-nil, a lost lease also cancels the handler with
-// ErrPreempted: under the steerability hook a vanished lease means another
-// delivery force released it (locally or on another runtime instance), so the
-// preempted handler must actually stop.
+// A lost lease also cancels the handler with ErrPreempted (onLeaseLost): a
+// vanished lease — force released by a preempting delivery on any runtime
+// instance, or expired — means mutual exclusion is already gone, so the
+// handler must stop rather than run alongside the lease's next holder.
 func (c *Chat) startLockRefresh(ctx context.Context, lease LockLease, threadID ThreadID, onLeaseLost context.CancelCauseFunc) (stop func(), leaseLost func() bool) {
 	interval := c.options.ThreadLockTTL / 2
 	if interval <= 0 {
@@ -1324,18 +1379,28 @@ func (c *Chat) isPending(scope string, event *Event) bool {
 // AcquireLock error, or the lease (acquireHeld) once acquired. label names the
 // coordination mode in the wait observations.
 func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, label string) (LockLease, *inflightCancel, acquireOutcome) {
+	// The wait itself is reserved (preemptible runtimes) BEFORE any acquire
+	// attempt, so a lease can never exist locally without a visible
+	// reservation. A reservation preempted while still waiting is displaced by
+	// the preemptor's pending registration and exits superseded.
+	var reservation *inflightCancel
+	if c.options.OnLockConflict != nil {
+		reservation = c.reserveInflight(scope)
+	}
+	retire := func() {
+		if reservation != nil {
+			c.retireInflight(scope, reservation)
+			reservation = nil
+		}
+	}
 	superseded := func() bool {
 		return !c.isPending(scope, event)
 	}
 	lease, outcome, err := c.pollForLock(ctx, scope, superseded)
-	var reservation *inflightCancel
 	switch outcome {
 	case acquireHeld:
-		// Local ownership is reserved immediately on acquisition (preemptible
-		// runtimes) so a preemptor can never mistake this fresh lease for a
-		// remote one.
-		if c.options.OnLockConflict != nil {
-			reservation = c.reserveInflight(scope)
+		if reservation != nil {
+			reservation.markHeld()
 		}
 		// Re-check ownership after the acquire: a newer event registering while
 		// AcquireLock was in flight must win, or a superseded debounce/queue
@@ -1343,9 +1408,7 @@ func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, lab
 		// this check it is committed; later arrivals wait on the lock.
 		if !c.isPending(scope, event) {
 			c.releaseLock(ctx, lease, event.ThreadID)
-			if reservation != nil {
-				c.retireInflight(scope, reservation)
-			}
+			retire()
 			c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 			return LockLease{}, nil, acquireSuperseded
 		}
@@ -1353,11 +1416,14 @@ func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, lab
 	case acquireSuperseded:
 		// registerPending already emitted the superseded_by record; this waiter
 		// just stops.
+		retire()
 		c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 	case acquireAbandoned:
+		retire()
 		c.clearPending(scope, event)
 		c.logger.Info("chat "+label+" wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
 	case acquireFailed:
+		retire()
 		c.clearPending(scope, event)
 		c.logger.Error("chat "+label+" acquire lock failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 	}
@@ -1456,21 +1522,19 @@ func (c *Chat) runBurstScope(ctx context.Context, scope string) {
 	c.burstMu.Unlock()
 	assert(len(batch) > 0, "burst window closed with no collected events")
 
-	// The batch dispatch gets a fresh DetachTimeout starting when the window
-	// closes, so time spent collecting can never consume the execution budget
-	// of accepted batch members. Derived from baseCtx so Shutdown still cancels
-	// it.
-	dispatchCtx, dispatchCancel := context.WithTimeout(c.baseCtx, c.options.DetachTimeout)
-	defer dispatchCancel()
-	ctx = dispatchCtx
+	// The lock wait gets a fresh DetachTimeout starting when the window closes,
+	// so time spent collecting can never consume it. Derived from baseCtx so
+	// Shutdown still cancels it.
+	waitCtx, waitCancel := context.WithTimeout(c.baseCtx, c.options.DetachTimeout)
+	defer waitCancel()
 
 	first := batch[0].event
-	lease, outcome, err := c.pollForLock(ctx, scope, nil)
+	lease, outcome, err := c.pollForLock(waitCtx, scope, nil)
 	if outcome != acquireHeld {
 		if outcome == acquireFailed {
 			c.logger.Error("chat burst acquire lock failed", "error", err, "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch))
 		} else {
-			c.logger.Info("chat burst wait abandoned", "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch), "error", ctx.Err())
+			c.logger.Info("chat burst wait abandoned", "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch), "error", waitCtx.Err())
 		}
 		for _, work := range batch {
 			c.safeEnd(work.span, waitOutcome(outcome), RouteAttr(work.route))
@@ -1479,22 +1543,31 @@ func (c *Chat) runBurstScope(ctx context.Context, scope string) {
 		return
 	}
 
+	// Every accepted batch member gets its own DetachTimeout execution budget,
+	// so a member is never skipped merely because earlier members consumed a
+	// shared deadline; the batch as a whole is bounded by Shutdown (batchCtx)
+	// and by lease loss, which cancels the remaining members.
+	batchCtx, batchCancel := context.WithCancelCause(c.baseCtx)
+	defer batchCancel(nil)
+
 	c.logger.Info("chat burst batch dispatch", "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch))
-	stopRefresh, leaseLost := c.startLockRefresh(ctx, lease, first.ThreadID, nil)
+	stopRefresh, leaseLost := c.startLockRefresh(batchCtx, lease, first.ThreadID, batchCancel)
 	for i, work := range batch {
-		if ctx.Err() != nil {
-			c.logger.Info("chat burst batch abandoned", "adapter", first.Adapter, "thread_id", first.ThreadID, "remaining", len(batch)-i, "error", ctx.Err())
+		if batchCtx.Err() != nil {
+			c.logger.Info("chat burst batch abandoned", "adapter", first.Adapter, "thread_id", first.ThreadID, "remaining", len(batch)-i, "error", context.Cause(batchCtx))
 			for _, rest := range batch[i:] {
 				c.safeEnd(rest.span, OutcomeIgnored, RouteAttr(rest.route))
 			}
 			break
 		}
+		memberCtx, memberCancel := context.WithTimeout(batchCtx, c.options.DetachTimeout)
 		c.logger.Info("chat deferred dispatch started", "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route)
-		c.endHandlerRun(ctx, work.event, work.route, work.span, work.run(ctx))
+		c.endHandlerRun(memberCtx, work.event, work.route, work.span, work.run(memberCtx))
+		memberCancel()
 	}
 	stopRefresh()
-	benignRelease := ctx.Err() != nil || leaseLost()
-	c.releaseTailLock(ctx, lease, first.ThreadID, benignRelease)
+	benignRelease := batchCtx.Err() != nil || leaseLost()
+	c.releaseTailLock(batchCtx, lease, first.ThreadID, benignRelease)
 	c.finishBurstScope(scope)
 }
 

@@ -757,6 +757,77 @@ func TestDeferredDispatchObservationRecords(t *testing.T) {
 	}
 }
 
+// TestDeferredHandlerCancelledOnLeaseLossWithoutHook proves that every
+// deferred lock holder stops on lease loss, even when the runtime has no
+// OnLockConflict hook of its own: a lease force released elsewhere (or
+// expired) means mutual exclusion is gone, and the handler observes
+// chat.ErrPreempted as its cancellation cause.
+func TestDeferredHandlerCancelledOnLeaseLossWithoutHook(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot, err := chat.New(context.Background(),
+		chat.WithState(state),
+		chat.WithAdapter(adapter),
+		chat.WithLogger(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))),
+		chat.WithRuntimeOptions(chat.RuntimeOptions{
+			DedupeTTL: time.Hour,
+			// A short TTL keeps the refresh cadence (TTL/2) fast.
+			ThreadLockTTL: 100 * time.Millisecond,
+			Concurrency:   chat.ConcurrencyDrop,
+			Dispatch:      chat.DispatchDeferred,
+			DetachTimeout: 5 * time.Second,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+
+	started := make(chan struct{})
+	cause := make(chan error, 1)
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		close(started)
+		<-ctx.Done()
+		cause <- context.Cause(ctx)
+		return ctx.Err()
+	})
+
+	if status := postEvent(t, bot, "fake", mentionEvent("holder", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	// Another runtime instance force releases the lease out from under the
+	// handler; the next refresh must observe the loss and cancel it.
+	if released, err := state.ForceReleaseLock(context.Background(), "fake:v1:thread-1"); err != nil || !released {
+		t.Fatalf("external force release released=%v err=%v", released, err)
+	}
+
+	select {
+	case got := <-cause:
+		if !errors.Is(got, chat.ErrPreempted) {
+			t.Fatalf("cancellation cause = %v, want chat.ErrPreempted", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handler was not cancelled after its lease was force released")
+	}
+
+	deadline := time.After(2 * time.Second)
+	for !strings.Contains(logs.String(), "chat handler preempted") {
+		select {
+		case <-deadline:
+			t.Fatalf("lease-loss cancellation not surfaced; logs:\n%s", logs.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+}
+
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing logs from detached
 // tails.
 type syncBuffer struct {
