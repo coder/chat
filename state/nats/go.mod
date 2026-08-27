@@ -5,7 +5,7 @@ go 1.26.3
 require (
 	github.com/coder/chat v0.1.0
 	github.com/nats-io/nats-server/v2 v2.14.1
-	github.com/nats-io/nats.go v1.52.0
+	github.com/nats-io/nats.go v1.53.1
 )
 
 require (
