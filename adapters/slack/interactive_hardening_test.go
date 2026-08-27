@@ -505,6 +505,66 @@ func TestSlackOpenModalNilViewErrors(t *testing.T) {
 	}
 }
 
+// TestSlackOpenModalFromRawValidation proves OpenModalFromRaw validates its
+// inputs: a foreign raw (not this adapter's escape hatch) errors, an interaction
+// escape hatch carrying no trigger_id errors, and a nil view errors — never a
+// silent views.open call with an empty trigger_id.
+func TestSlackOpenModalFromRawValidation(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+	})
+	adapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
+	if !ok {
+		t.Fatal("typed adapter access failed")
+	}
+	view := map[string]any{"type": "modal"}
+
+	if err := adapter.OpenModalFromRaw(context.Background(), nil, view); err == nil {
+		t.Fatal("nil raw must error")
+	}
+	if err := adapter.OpenModalFromRaw(context.Background(), "not an escape hatch", view); err == nil {
+		t.Fatal("foreign raw must error")
+	}
+
+	// A block_actions payload without a trigger_id normalizes fine (commands
+	// require one, interactions do not); opening a modal from it must error.
+	var captured any
+	bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
+		captured = ev.Interaction.Raw
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	payload := `{
+		"type":"block_actions",
+		"team":{"id":"T1"},
+		"user":{"id":"U1"},
+		"channel":{"id":"C1"},
+		"container":{"channel_id":"C1","message_ts":"333.000"},
+		"actions":[{"action_id":"approve","type":"button"}]
+	}`
+	if rec := serveSignedSlackInteractivity(t, handler, now, payload); rec.Code != http.StatusOK {
+		t.Fatalf("interaction status = %d", rec.Code)
+	}
+	if captured == nil {
+		t.Fatal("interaction handler not called")
+	}
+	if err := adapter.OpenModalFromRaw(context.Background(), captured, view); err == nil {
+		t.Fatal("escape hatch without trigger_id must error")
+	}
+	if err := adapter.OpenModalFromRaw(context.Background(), captured, nil); err == nil {
+		t.Fatal("nil modal view must error")
+	}
+}
+
 // TestSlackPostNativeNilPayloadErrors proves PostNative rejects a nil native
 // payload, complementing the adapter-mismatch case.
 func TestSlackPostNativeNilPayloadErrors(t *testing.T) {

@@ -92,12 +92,10 @@ func TestSlackSlashCommandNormalization(t *testing.T) {
 	if got.Thread.ID() == "" {
 		t.Fatal("thread id should be present")
 	}
-	// response_url / trigger_id preserved on the Platform Escape Hatch.
+	// response_url preserved on the Platform Escape Hatch; trigger_id
+	// preservation is proven end-to-end by TestSlackOpenModalFromRawCommand.
 	if slack.ResponseURLForTest(got.Command.Raw) != "https://hooks.slack.com/commands/T1/123" {
 		t.Fatalf("response_url not preserved on command escape hatch: %q", slack.ResponseURLForTest(got.Command.Raw))
-	}
-	if slack.TriggerIDForTest(got.Command.Raw) != "trigger-123" {
-		t.Fatalf("trigger_id not preserved on command escape hatch")
 	}
 }
 
@@ -414,6 +412,114 @@ func TestSlackOpenModalUsesTriggerID(t *testing.T) {
 
 	if err := adapter.OpenModal(context.Background(), "", view); err == nil {
 		t.Fatal("empty trigger_id must error")
+	}
+}
+
+// TestSlackOpenModalFromRawCommand proves the modal flow is reachable from
+// application code with a Command Event's Raw escape hatch alone: the preserved
+// trigger_id feeds views.open without the caller ever handling it (issue #12).
+func TestSlackOpenModalFromRawCommand(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+	})
+	adapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
+	if !ok {
+		t.Fatal("typed adapter access failed")
+	}
+
+	var captured any
+	bot.OnCommand(func(ctx context.Context, ev *chat.CommandEvent) error {
+		captured = ev.Command.Raw
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+
+	form := url.Values{}
+	form.Set("command", "/deploy")
+	form.Set("team_id", "T1")
+	form.Set("channel_id", "C1")
+	form.Set("user_id", "U1")
+	form.Set("trigger_id", "trigger-123")
+	if rec := serveSignedSlackForm(t, handler, now, form); rec.Code != http.StatusOK {
+		t.Fatalf("command status = %d", rec.Code)
+	}
+	if captured == nil {
+		t.Fatal("command handler not called")
+	}
+
+	view := map[string]any{"type": "modal", "title": map[string]any{"type": "plain_text", "text": "Hi"}}
+	if err := adapter.OpenModalFromRaw(context.Background(), captured, view); err != nil {
+		t.Fatalf("open modal from raw: %v", err)
+	}
+	api.mu.Lock()
+	gotTrigger := api.openViewTrigID
+	api.mu.Unlock()
+	if gotTrigger != "trigger-123" {
+		t.Fatalf("views.open trigger_id = %q, want the trigger preserved on the command escape hatch", gotTrigger)
+	}
+}
+
+// TestSlackOpenModalFromRawInteraction proves the same flow for an Interaction
+// Event's Raw escape hatch (the block_actions counterpart).
+func TestSlackOpenModalFromRawInteraction(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+	})
+	adapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
+	if !ok {
+		t.Fatal("typed adapter access failed")
+	}
+
+	var captured any
+	bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
+		captured = ev.Interaction.Raw
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+
+	payload := `{
+		"type":"block_actions",
+		"team":{"id":"T1"},
+		"user":{"id":"U1"},
+		"channel":{"id":"C1"},
+		"container":{"channel_id":"C1","message_ts":"333.000"},
+		"trigger_id":"trigger-999",
+		"actions":[{"action_id":"approve","block_id":"b1","value":"yes","type":"button"}]
+	}`
+	if rec := serveSignedSlackInteractivity(t, handler, now, payload); rec.Code != http.StatusOK {
+		t.Fatalf("interaction status = %d", rec.Code)
+	}
+	if captured == nil {
+		t.Fatal("interaction handler not called")
+	}
+
+	view := map[string]any{"type": "modal"}
+	if err := adapter.OpenModalFromRaw(context.Background(), captured, view); err != nil {
+		t.Fatalf("open modal from raw: %v", err)
+	}
+	api.mu.Lock()
+	gotTrigger := api.openViewTrigID
+	api.mu.Unlock()
+	if gotTrigger != "trigger-999" {
+		t.Fatalf("views.open trigger_id = %q, want the trigger preserved on the interaction escape hatch", gotTrigger)
 	}
 }
 
