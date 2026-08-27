@@ -32,6 +32,10 @@ const (
 	// observes platform rate limiting (ADR 0005). Adapter-owned, like
 	// ObsAdapterCall.
 	ObsRateLimit ObservationName = "rate_limit"
+	// ObsAdmissionRejected is emitted when the deferred-dispatch Admission
+	// Bound rejects a delivery (MaxDetached, MaxDetachedPerTenant, or Runtime
+	// Shutdown). Carries adapter and tenant attributes.
+	ObsAdmissionRejected ObservationName = "admission_rejected"
 )
 
 // DispatchOutcome is the closed set of terminal outcomes for one Runtime
@@ -48,6 +52,11 @@ const (
 	// its Lock Lease was lost mid-run: released by another runtime instance,
 	// expired, or no longer refreshable.
 	OutcomePreempted DispatchOutcome = "preempted"
+	// OutcomeAdmissionRejected is the terminal outcome of a delivery the
+	// Admission Bound rejected before acknowledgement and before dedupe
+	// marking: it never became an Accepted Event and owes only the overload
+	// response.
+	OutcomeAdmissionRejected DispatchOutcome = "admission-rejected"
 )
 
 // Attribute key constants form the documented, stable, low-cardinality set.

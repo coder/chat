@@ -2,7 +2,13 @@
 
 ## Status
 
-Accepted (implementation staged: `drop`, `queue`, `debounce`, and `concurrent` strategies plus the `LockScope` option ship in the runtime, with `debounce` requiring `DispatchDeferred`; `burst` and force/steerability are staged behind the deferred-dispatch admission-bound and fenced-coordination design work — see the cross-instance coalescing and admission issues — with their names still reserved).
+Accepted (implementation staged: `drop`, `queue`, `debounce`, and `concurrent` strategies plus the `LockScope` option ship in the runtime, with `debounce` requiring `DispatchDeferred`; the `burst` and force/steerability names remain reserved).
+
+Three statements of this ADR are superseded by ADR 0015 (deferred-dispatch admission bound; cross-instance coalescing rejected for now):
+
+- The proposed force surface — key-only `ForceReleaseLock` plus the `OnLockConflict` steerability hook — is rejected finally: key-only identity cannot distinguish victim from successor, and no force primitive ships in v0.x. Any future force/steerability design is gated on ADR 0015's formal-design bar.
+- The staging gate that held `burst` on fenced-coordination design work is lifted: `burst` is gated only on the admission bound and its own revival decisions (the PR #53 outcome in ADR 0015).
+- The expectation that `queue`/`debounce`/`burst` "need wait/coalesce coordination" expanding every State implementation is withdrawn for v0.x: per-instance supersession is the decided contract, needs no State expansion, and any future cross-instance coordination goes through ADR 0015's reopening bar.
 
 ## Context
 

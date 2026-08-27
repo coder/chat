@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed. This decides the deferred-dispatch admission bound (issue #44) and explicitly rejects, for now, the cross-instance coalescing State extension (issue #50) after a full design attempt — see the rejection section for the evidence and the reopening bar. Issue #50 stays open as gated future work. This ADR also gives the staged burst/preemption branch (PR #53) its verdict.
+Accepted (the admission bound is implemented; issue #44). This decides the deferred-dispatch admission bound (issue #44) and explicitly rejects, for now, the cross-instance coalescing State extension (issue #50) after a full design attempt — see the rejection section for the evidence and the reopening bar. Issue #50 stays open as gated future work. This ADR also gives the staged burst/preemption branch (PR #53) its verdict.
 
 This is a decision-level document: it fixes decisions, invariants, and non-goals. Implementation mechanics — slot bookkeeping, timer and shutdown lifecycles, counter management — are deliberately not specified here; they are decided in the implementing PRs, where code and hardening tests can actually verify them against the invariants below.
 

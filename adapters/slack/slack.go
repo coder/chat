@@ -273,6 +273,14 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 			}
 			if ok {
 				if err := dispatch(r.Context(), event); err != nil {
+					if errors.Is(err, chat.ErrAdmissionRejected) {
+						// Events API callbacks are platform-redelivered: a
+						// retry-inducing status lets Slack's own retry cover
+						// the event, and because the delivery was never
+						// dedupe-marked that retry is not deduped away.
+						http.Error(w, "slack runtime at capacity", http.StatusServiceUnavailable)
+						return
+					}
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
