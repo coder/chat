@@ -24,9 +24,9 @@ hatch rather than typed helpers.
 | App actor auth with client credentials | Supported | Default scopes include `read`, `write`, `app:mentionable`, and `app:assignable`; startup verifies Linear granted all requested scopes. |
 | Multi-tenant installs | Supported | Per-install webhook secrets and client credentials or pre-exchanged access tokens through `chat.InstallStore` (ADR 0006). Per-tenant lazy token refresh applies to client-credential installs only; a pre-exchanged `AccessToken` is used as-is until the install store supplies a replacement. |
 | Agent session webhooks | Supported | Handles `AgentSessionEvent` `created` and `prompted`, including Linear-created assignment/delegation sessions. |
-| Generic issue/comment participation | Supported | Comments that @-mention the app route to `OnNewMention` on comment-kind threads; `Thread.Post` replies as an issue comment (ADR 0013). |
+| Generic issue/comment participation | Supported | Comments that @-mention the app arrive on comment-kind threads (routing to `OnNewMention` while unsubscribed); `Thread.Post` replies as an issue comment (ADR 0013). |
 | Inbox notification webhooks | Not normalized | Ignored by the adapter, matching upstream Chat SDK. |
-| Mention-created sessions | Supported | Created sessions with `agentSession.comment` route to `OnNewMention`. |
+| Mention-created sessions | Supported | Created sessions with `agentSession.comment` route to `OnNewMention` (on unsubscribed threads; normal routing precedence applies — a subscribed thread routes everything to `OnSubscribedMessage`). |
 | Delegation-created sessions | Supported | Created sessions without `agentSession.comment` route to `OnNewMention` using `promptContext` and session id fallbacks. |
 | Follow-up prompts | Supported | Prompted events route according to runtime subscription state and read `agentActivity.body` with a content-body fallback. |
 | Agent activities (all five content types) | Supported | `CreateAgentActivity` sends `thought`, `elicitation`, `action`, `response`, and `error` with `signal`, `signalMetadata`, and `ephemeral` (only `thought` and `action` may be ephemeral). |
@@ -36,6 +36,7 @@ hatch rather than typed helpers.
 | Session updates | Supported | `UpdateSession` sets `externalUrls` and replaces the session plan array. |
 | GraphQL escape hatch | Supported | `GraphQL` (single-install) and `GraphQLForTenant` (multi-tenant) reuse adapter auth and token refresh, surface GraphQL errors, and never expose tokens. |
 | Rate-limit handling | Supported | Bounded retry on HTTP 429 and GraphQL `RATELIMITED` with a typed `*linear.RateLimited` error (ADR 0005). |
+| Message history read-through | Supported | `chat.HistoryReader` reads agent-session activities and issue-comment threads, newest-first with `Before` paging (ADR 0009). |
 | Thread reconstruction | Supported | Stored Linear `ThreadID`s (agent-session and comment kinds) reconstruct a `Thread` for later posting. |
 | Tenant-correct thread identity | Supported | Opaque Linear thread ids include organization, issue, optional comment, and session ids. |
 | Raw payload escape hatch | Supported | `RawMessage` preserves kind, action, session context, signal, signal metadata, source comment, and the full webhook envelope. |
@@ -44,7 +45,8 @@ hatch rather than typed helpers.
 
 ### 1. Proactive Agent Session Creation
 
-**Status:** Missing typed helpers; possible via `GraphQL`.
+**Status:** Missing typed helpers; possible via `GraphQL`. Tracked in
+[#47](https://github.com/coder/chat/issues/47).
 
 Linear supports creating sessions when the agent was not mentioned or
 delegated (`agentSessionCreateOnIssue`, `agentSessionCreateOnComment`).
@@ -54,23 +56,15 @@ A typed helper should return a session convertible into this adapter's opaque
 
 ### 2. Repository Suggestions
 
-**Status:** Missing typed helpers; possible via `GraphQL`.
+**Status:** Missing typed helpers; possible via `GraphQL`. Tracked in
+[#48](https://github.com/coder/chat/issues/48).
 
 Linear exposes `issueRepositorySuggestions` for ranking candidate
 repositories. A helper should cover the candidate input shape, returned
 suggestions (hostname, repository full name, confidence), and pairing low
 confidence with a `select` elicitation.
 
-### 3. Conversation History Through Agent Activities
-
-**Status:** Missing.
-
-Linear recommends using Agent Activities for session conversation history.
-There is no typed way to query/list activities for a session. Relatedly, the
-Linear adapter does not implement the cross-platform `chat.HistoryReader`
-Optional Capability (the Slack adapter does).
-
-### 4. Issue Workflow Best Practices
+### 3. Issue Workflow Best Practices
 
 **Status:** Missing typed helpers; possible via `GraphQL`.
 
@@ -79,7 +73,7 @@ workflow state when work begins and setting the agent as `Issue.delegate`.
 This likely belongs in a higher-level helper package or example workflow, not
 the core adapter.
 
-### 5. Stop Handling Versus Thread Serialization
+### 4. Stop Handling Versus Thread Serialization
 
 **Status:** Inherent limitation; needs an application-owned pattern.
 
@@ -95,7 +89,7 @@ webhook/endpoint outside the runtime's serialized dispatch that sets a
 cancellation flag handlers poll). A documented example is still to be
 written.
 
-### 6. Best-Practice Webhook Categories
+### 5. Best-Practice Webhook Categories
 
 **Status:** Partial.
 
@@ -115,19 +109,19 @@ adapter registers handlers for `OAuthApp` revocation, `Comment`,
 Inbox Notification or Permission Change payloads. This adapter follows that
 model. Reaction webhooks are not normalized here either.
 
-### 7. UX Example Coverage
+### 6. UX Example Coverage
 
-**Status:** Docs gap.
+**Status:** Docs gap. Tracked in [#49](https://github.com/coder/chat/issues/49).
 
 The mechanics for auth elicitation (`signalMetadata.url`, optional `userId`),
 select elicitation, and PR/dashboard links via `externalUrls` are all
 implemented, but worked examples (including the follow-up behavior after a
 user completes auth or makes a selection) are still to be written.
 
-## Proposed Next Implementation Slice
+## Planned Work
 
-1. Typed proactive session creation returning an opaque `ThreadID`.
-2. `chat.HistoryReader` parity (or a Linear-specific activity-history query).
-3. Repository suggestions helper.
-4. Worked examples for auth/select elicitations, external URLs, and
-   application-owned stop handling.
+Future work is sequenced on the public issue tracker, not in this document:
+[#47](https://github.com/coder/chat/issues/47) (proactive session creation),
+[#48](https://github.com/coder/chat/issues/48) (repository suggestions), and
+[#49](https://github.com/coder/chat/issues/49) (worked UX examples). This page
+tracks current capability status only.

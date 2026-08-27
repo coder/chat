@@ -83,11 +83,11 @@ bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
 `ev.Interaction.Raw` preserves the full Slack payload — including
 `response_url`, `trigger_id`, action values, and view state — as the platform
 escape hatch. Be aware that the concrete payload type behind `Raw` is
-currently unexported with no public accessor (tracked in
-[#12](https://github.com/coder/chat/issues/12)): routing on `ActionID` works
-for buttons and menus alike, but reading a menu's *selected option value* is
-not yet possible without re-parsing the webhook JSON yourself. Design around
-distinct `action_id`s where you can until #12 lands.
+unexported: the raw-accepting adapter methods (`RespondURL`,
+`OpenModalFromRaw`) consume it directly, but reading a menu's *selected
+option value* is not yet possible without re-parsing the webhook JSON
+yourself (tracked in [#46](https://github.com/coder/chat/issues/46)). Design
+around distinct `action_id`s where you can until #46 lands.
 
 The normalized `Actor` carries the Slack user ID, not a display name (the
 interactivity payload does not include one). Note that plain `chat.Text` is
@@ -116,26 +116,24 @@ detached tail launched at ack time.
 
 ## Open A Modal
 
-The Slack adapter exposes modal opening via `views.open`:
+The Slack adapter opens modals via `views.open` straight from the escape
+hatch — pass the event's `Raw` value and the adapter extracts the preserved
+`trigger_id` itself:
 
 ```go
-err := slackAdapter.OpenModal(ctx, triggerID, modalView)
+err := slackAdapter.OpenModalFromRaw(ctx, ev.Interaction.Raw, modalView)
 ```
 
-In multi-tenant mode (`InstallStore` configured), `OpenModal` returns an
-error because there is no single workspace token; use the tenant-aware
-variant with the event's tenant instead:
+In multi-tenant mode (`InstallStore` configured), use the tenant-aware
+variant with the event's tenant so the right workspace token is resolved:
 
 ```go
-err := slackAdapter.OpenModalForTenant(ctx, ev.Event.Tenant, triggerID, modalView)
+err := slackAdapter.OpenModalForTenantFromRaw(ctx, ev.Event.Tenant, ev.Interaction.Raw, modalView)
 ```
 
-**Known gap:** Slack's `trigger_id` is preserved on the `Raw` escape hatch,
-but there is currently no public accessor to extract it — the preserved
-payload types are unexported — so this flow is not yet reachable without
-re-parsing the original webhook JSON yourself. Tracked in
-[#12](https://github.com/coder/chat/issues/12). (`RespondURL` is unaffected:
-it accepts the `Raw` value directly.)
+(`OpenModal` / `OpenModalForTenant` remain for callers that already hold a
+`trigger_id` string.) The same `Raw` values work from `ev.Command.Raw` in a
+slash-command handler.
 
 Slack invalidates `trigger_id` after 3 seconds, so open modals promptly.
 Modal *submissions* are not part of this slice: the synchronous

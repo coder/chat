@@ -29,7 +29,7 @@ Adapters are tiered honestly:
 | Adapter | Tier | Notes |
 | --- | --- | --- |
 | Slack (`adapters/slack`) | `supported` | Hardening tests for rate-limit retry ([ADR 0005](docs/adr/0005-rate-limit-handling.md)), multi-tenant installs ([ADR 0006](docs/adr/0006-multi-tenant-install.md)), history read-through ([ADR 0009](docs/adr/0009-message-history.md)), and interactivity. No live end-to-end Slack test runs in CI. |
-| Linear (`adapters/linear`) | `experimental` | Fully implemented and hardened (agent sessions, generic comments, rate-limit retry, multi-tenant), but the upstream Linear agent API is itself in developer preview and [capability gaps remain](docs/linear-agent-capabilities.md) (no `HistoryReader`; some operations are GraphQL-escape-hatch only). |
+| Linear (`adapters/linear`) | `experimental` | Fully implemented and hardened (agent sessions, generic comments, rate-limit retry, multi-tenant, history read-through), but the upstream Linear agent API is itself in developer preview and [capability gaps remain](docs/linear-agent-capabilities.md) (some operations are GraphQL-escape-hatch only). |
 | Microsoft Teams | spike | [ADR 0007](docs/adr/0007-teams-adapter.md) is a proposal gated on a live-tenant spike (draft [PR #4](https://github.com/coder/chat/pull/4), tracked in [#6](https://github.com/coder/chat/issues/6)). Not usable yet. |
 
 ## Documentation
@@ -114,20 +114,6 @@ go get github.com/coder/chat/state/redis
 go get github.com/coder/chat/state/postgres
 go get github.com/coder/chat/state/nats
 ```
-
-Until this repository publishes its first tagged release, the separate state
-modules pin the core module as `v0.0.0`, which module proxies cannot resolve —
-so the commands above fail outside this repository. Until a release is
-tagged, external consumers need a `replace` directive pinning the core module
-to a commit, for example:
-
-```sh
-go mod edit -replace github.com/coder/chat=github.com/coder/chat@main
-go mod tidy
-```
-
-or work from a checkout of this repository, whose `go.work` wires the modules
-together.
 
 Package layout:
 
@@ -453,9 +439,10 @@ deliberately through typed Adapter Access:
 - `chat.NativeContentPoster.PostNative` posts opaque Block Kit blocks. A
   `NativeContent` whose adapter does not match the target is an error, never a
   silent portable downgrade.
-- The Slack adapter's `OpenModal` opens a modal via `views.open` using a preserved
-  `trigger_id`. The synchronous modal `view_submission` response is deferred
-  because it is incompatible with ack-then-work.
+- The Slack adapter's `OpenModalFromRaw` (and `OpenModal` for callers holding a
+  `trigger_id`) opens a modal via `views.open` using the `trigger_id` preserved
+  on the `Raw` escape hatch. The synchronous modal `view_submission` response is
+  deferred because it is incompatible with ack-then-work.
 - The Slack adapter's `RespondURL` posts to a preserved `response_url`.
 
 ### Observability
@@ -727,6 +714,8 @@ so no production promises are made yet. The implementation covers:
 - the full agent activity surface through typed adapter access: thoughts,
   responses, actions, elicitations, errors, and session updates with plans and
   external URLs (ADR 0008)
+- thread history read-through via the `HistoryReader` Optional Capability,
+  reading agent-session activities and issue-comment threads (ADR 0009)
 - GraphQL rate-limit retry with a typed `RateLimited` error (ADR 0005)
 - a `GraphQL` escape hatch and a `RawMessage` escape hatch (including the
   user-initiated stop signal)
@@ -783,7 +772,7 @@ include:
 - no Linear personal API key mode, and no single-install static access token
   (pre-exchanged access tokens are supported through the multi-tenant
   `InstallStore`)
-- no Linear streaming, reactions, history read-through, or Markdown conversion
+- no Linear streaming, reactions, or Markdown conversion
 - no built-in OAuth web flow: authorize/callback/token-exchange routes and
   install storage are application-owned (ADR 0006)
 - no live Slack end-to-end test in CI
@@ -793,7 +782,7 @@ include:
 - no pattern handlers
 - no middleware
 - no history persistence APIs: `HistoryReader` is a storage-free live
-  read-through, and only the Slack adapter implements it
+  read-through, implemented by the Slack and Linear adapters
 - no thread application state APIs
 - no JSX cards, files, or typed Block Kit / Adaptive Card payload builders
   (native Block Kit content ships as an opaque payload via `NativeContentPoster`)

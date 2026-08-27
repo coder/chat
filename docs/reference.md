@@ -52,12 +52,12 @@ platform-specific surfaces differ:
 | Capability | Slack | Linear |
 | --- | --- | --- |
 | Message events (mentions, subscribed threads, DMs) | Yes | Yes (agent sessions and issue comments) |
-| Ephemeral messages with explicit DM fallback | Yes | Thoughts via `PostThought` (no DM concept) |
+| Ephemeral messages with explicit DM fallback (`Thread.PostEphemeral`) | Yes | No (unsupported capability); Linear-specific ephemeral *thoughts* via `PostThought` on agent-session threads |
 | Slash commands (`OnCommand`) | Yes | No (no platform equivalent) |
-| Interactive components (`OnInteraction`) | Yes (`block_actions`) | No |
+| Interactive components (`OnInteraction`) | Yes (message `block_actions`; modal-view actions are not normalized) | No |
 | Native content posting (`NativeContentPoster`) | Yes (Block Kit) | No |
-| Modal open / `response_url` | Yes (`OpenModal`, `RespondURL`) | No |
-| Message history read-through (`HistoryReader`) | Yes | No (tracked gap) |
+| Modal open / `response_url` | Yes (`OpenModalFromRaw`, `OpenModal`, `RespondURL`) | No |
+| Message history read-through (`HistoryReader`) | Yes | Yes (agent-session activities and issue-comment threads) |
 | Rate-limit retry with typed `RateLimited` error | Yes | Yes |
 | Multi-tenant installs (`InstallStore`) | Yes | Yes |
 | Platform escape hatch | Raw payloads on events | `RawMessage`, `GraphQL` |

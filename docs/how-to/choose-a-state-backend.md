@@ -47,7 +47,7 @@ import (
 
 redisState, err := chatredis.New(ctx, chatredis.Options{
 	Client: redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ADDR")}),
-	// Prefix defaults to "chat".
+	Prefix: "mybot", // see "One namespace per bot application" below
 })
 ```
 
@@ -73,8 +73,8 @@ if err != nil {
 }
 
 pgState, err := chatpostgres.New(ctx, chatpostgres.Options{
-	Pool: pool,
-	// Namespace defaults to "chat".
+	Pool:      pool,
+	Namespace: "mybot", // see "One namespace per bot application" below
 })
 ```
 
@@ -101,9 +101,10 @@ if err != nil {
 }
 
 natsState, err := chatnats.New(ctx, chatnats.Options{
-	Conn: conn,
-	// Prefix defaults to "chat"; DedupeTTL and ThreadLockTTL default to the
-	// runtime defaults (24h and 2m) and must match your RuntimeOptions.
+	Conn:   conn,
+	Prefix: "mybot", // see "One namespace per bot application" below
+	// DedupeTTL and ThreadLockTTL default to the runtime defaults (24h and
+	// 2m) and must match your RuntimeOptions.
 })
 ```
 
@@ -113,6 +114,18 @@ Key-Value buckets with bucket-level TTLs (see
 per-bucket, the dedupe and lock TTLs are fixed at construction time. The
 runnable example is
 [`examples/slack-nats-state`](../../examples/slack-nats-state/README.md).
+
+## One Namespace Per Bot Application
+
+The `Prefix`/`Namespace` options default to `chat`. If two *independent* bot
+applications share one Redis, Postgres, or NATS service with the default,
+their subscription, dedupe, and lock records collide — thread IDs carry
+platform tenant/channel identity but no application identity, so app A
+subscribing a thread can route that thread's follow-ups into app B's
+`OnSubscribedMessage`, and one app's locks can suppress the other's events.
+Give every bot application its own stable namespace, shared only by that
+app's replicas (replicas must share the namespace — that is what makes
+dedupe and locking work across them).
 
 ## How To Decide
 
