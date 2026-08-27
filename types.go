@@ -105,8 +105,16 @@ const (
 type Interaction struct {
 	Kind     InteractionKind
 	ActionID string
-	Actor    Actor
-	Raw      any // Platform Escape Hatch: response_url, trigger_id, action values, view state
+	// Value is the activated component's single value: a button's value or the
+	// selected option value of a single-select component (static_select,
+	// external_select, overflow, radio_buttons). Empty when the component
+	// carries no value.
+	Value string
+	// Values are the selected option values of a multi-valued component
+	// (multi_static_select, checkboxes). Nil for single-valued components.
+	Values []string
+	Actor  Actor
+	Raw    any // Platform Escape Hatch: response_url, trigger_id, view state
 }
 
 type InteractionEvent struct {

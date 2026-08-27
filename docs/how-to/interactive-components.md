@@ -80,14 +80,24 @@ bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
 ```
 
 `ev.Interaction.Kind` is `chat.InteractionBlockAction` for this slice, and
-`ev.Interaction.Raw` preserves the full Slack payload — including
-`response_url`, `trigger_id`, action values, and view state — as the platform
-escape hatch. Be aware that the concrete payload type behind `Raw` is
-unexported: the raw-accepting adapter methods (`RespondURL`,
-`OpenModalFromRaw`) consume it directly, but reading a menu's *selected
-option value* is not yet possible without re-parsing the webhook JSON
-yourself (tracked in [#46](https://github.com/coder/chat/issues/46)). Design
-around distinct `action_id`s where you can until #46 lands.
+the activated component's value is normalized onto the event:
+`ev.Interaction.Value` carries a button's `value` or the selected option
+value of a single-select component (`static_select`, `external_select`,
+`overflow`, `radio_buttons`), and `ev.Interaction.Values` carries the
+selected option values of a multi-valued component (`multi_static_select`,
+`checkboxes`). So a menu whose options share one `action_id` routes on
+`ActionID` and switches on `Value`:
+
+```go
+case "pick-env":
+	_, err := ev.Thread.Post(ctx, chat.Text("Deploying to "+ev.Interaction.Value))
+	return err
+```
+
+`ev.Interaction.Raw` still preserves the full Slack payload — including
+`response_url`, `trigger_id`, and view state — as the platform escape hatch.
+The concrete payload type behind `Raw` is unexported; the raw-accepting
+adapter methods (`RespondURL`, `OpenModalFromRaw`) consume it directly.
 
 The normalized `Actor` carries the Slack user ID, not a display name (the
 interactivity payload does not include one). Note that plain `chat.Text` is
@@ -97,15 +107,11 @@ Slack API and include it as ordinary text; for a real, clickable Slack
 mention, post native Block Kit content with an `mrkdwn` text element
 containing `<@USERID>`.
 
-**Known limitation:** the interaction event identity is currently anchored on
-the message timestamp, not the individual activation — so when the same user
-activates the same `action_id` on the same message more than once within
-`DedupeTTL` (default 24 hours), only the first activation reaches
-`OnInteraction`; the rest are dropped as duplicates. This also affects a menu
-whose options share one action ID. Tracked in
-[#43](https://github.com/coder/chat/issues/43). Until it lands, give
-repeat-activatable controls distinct `action_id`s (or replace the message's
-blocks after each click).
+Every activation is a distinct Event: the interaction identity is anchored on
+Slack's per-activation `action_ts`, so repeat clicks and repeat menu picks by
+the same user each reach `OnInteraction`, while a redelivery of one
+activation (which repeats the same `action_ts`) is still deduped within
+`DedupeTTL`.
 
 Mind the acknowledgement timing: under the default `DispatchSync` mode the
 adapter writes the empty 2xx only *after* your handler returns, so a slow

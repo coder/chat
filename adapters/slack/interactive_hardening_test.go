@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -106,6 +108,211 @@ func TestSlackInteractionDedupedByEventIdentity(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("interaction handler calls = %d, want 1 (deduped)", calls)
+	}
+}
+
+// TestSlackRepeatInteractionsAreDistinctEvents proves the per-activation Event
+// Identity (#43): repeat activations of the same action_id by the same user on
+// the same message each dispatch (Slack mints a fresh action_ts per activation),
+// while a genuine redelivery of any single activation — a byte-identical payload
+// repeating the same action_ts — still dedupes. Slack sends no retry headers for
+// interactivity, so the identity itself is the only retry discriminator.
+func TestSlackRepeatInteractionsAreDistinctEvents(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+	})
+	var calls int
+	bot.OnInteraction(func(context.Context, *chat.InteractionEvent) error {
+		calls++
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+
+	// A fresh activation mints a fresh action_ts (and trigger_id); a redelivery
+	// of that activation repeats both.
+	activation := func(actionTS string) string {
+		return fmt.Sprintf(`{
+			"type":"block_actions",
+			"team":{"id":"T1"},
+			"user":{"id":"U1"},
+			"channel":{"id":"C1"},
+			"container":{"channel_id":"C1","message_ts":"333.000"},
+			"trigger_id":"trigger-%[1]s",
+			"actions":[{"action_id":"counter","type":"button","value":"+1","action_ts":"%[1]s"}]
+		}`, actionTS)
+	}
+
+	for _, actionTS := range []string{"1700000001.000100", "1700000002.000200", "1700000003.000300"} {
+		payload := activation(actionTS)
+		// Deliver each activation twice: the original and a redelivery.
+		for delivery := 0; delivery < 2; delivery++ {
+			rec := serveSignedSlackInteractivity(t, handler, now, payload)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("activation %s delivery %d status = %d", actionTS, delivery, rec.Code)
+			}
+		}
+	}
+	if calls != 3 {
+		t.Fatalf("interaction handler calls = %d, want 3 (one per activation, redeliveries deduped)", calls)
+	}
+}
+
+// TestSlackMenuRepeatSelectionsShareActionID proves a menu whose options share
+// one action_id no longer collapses repeat selections by the same user (#43),
+// and that every dispatched event carries its own selected option value (#46).
+func TestSlackMenuRepeatSelectionsShareActionID(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+	})
+	var picked []string
+	bot.OnInteraction(func(_ context.Context, ev *chat.InteractionEvent) error {
+		picked = append(picked, ev.Interaction.Value)
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+
+	selection := func(actionTS, value string) string {
+		return fmt.Sprintf(`{
+			"type":"block_actions",
+			"team":{"id":"T1"},
+			"user":{"id":"U1"},
+			"channel":{"id":"C1"},
+			"container":{"channel_id":"C1","message_ts":"333.000"},
+			"actions":[{
+				"action_id":"pick-env","type":"static_select","action_ts":"%s",
+				"selected_option":{"text":{"type":"plain_text","text":"opt"},"value":"%s"}
+			}]
+		}`, actionTS, value)
+	}
+
+	// Same user re-picks options — including the same option twice — on one menu.
+	for i, value := range []string{"staging", "production", "staging"} {
+		payload := selection(fmt.Sprintf("1700000010.%06d", i), value)
+		if rec := serveSignedSlackInteractivity(t, handler, now, payload); rec.Code != http.StatusOK {
+			t.Fatalf("selection %d status = %d", i, rec.Code)
+		}
+	}
+	want := []string{"staging", "production", "staging"}
+	if !reflect.DeepEqual(picked, want) {
+		t.Fatalf("picked = %#v, want %#v (every repeat selection dispatches with its value)", picked, want)
+	}
+}
+
+// TestSlackSelectionValuesNormalizedPerComponent proves every value-bearing
+// block_actions component normalizes its selection onto the supported surface
+// (#46): buttons and single-select components populate Interaction.Value;
+// multi-valued components populate Interaction.Values.
+func TestSlackSelectionValuesNormalizedPerComponent(t *testing.T) {
+	t.Parallel()
+
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	bot := newSlackRuntime(t, api, slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		Now:           func() time.Time { return now },
+	})
+	var got *chat.Interaction
+	bot.OnInteraction(func(_ context.Context, ev *chat.InteractionEvent) error {
+		got = ev.Interaction
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+
+	cases := []struct {
+		name       string
+		action     string
+		wantValue  string
+		wantValues []string
+	}{
+		{
+			name:      "button",
+			action:    `{"action_id":"a-button","type":"button","value":"clicked","action_ts":"1700000020.000001"}`,
+			wantValue: "clicked",
+		},
+		{
+			name: "static_select",
+			action: `{"action_id":"a-static","type":"static_select","action_ts":"1700000020.000002",
+				"selected_option":{"text":{"type":"plain_text","text":"Staging"},"value":"staging"}}`,
+			wantValue: "staging",
+		},
+		{
+			name: "external_select",
+			action: `{"action_id":"a-external","type":"external_select","action_ts":"1700000020.000003",
+				"selected_option":{"text":{"type":"plain_text","text":"Issue 9"},"value":"issue-9"}}`,
+			wantValue: "issue-9",
+		},
+		{
+			name: "overflow",
+			action: `{"action_id":"a-overflow","type":"overflow","action_ts":"1700000020.000004",
+				"selected_option":{"text":{"type":"plain_text","text":"Delete"},"value":"delete"}}`,
+			wantValue: "delete",
+		},
+		{
+			name: "radio_buttons",
+			action: `{"action_id":"a-radio","type":"radio_buttons","action_ts":"1700000020.000005",
+				"selected_option":{"text":{"type":"plain_text","text":"B"},"value":"opt-b"}}`,
+			wantValue: "opt-b",
+		},
+		{
+			name: "multi_static_select",
+			action: `{"action_id":"a-multi","type":"multi_static_select","action_ts":"1700000020.000006",
+				"selected_options":[{"value":"one"},{"value":"two"}]}`,
+			wantValues: []string{"one", "two"},
+		},
+		{
+			name: "checkboxes",
+			action: `{"action_id":"a-checks","type":"checkboxes","action_ts":"1700000020.000007",
+				"selected_options":[{"value":"x"},{"value":"y"}]}`,
+			wantValues: []string{"x", "y"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got = nil
+			payload := fmt.Sprintf(`{
+				"type":"block_actions",
+				"team":{"id":"T1"},
+				"user":{"id":"U1"},
+				"channel":{"id":"C1"},
+				"container":{"channel_id":"C1","message_ts":"333.000"},
+				"actions":[%s]
+			}`, tc.action)
+			rec := serveSignedSlackInteractivity(t, handler, now, payload)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+			}
+			if got == nil {
+				t.Fatal("interaction did not dispatch")
+			}
+			if got.Value != tc.wantValue {
+				t.Fatalf("Value = %q, want %q", got.Value, tc.wantValue)
+			}
+			if !reflect.DeepEqual(got.Values, tc.wantValues) {
+				t.Fatalf("Values = %#v, want %#v", got.Values, tc.wantValues)
+			}
+		})
 	}
 }
 

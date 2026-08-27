@@ -172,11 +172,24 @@ type interactionPayload struct {
 		BlockID  string `json:"block_id"`
 		Value    string `json:"value"`
 		Type     string `json:"type"`
+		// ActionTS is Slack's per-activation timestamp, minted server-side when
+		// the user performs the action; a redelivery of the same activation
+		// carries the same value.
+		ActionTS        string           `json:"action_ts"`
+		SelectedOption  selectedOption   `json:"selected_option"`
+		SelectedOptions []selectedOption `json:"selected_options"`
 	} `json:"actions"`
 	TriggerID   string          `json:"trigger_id"`
 	ResponseURL string          `json:"response_url"`
 	View        json.RawMessage `json:"view"`
 	Raw         json.RawMessage `json:"-"`
+}
+
+// selectedOption is the value-bearing shape of a menu option in a block_actions
+// action (static_select, external_select, overflow, radio_buttons via
+// selected_option; multi_static_select, checkboxes via selected_options).
+type selectedOption struct {
+	Value string `json:"value"`
 }
 
 // handleInteractionForm resolves the per-tenant install for an interactivity
@@ -258,6 +271,12 @@ func (a *Adapter) normalizeInteraction(r *http.Request, payload interactionPaylo
 		return nil, err
 	}
 
+	action := payload.Actions[0]
+	var values []string
+	for _, opt := range action.SelectedOptions {
+		values = append(values, opt.Value)
+	}
+
 	return &chat.Event{
 		ID:            interactionEventID(payload, channelID),
 		Adapter:       adapterName,
@@ -271,17 +290,25 @@ func (a *Adapter) normalizeInteraction(r *http.Request, payload interactionPaylo
 		Raw: payload,
 		Interaction: &chat.Interaction{
 			Kind:     chat.InteractionBlockAction,
-			ActionID: payload.Actions[0].ActionID,
+			ActionID: action.ActionID,
+			Value:    firstNonEmpty(action.Value, action.SelectedOption.Value),
+			Values:   values,
 			Actor:    a.humanActor(payload.Team.ID, payload.User.ID),
 			Raw:      payload,
 		},
 	}, nil
 }
 
-// interactionEventID derives a stable Event Identity for a block_actions payload so
-// a re-delivered click is deduped.
+// interactionEventID derives a stable Event Identity for a block_actions payload
+// so a re-delivered activation is deduped without collapsing distinct
+// activations. Slack sends no retry headers for interactivity, so dedupe must
+// discriminate purely by identity: the anchor is the per-activation action_ts
+// (trigger_id fallback), which is minted server-side per activation — a genuine
+// redelivery of one activation repeats it, while every new click or selection
+// gets a fresh value. The message ts anchors only payloads carrying no
+// per-activation value at all, preserving redelivery dedupe there too.
 func interactionEventID(payload interactionPayload, channelID string) string {
-	anchor := firstNonEmpty(payload.Container.MessageTS, payload.Container.ThreadTS, payload.TriggerID)
+	anchor := firstNonEmpty(payload.Actions[0].ActionTS, payload.TriggerID, payload.Container.MessageTS, payload.Container.ThreadTS)
 	return strings.Join([]string{
 		adapterName, "interaction",
 		payload.Team.ID, channelID, payload.User.ID, payload.Actions[0].ActionID, anchor,
