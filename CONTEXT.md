@@ -424,8 +424,9 @@ _Avoid_: Full platform schema, strict external SDK model
 - Default **Runtime Options** use a 24 hour dedupe TTL and a 2 minute **Thread Lock** TTL.
 - **Runtime Options** TTL values must be positive.
 - **Runtime Options** include a **Concurrency Strategy** that defaults to drop.
-- The runtime implements the drop (default), queue, debounce, and concurrent **Concurrency Strategy** values plus a **Lock Scope** option (thread default, channel opt-in); the burst strategy and force/steerability remain reserved pending the deferred-dispatch admission and fenced-coordination design.
+- The runtime implements the drop (default), queue, debounce, concurrent, and burst **Concurrency Strategy** values plus a **Lock Scope** option (thread default, channel opt-in); force/steerability remains reserved pending ADR 0015's formal-design bar.
 - Debounce coalesces on a configured quiet period and requires deferred **Dispatch Mode**; concurrent takes no **Thread Lock** and is bounded by a configured maximum; skipped (superseded) events are always observable, never silent.
+- Burst batches routed events per lock scope during a fixed collection window (anchored at the first member, optionally sealed early by a batch cap) and dispatches the batch in join order under one **Thread Lock** hold, each member with its own detach budget; batch shaping is delivery-preserving (an accepted member is never dropped), parked members count against the **Admission Bound**, batches for one scope dispatch in seal order, and batching is per runtime instance.
 - A deferred handler whose **Lock Lease** is lost mid-run is cancelled rather than left running unserialized.
 - A **Thread Lock** coordinates processing of distinct **Webhook Events** for the same **Thread**; it never deduplicates them, and what happens to a conflicting event is decided by the **Concurrency Strategy** (drop acknowledges and drops it; queue coalesces waiters per process and runs the most recent after the lock releases).
 - A **Thread Lock** is represented as a **Lock Lease** with an ownership token.

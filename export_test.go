@@ -10,3 +10,13 @@ func AdmissionTenantEntries(c *Chat) int {
 	}
 	return c.admission.tenantEntries()
 }
+
+// BurstScopeCount reports the number of live burst scope coordinators, for
+// hardening tests proving an idle scope retains no map entry (ADR 0015 bounded
+// retention).
+func BurstScopeCount(c *Chat) int {
+	assert(c != nil, "BurstScopeCount called on nil runtime")
+	c.burstMu.Lock()
+	defer c.burstMu.Unlock()
+	return len(c.burstScopes)
+}

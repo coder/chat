@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (implementation staged: `drop`, `queue`, `debounce`, and `concurrent` strategies plus the `LockScope` option ship in the runtime, with `debounce` requiring `DispatchDeferred`; the `burst` and force/steerability names remain reserved).
+Accepted (implemented: the `drop`, `queue`, `debounce`, `concurrent`, and `burst` strategies plus the `LockScope` option ship in the runtime, with `debounce` and `burst` requiring `DispatchDeferred`; `burst` landed per ADR 0015's revival decision under the Admission Bound's invariants (issue #55). The force/steerability names remain reserved).
 
 Three statements of this ADR are superseded by ADR 0015 (deferred-dispatch admission bound; cross-instance coalescing rejected for now):
 
