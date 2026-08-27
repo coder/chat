@@ -43,6 +43,18 @@ run = "cd state/redis && go test ./..."
 description = "Run tests for the root Go module"
 run = "go test ./..."
 
+[tasks.vet]
+description = "Run go vet for every Go module in the workspace"
+run = [
+  "go vet ./...",
+  "cd state/nats && go vet ./...",
+  "cd state/postgres && go vet ./...",
+  "cd state/redis && go vet ./...",
+  "cd examples/slack-nats-state && go vet ./...",
+  "cd examples/slack-redis-state && go vet ./...",
+  "cd examples/slack-postgres-state && go vet ./...",
+]
+
 [tasks."test:examples"]
 description = "Run example module tests"
 run = [
