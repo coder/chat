@@ -372,6 +372,73 @@ func TestDebounceWaiterDisplacedDuringAcquireDoesNotDispatch(t *testing.T) {
 	}
 }
 
+func TestDebounceStaleDeliveryCannotDisplaceNewerWaiter(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	routingStarted := make(chan struct{})
+	continueRouting := make(chan struct{})
+	state.isThreadSubscribedStarted = routingStarted
+	state.continueIsThreadSubscribed = continueRouting
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot := newDebounceRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
+		o.DebounceInterval = 30 * time.Millisecond
+	})
+
+	var mu sync.Mutex
+	var handled []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		mu.Lock()
+		handled = append(handled, ev.Event.ID)
+		mu.Unlock()
+		return nil
+	})
+
+	// The older delivery is admitted first but parks inside its prelude
+	// (routing); the newer delivery completes its whole prelude meanwhile.
+	olderDone := make(chan postEventResult, 1)
+	go func() { olderDone <- postEventResultFor(bot, "fake", mentionEvent("older", "fake:v1:thread-1")) }()
+	select {
+	case <-routingStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("older delivery did not reach routing")
+	}
+	if status := postEvent(t, bot, "fake", mentionEvent("newer", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("newer status = %d", status)
+	}
+
+	// The older delivery finishes its prelude AFTER the newer one registered:
+	// it must not displace the newer waiter.
+	close(continueRouting)
+	res := <-olderDone
+	if res.err != nil || res.status != http.StatusOK {
+		t.Fatalf("older result status=%d err=%v", res.status, res.err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(handled)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("debounce winner did not dispatch")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	time.Sleep(80 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !equalStrings(handled, []string{"newer"}) {
+		t.Fatalf("handled = %v, want only [newer]: a stale delivery displaced the final event", handled)
+	}
+}
+
 func TestDebounceConstructionValidation(t *testing.T) {
 	t.Parallel()
 

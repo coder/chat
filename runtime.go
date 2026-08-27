@@ -27,6 +27,9 @@ const (
 	// dispatch (a synchronous webhook cannot park an event past the platform's
 	// acknowledgement deadline).
 	//
+	// "Final" follows the dispatch admission order on this instance: a delivery
+	// delayed in its prelude never displaces a waiter admitted after it.
+	//
 	// Like queue supersession, coalescing is per runtime instance: events for
 	// one scope delivered to different instances sharing a State are not
 	// superseded across instances (each instance dispatches its own final
@@ -159,6 +162,9 @@ type Chat struct {
 	// queueMu guards pending, the per-scope most-recent pending waiter.
 	queueMu sync.Mutex
 	pending map[string]*pendingWaiter
+	// dispatchSeq orders deliveries by dispatch admission so a delivery delayed
+	// in its prelude can never displace a newer pending waiter.
+	dispatchSeq atomic.Uint64
 
 	// concurrencySlots bounds simultaneous handler executions under
 	// ConcurrencyConcurrent; nil under every other strategy.
@@ -421,10 +427,14 @@ func shutdownAdapters(ctx context.Context, adapters map[string]Adapter) error {
 }
 
 func (c *Chat) dispatch(ctx context.Context, event *Event) error {
+	// The admission sequence is assigned before any prelude work so pending
+	// registration can order deliveries by admission: a delivery delayed in
+	// validation/dedupe/routing can never displace a newer waiter.
+	seq := c.dispatchSeq.Add(1)
 	if c.options.Dispatch == DispatchDeferred {
-		return c.dispatchDeferred(ctx, event)
+		return c.dispatchDeferred(ctx, event, seq)
 	}
-	return c.dispatchSync(ctx, event)
+	return c.dispatchSync(ctx, event, seq)
 }
 
 // dispatchSync runs the prelude and the routed handler inline under the request
@@ -432,8 +442,8 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 // strategy a Lock Conflict waits inline (bounded by ctx) for the in-flight
 // handler before the routed handler runs. Under the concurrent strategy the
 // request waits inline for a MaxConcurrent slot instead of a lock.
-func (c *Chat) dispatchSync(ctx context.Context, event *Event) error {
-	work, resolved, err := c.prelude(ctx, event)
+func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64) error {
+	work, resolved, err := c.prelude(ctx, event, seq)
 	if err != nil || resolved {
 		return err
 	}
@@ -469,8 +479,8 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event) error {
 // dispatchDeferred runs the prelude under the request context and, on a routed
 // event, launches the detached tail and returns so the adapter can acknowledge
 // the platform (ack-then-work).
-func (c *Chat) dispatchDeferred(ctx context.Context, event *Event) error {
-	work, resolved, err := c.prelude(ctx, event)
+func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64) error {
+	work, resolved, err := c.prelude(ctx, event, seq)
 	if err != nil || resolved {
 		return err
 	}
@@ -527,7 +537,7 @@ type preludeWork struct {
 // Under the queue strategy a Lock Conflict on a routed event does not block: the
 // event is registered as pending (no lease) and returned with needsLock=true so
 // the tail acquires the lock, keeping ack prompt under DispatchDeferred.
-func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, error) {
+func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64) (preludeWork, bool, error) {
 	if err := validateEvent(event); err != nil {
 		return preludeWork{}, true, err
 	}
@@ -661,7 +671,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 			return resolveIgnored("no-command-handler", "chat ignored command with no handler", slog.LevelInfo)
 		}
 		cmdEvent := &CommandEvent{Event: event, Thread: thread, Command: event.Command}
-		return c.routedWork(ctx, span, event, lease, scope, conflicted, "command", func(ctx context.Context) error {
+		return c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "command", func(ctx context.Context) error {
 			return handler(ctx, cmdEvent)
 		}, acceptEvent, releaseOnResolve)
 
@@ -676,7 +686,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 			return resolveIgnored("no-interaction-handler", "chat ignored interaction with no handler", slog.LevelInfo)
 		}
 		intEvent := &InteractionEvent{Event: event, Thread: thread, Interaction: event.Interaction}
-		return c.routedWork(ctx, span, event, lease, scope, conflicted, "interaction", func(ctx context.Context) error {
+		return c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "interaction", func(ctx context.Context) error {
 			return handler(ctx, intEvent)
 		}, acceptEvent, releaseOnResolve)
 	}
@@ -697,7 +707,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 	}
 
 	msgEvent := &MessageEvent{Event: event, Thread: thread, Message: event.Message}
-	return c.routedWork(ctx, span, event, lease, scope, conflicted, route, func(ctx context.Context) error {
+	return c.routedWork(ctx, span, event, lease, scope, seq, conflicted, route, func(ctx context.Context) error {
 		return handler(ctx, msgEvent)
 	}, acceptEvent, releaseOnResolve)
 }
@@ -712,6 +722,7 @@ func (c *Chat) routedWork(
 	event *Event,
 	lease LockLease,
 	scope string,
+	seq uint64,
 	conflicted bool,
 	route string,
 	run func(context.Context) error,
@@ -739,6 +750,14 @@ func (c *Chat) routedWork(
 		span:  span,
 	}
 
+	// resolveStale closes a routed event whose delivery was admitted before the
+	// scope's current pending waiter: it never displaces the newer waiter.
+	resolveStale := func(label string) (preludeWork, bool, error) {
+		c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
+		c.safeEnd(span, OutcomeIgnored, RouteAttr(route))
+		return preludeWork{}, true, nil
+	}
+
 	switch c.options.Concurrency {
 	case ConcurrencyDrop, ConcurrencyQueue:
 		if conflicted {
@@ -746,7 +765,11 @@ func (c *Chat) routedWork(
 			// conflict site): the event waits as its scope's pending waiter.
 			work.needsLock = true
 			work.waitLabel = "queue"
-			work.displaced = c.registerPending(scope, event, work.waitLabel)
+			displaced, registered := c.registerPending(scope, event, seq, work.waitLabel)
+			if !registered {
+				return resolveStale(work.waitLabel)
+			}
+			work.displaced = displaced
 		}
 		return work, false, nil
 
@@ -754,7 +777,11 @@ func (c *Chat) routedWork(
 		work.needsLock = true
 		work.debounce = true
 		work.waitLabel = "debounce"
-		work.displaced = c.registerPending(scope, event, work.waitLabel)
+		displaced, registered := c.registerPending(scope, event, seq, work.waitLabel)
+		if !registered {
+			return resolveStale(work.waitLabel)
+		}
+		work.displaced = displaced
 		return work, false, nil
 
 	case ConcurrencyConcurrent:
@@ -1014,28 +1041,37 @@ const (
 // pendingWaiter is one scope's most-recent pending event plus a displacement
 // signal: displaced closes when a newer event supersedes this waiter, so a
 // parked (debounce) waiter exits promptly instead of holding its event through
-// the full interval.
+// the full interval. seq is the delivery's dispatch admission sequence, which
+// defines "newer".
 type pendingWaiter struct {
 	event     *Event
+	seq       uint64
 	displaced chan struct{}
 }
 
 // registerPending records event as the most-recent pending event for its scope,
-// superseding (and signalling) any earlier waiter. Recording supersession here,
-// where the displacing event's id is known, lets the record carry
-// superseded_by. label names the coordination mode ("queue", "debounce", or
-// "preempt") so the observation names the strategy that displaced the waiter.
-// The returned channel closes when this registration is itself superseded.
-func (c *Chat) registerPending(scope string, event *Event, label string) <-chan struct{} {
+// superseding (and signalling) any earlier waiter. "Most recent" follows the
+// dispatch admission sequence, not registration time: a delivery delayed in
+// its prelude (validation, dedupe, routing) never displaces a waiter admitted
+// after it, and instead reports registered=false so the caller resolves it as
+// superseded. Recording supersession here, where the displacing event's id is
+// known, lets the record carry superseded_by. label names the coordination
+// mode ("queue" or "debounce") so the observation names the strategy that
+// displaced the waiter. The returned channel closes when this registration is
+// itself superseded.
+func (c *Chat) registerPending(scope string, event *Event, seq uint64, label string) (displaced <-chan struct{}, registered bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
 	if prev := c.pending[scope]; prev != nil {
+		if prev.seq > seq {
+			return nil, false
+		}
 		c.logger.Info("chat "+label+" superseded", "adapter", prev.event.Adapter, "event_id", prev.event.ID, "thread_id", prev.event.ThreadID, "superseded_by", event.ID)
 		close(prev.displaced)
 	}
-	waiter := &pendingWaiter{event: event, displaced: make(chan struct{})}
+	waiter := &pendingWaiter{event: event, seq: seq, displaced: make(chan struct{})}
 	c.pending[scope] = waiter
-	return waiter.displaced
+	return waiter.displaced, true
 }
 
 // isPending reports whether event is still its scope's most-recent pending
