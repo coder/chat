@@ -28,8 +28,11 @@ const (
 	// acknowledgement deadline).
 	ConcurrencyDebounce
 	// ConcurrencyBurst collects routed events for a scope while a
-	// DebounceInterval window is open, then dispatches the whole batch in arrival
-	// order under a single Thread Lock hold. No event is skipped. Requires
+	// DebounceInterval window is open, then dispatches the whole batch — in the
+	// order the events joined the window — under a single Thread Lock hold. No
+	// event is skipped. Join order follows each event's admission through the
+	// dispatch prelude; ordering of concurrent webhook deliveries is
+	// platform-dependent and not re-established by the runtime. Requires
 	// deferred dispatch, like ConcurrencyDebounce.
 	ConcurrencyBurst
 	// ConcurrencyConcurrent is the explicit opt-out of per-scope serialization:
@@ -1026,6 +1029,15 @@ func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
 			return
 		}
 	}
+	// Re-validate ownership after the wait: a preemptor displaced while parked
+	// on the victim must not force-release a lease the newer waiter may already
+	// hold. The remaining instruction-scale window between this check and the
+	// state call is fenced by the lease itself: a falsely released holder's
+	// refresh fails and cancels it with ErrPreempted, bounding any overlap to
+	// one refresh interval (the same fencing that governs remote preemptors).
+	if !c.isPending(work.scope, work.event) {
+		return
+	}
 	forcer, ok := c.state.(LockForcer)
 	assert(ok, "preempt requires a LockForcer state (validated at construction)")
 	// The force release stays bounded by the Detached Work Context so a stalled
@@ -1102,17 +1114,21 @@ func (c *Chat) releaseConcurrencySlot() {
 // default) keys by the opaque Thread ID, unchanged from prior behavior. Channel
 // scope widens serialization to the Thread's channel; a Thread whose adapter
 // reports no channel falls back to per-Thread locking rather than sharing one
-// adapter-wide key. Channel keys length-prefix every field so the mapping is
-// injective: no adapter/tenant/channel combination can collide with another.
+// adapter-wide key. Under channel scope every key carries a namespace prefix
+// and length-prefixed fields, so channel keys are injective and a fallback
+// Thread ID can never collide with a synthesized channel key.
 func (c *Chat) lockScopeKey(event *Event, ref ThreadRef) string {
-	if c.options.LockScope == LockScopeChannel && ref.Channel != "" {
-		return fmt.Sprintf("channel-scope/%d:%s/%d:%s/%d:%s",
-			len(event.Adapter), event.Adapter,
-			len(ref.Tenant), ref.Tenant,
-			len(ref.Channel), ref.Channel,
-		)
+	if c.options.LockScope != LockScopeChannel {
+		return string(event.ThreadID)
 	}
-	return string(event.ThreadID)
+	if ref.Channel == "" {
+		return fmt.Sprintf("thread-scope/%d:%s", len(event.ThreadID), event.ThreadID)
+	}
+	return fmt.Sprintf("channel-scope/%d:%s/%d:%s/%d:%s",
+		len(event.Adapter), event.Adapter,
+		len(ref.Tenant), ref.Tenant,
+		len(ref.Channel), ref.Channel,
+	)
 }
 
 // startLockRefresh extends the Lock Lease on a cadence below ThreadLockTTL so it
@@ -1232,6 +1248,15 @@ func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, lab
 	lease, outcome, err := c.pollForLock(ctx, scope, superseded)
 	switch outcome {
 	case acquireHeld:
+		// Re-check ownership after the acquire: a newer event registering while
+		// AcquireLock was in flight must win, or a superseded debounce/queue
+		// waiter would dispatch alongside the final one. Once the holder passes
+		// this check it is committed; later arrivals wait on the lock.
+		if !c.isPending(scope, event) {
+			c.releaseLock(ctx, lease, event.ThreadID)
+			c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
+			return LockLease{}, acquireSuperseded
+		}
 		c.clearPending(scope, event)
 	case acquireSuperseded:
 		// registerPending already emitted the superseded_by record; this waiter
@@ -1314,7 +1339,7 @@ func (c *Chat) joinBurstBatch(scope string, work preludeWork) (startRunner bool)
 
 // runBurstScope is the detached burst runner for one collection window: it
 // sleeps until the window closes, takes the batch, acquires the scope's Thread
-// Lock once, and runs every collected handler in arrival order under the single
+// Lock once, and runs every collected handler in join order under the single
 // hold. It owns every joined work's span.
 func (c *Chat) runBurstScope(ctx context.Context, scope string) {
 	c.burstMu.Lock()

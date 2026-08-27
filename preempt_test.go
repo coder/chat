@@ -202,6 +202,93 @@ func TestPreemptWaitsForLocalVictimBeforeDispatching(t *testing.T) {
 	}
 }
 
+func TestPreemptSupersededPreemptorDoesNotForceRelease(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot := newPreemptRuntime(t, state, adapter, &logs, func(ctx context.Context, ev *chat.Event) bool {
+		return true
+	})
+
+	firstStarted := make(chan struct{})
+	firstCancelled := make(chan struct{})
+	var mu sync.Mutex
+	var handled []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		mu.Lock()
+		handled = append(handled, ev.Event.ID)
+		mu.Unlock()
+		if ev.Event.ID == "first" {
+			close(firstStarted)
+			<-ctx.Done()
+			close(firstCancelled)
+			// Long cancellation-aware cleanup: both preemptors park on this
+			// victim, and the superseding one arrives while it sleeps.
+			time.Sleep(200 * time.Millisecond)
+			return ctx.Err()
+		}
+		return nil
+	})
+
+	if status := postEvent(t, bot, "fake", mentionEvent("first", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("first status = %d", status)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first handler did not start")
+	}
+
+	// preempt-a cancels the victim, then parks waiting for it to finish.
+	if status := postEvent(t, bot, "fake", mentionEvent("preempt-a", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("preempt-a status = %d", status)
+	}
+	select {
+	case <-firstCancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("victim was not cancelled")
+	}
+	// preempt-b supersedes preempt-a while the victim is still cleaning up.
+	if status := postEvent(t, bot, "fake", mentionEvent("preempt-b", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("preempt-b status = %d", status)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(handled)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("superseding preemptor did not dispatch")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+
+	mu.Lock()
+	got := append([]string(nil), handled...)
+	mu.Unlock()
+	if !equalStrings(got, []string{"first", "preempt-b"}) {
+		t.Fatalf("handled = %v, want [first preempt-b] (superseded preemptor never dispatches)", got)
+	}
+
+	out := logs.String()
+	if !strings.Contains(out, "chat preempt superseded") {
+		t.Fatalf("preemptor supersession not surfaced; logs:\n%s", out)
+	}
+	// The displaced preemptor must not have force released on behalf of an
+	// event that never dispatched: only preempt-b may act.
+	if strings.Contains(out, `msg="chat lock preempted" adapter=fake event_id=preempt-a`) {
+		t.Fatalf("superseded preemptor force released the lock; logs:\n%s", out)
+	}
+}
+
 func TestPreemptHookDecliningFallsBackToDrop(t *testing.T) {
 	t.Parallel()
 

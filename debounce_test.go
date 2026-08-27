@@ -283,6 +283,95 @@ func TestDebounceSleepingWaiterDrainedByShutdown(t *testing.T) {
 	}
 }
 
+// acquireGatedState wraps fakeState so a test can hold a tail's AcquireLock
+// call open and register a newer event while the acquire is in flight.
+type acquireGatedState struct {
+	*fakeState
+	mu      sync.Mutex
+	gate    chan struct{}
+	entered chan struct{}
+	armed   bool
+}
+
+func newAcquireGatedState() *acquireGatedState {
+	return &acquireGatedState{
+		fakeState: newFakeState(),
+		gate:      make(chan struct{}),
+		entered:   make(chan struct{}),
+		armed:     true,
+	}
+}
+
+func (s *acquireGatedState) AcquireLock(ctx context.Context, key string, ttl time.Duration) (chat.LockLease, bool, error) {
+	s.mu.Lock()
+	first := s.armed
+	s.armed = false
+	s.mu.Unlock()
+	if first {
+		close(s.entered)
+		<-s.gate
+	}
+	return s.fakeState.AcquireLock(ctx, key, ttl)
+}
+
+func TestDebounceWaiterDisplacedDuringAcquireDoesNotDispatch(t *testing.T) {
+	t.Parallel()
+
+	state := newAcquireGatedState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	bot := newDebounceRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
+		o.DebounceInterval = 20 * time.Millisecond
+	})
+
+	var mu sync.Mutex
+	var handled []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		mu.Lock()
+		handled = append(handled, ev.Event.ID)
+		mu.Unlock()
+		return nil
+	})
+
+	if status := postEvent(t, bot, "fake", mentionEvent("older", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("older status = %d", status)
+	}
+
+	// Hold older's post-quiet-period AcquireLock open, then register the newer
+	// event while the acquire is in flight.
+	select {
+	case <-state.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("older waiter never reached AcquireLock")
+	}
+	if status := postEvent(t, bot, "fake", mentionEvent("newer", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("newer status = %d", status)
+	}
+	close(state.gate)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(handled)
+		mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("debounce winner did not dispatch")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	time.Sleep(60 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !equalStrings(handled, []string{"newer"}) {
+		t.Fatalf("handled = %v, want only [newer]: a waiter displaced mid-acquire must not dispatch", handled)
+	}
+}
+
 func TestDebounceConstructionValidation(t *testing.T) {
 	t.Parallel()
 

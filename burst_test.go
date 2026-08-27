@@ -37,7 +37,7 @@ func newBurstRuntime(t *testing.T, state chat.State, adapter chat.Adapter, logs 
 	return bot
 }
 
-func TestBurstDispatchesCollectedBatchInArrivalOrder(t *testing.T) {
+func TestBurstDispatchesCollectedBatchInJoinOrder(t *testing.T) {
 	t.Parallel()
 
 	state := newFakeState()
@@ -56,8 +56,8 @@ func TestBurstDispatchesCollectedBatchInArrivalOrder(t *testing.T) {
 		return nil
 	})
 
-	// Three events arrive inside one 150ms collection window: the whole batch
-	// dispatches, in order, once the window closes.
+	// Three events join one 150ms collection window: the whole batch
+	// dispatches, in join order, once the window closes.
 	start := time.Now()
 	for _, id := range []string{"a", "b", "c"} {
 		if status := postEvent(t, bot, "fake", mentionEvent(id, "fake:v1:thread-1")); status != http.StatusOK {
@@ -92,7 +92,7 @@ func TestBurstDispatchesCollectedBatchInArrivalOrder(t *testing.T) {
 	got := append([]string(nil), handled...)
 	mu.Unlock()
 	if !equalStrings(got, []string{"a", "b", "c"}) {
-		t.Fatalf("handled = %v, want the full batch in arrival order [a b c]", got)
+		t.Fatalf("handled = %v, want the full batch in join order [a b c]", got)
 	}
 
 	out := logs.String()

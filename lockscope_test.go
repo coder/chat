@@ -14,7 +14,8 @@ import (
 
 // channelAdapter wraps fakeAdapter so thread ids of the form
 // "fake:v1:<channel>:<thread>" report a channel on their ThreadRef; shorter ids
-// report no channel.
+// and ids carrying the runtime's synthesized channel-key prefix (used to prove
+// fallback keys cannot collide) report no channel.
 type channelAdapter struct {
 	*fakeAdapter
 }
@@ -24,11 +25,9 @@ func (a *channelAdapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, err
 	if err != nil {
 		return ref, err
 	}
-	parts := strings.Split(string(id), ":")
-	if len(parts) >= 4 {
+	ref.Channel = ""
+	if parts := strings.Split(string(id), ":"); len(parts) >= 4 && !strings.HasPrefix(string(id), "channel-scope/") {
 		ref.Channel = parts[2]
-	} else {
-		ref.Channel = ""
 	}
 	return ref, nil
 }
@@ -244,6 +243,66 @@ func TestChannelScopeFallsBackToThreadWhenChannelEmpty(t *testing.T) {
 			t.Fatal("channelless threads shared one lock; fallback to thread scope failed")
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+func TestChannelScopeFallbackKeyCannotCollideWithChannelKey(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := &channelAdapter{fakeAdapter: newFakeAdapter("fake")}
+	var logs syncBuffer
+	bot := newLockScopeRuntime(t, state, adapter, &logs)
+
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	defer close(releaseFirst)
+	var mu sync.Mutex
+	var handled []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		mu.Lock()
+		first := len(handled) == 0
+		handled = append(handled, ev.Event.ID)
+		mu.Unlock()
+		if first {
+			close(firstStarted)
+			<-releaseFirst
+		}
+		return nil
+	})
+
+	// The first event locks the synthesized key for channel chan-a.
+	if status := postEvent(t, bot, "fake", mentionEvent("first", "fake:v1:chan-a:thread-1")); status != http.StatusOK {
+		t.Fatalf("first status = %d", status)
+	}
+	select {
+	case <-firstStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first handler did not start")
+	}
+
+	// A channelless thread whose opaque ID is exactly the synthesized channel
+	// key must not be treated as contention on chan-a.
+	collider := mentionEvent("collider", chat.ThreadID("channel-scope/4:fake/6:tenant/6:chan-a"))
+	if status := postEvent(t, bot, "fake", collider); status != http.StatusOK {
+		t.Fatalf("collider status = %d", status)
+	}
+	deadline := time.After(2 * time.Second)
+	for {
+		mu.Lock()
+		n := len(handled)
+		mu.Unlock()
+		if n >= 2 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("crafted thread id collided with the channel key; logs:\n%s", logs.String())
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if strings.Contains(logs.String(), "chat lock conflict dropped") {
+		t.Fatalf("fallback key collided with a channel key; logs:\n%s", logs.String())
 	}
 }
 

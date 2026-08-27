@@ -526,8 +526,8 @@ The runtime implements the full upstream-aligned strategy set (ADR 0012):
 - `ConcurrencyDebounce`: each new event resets a `DebounceInterval` timer; only
   the final event in a quiet period dispatches. Requires deferred dispatch.
 - `ConcurrencyBurst`: events collect for `DebounceInterval` on an idle scope,
-  then the whole batch dispatches in arrival order under one lock hold.
-  Requires deferred dispatch.
+  then the whole batch dispatches — in the order events joined the window —
+  under one lock hold. Requires deferred dispatch.
 - `ConcurrencyConcurrent`: no thread lock at all; every event dispatches in its
   own execution, bounded by `MaxConcurrent`.
 
