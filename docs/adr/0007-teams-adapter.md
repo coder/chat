@@ -120,3 +120,21 @@ Rejected for this slice. The Slack precedent is a **Single-Install Adapter**, an
 ### Implement now and verify behavior during implementation
 
 Rejected. The inbound ack/turn contract, endorsement enforcement, Markdown fidelity, `serviceUrl`/`conversation.id` persistence stability, proactive-install prerequisites, and the `msbotbuilder-go` auth implementation are documentation-only or unverified. Committing code before a spike confirms them risks building on wrong assumptions about the `msteams` channel. The decision is to design now and gate implementation on the spike.
+
+## Spike Findings
+
+A code spike of the adapter exists on the `spike/msteams-adapter` branch
+([PR #4](https://github.com/coder/chat/pull/4)). It resolved **Open Question 9**:
+
+- **`msbotbuilder-go` is not adopted.** It is rejected as unmaintained (dormant for years,
+  superseded transitive deps), confirming the assessment under Alternatives Considered.
+- **Inbound JWT/JWKS validation is standard library only.** The spike implements every
+  mandatory inbound check with `crypto/rsa` over a public key rebuilt from the JWK
+  `n`/`e`, so the otherwise zero-dependency module gains no JWT library at all —
+  `golang-jwt`/`jwx` proved unnecessary. This is a deliberate deviation from this ADR's
+  "use a maintained `golang-jwt`" note, chosen to preserve the repo's zero-dependency,
+  stdlib-direct stance (Slack/Linear precedent).
+
+The remaining Open Questions still require live validation against a real Azure Bot
+resource and Teams tenant before this ADR moves to Accepted; that validation is tracked
+in [issue #6](https://github.com/coder/chat/issues/6).
