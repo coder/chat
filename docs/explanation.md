@@ -40,6 +40,7 @@ design deliberately diverges from Vercel Chat SDK.
 | [0012](adr/0012-concurrency-strategy.md) | Concurrency strategy expansion (`drop`/`queue`/`debounce`/`concurrent` + lock scope implemented; `burst` and force/steerability staged) | Accepted (staged) |
 | [0013](adr/0013-linear-generic-comments.md) | Linear generic issue/comment participation | Accepted |
 | [0014](adr/0014-nats-state-adapter.md) | NATS JetStream state adapter | Accepted |
+| [0015](adr/0015-runtime-coordination.md) | Deferred-dispatch admission bound; cross-instance coalescing rejected for now | Proposed |
 
 ## The Short Version
 
