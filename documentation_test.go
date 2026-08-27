@@ -115,6 +115,14 @@ func TestDocumentationCoversMessageHistoryCapability(t *testing.T) {
 			},
 		},
 		{
+			path: "adapters/linear/doc.go",
+			phrases: []string{
+				"HistoryReader Optional Capability",
+				"storage-free",
+				"Thread Application State",
+			},
+		},
+		{
 			path: "types.go",
 			phrases: []string{
 				"HistoryReader is an Optional Capability",

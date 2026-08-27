@@ -479,6 +479,14 @@ type linearAPIServer struct {
 	// 429 with Retry-After before succeeding.
 	rateLimit     int
 	rateLimitSeen int
+	// History read fixtures (see history_test.go): mocked GraphQL responses keyed
+	// by operation name, recorded history requests, and knobs to throttle or block
+	// history reads.
+	historyResponses map[string]map[string]any
+	historyReqs      []historyRequest
+	historyRateLimit int
+	historyRateSeen  int
+	historyBlock     chan struct{}
 }
 
 type linearActivity struct {
@@ -568,6 +576,9 @@ func newLinearAPIServer(t *testing.T, expires int64) *linearAPIServer {
 				id := fmt.Sprintf("CMT%d", len(api.comments))
 				api.mu.Unlock()
 				writeJSON(t, w, map[string]any{"data": map[string]any{"commentCreate": map[string]any{"success": true, "comment": map[string]any{"id": id}}}})
+				return
+			}
+			if api.handleHistoryQuery(t, w, r, req) {
 				return
 			}
 			t.Fatalf("unexpected graphql query: %s", req.Query)

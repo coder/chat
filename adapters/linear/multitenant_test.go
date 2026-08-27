@@ -97,6 +97,9 @@ type linearMTServer struct {
 	exchanges map[string]int
 	// activityAuth records the bearer token of each AgentActivityCreate call.
 	activityAuth []string
+	// historyAuth records the bearer token of each AgentSessionHistory read, so
+	// history tests can prove per-tenant token resolution (see history_test.go).
+	historyAuth []string
 }
 
 func newLinearMTServer(t *testing.T) *linearMTServer {
@@ -132,6 +135,13 @@ func newLinearMTServer(t *testing.T) *linearMTServer {
 				writeJSON(t, w, map[string]any{"data": map[string]any{"agentActivityCreate": map[string]any{"success": true, "agentActivity": map[string]any{"id": id}}}})
 				return
 			}
+			if strings.Contains(req.Query, "AgentSessionHistory") {
+				api.mu.Lock()
+				api.historyAuth = append(api.historyAuth, auth)
+				api.mu.Unlock()
+				writeJSON(t, w, map[string]any{"data": map[string]any{"agentSession": map[string]any{"activities": map[string]any{"nodes": []any{}}}}})
+				return
+			}
 			t.Fatalf("unexpected graphql query: %s", req.Query)
 		default:
 			t.Fatalf("unexpected path: %s", r.URL.Path)
@@ -151,6 +161,12 @@ func (api *linearMTServer) exchangeCount(clientID string) int {
 	api.mu.Lock()
 	defer api.mu.Unlock()
 	return api.exchanges[clientID]
+}
+
+func (api *linearMTServer) historyAuths() []string {
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	return append([]string(nil), api.historyAuth...)
 }
 
 func newMultiTenantLinearRuntime(t *testing.T, api *linearMTServer, store chat.InstallStore, now time.Time) (*chat.Chat, *linear.Adapter) {
