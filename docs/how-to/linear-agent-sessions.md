@@ -136,11 +136,13 @@ if raw, ok := linear.RawMessageFrom(ev.Message); ok && raw.StopRequested() {
 ```
 
 This check only runs when the stop event reaches your handler, and events on
-one thread are serialized by the thread lock — a stop arriving while a
-handler is still running cannot preempt it (`ConcurrencyDrop` discards it on
-conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
-returns). There is no pre-lock hook, so **Linear's Stop control cannot cancel
-in-flight work through this adapter today**. What you can do: structure long
+one thread are serialized by the thread lock — by default a stop arriving
+while a handler is still running does not preempt it (`ConcurrencyDrop`
+discards it on conflict; `ConcurrencyQueue` delivers it only after the
+in-flight handler returns). Under deferred dispatch you can opt into
+preemption with the `RuntimeOptions.OnLockConflict` hook (ADR 0012): return
+true for a stop event and the in-flight handler's context is cancelled with
+`chat.ErrPreempted`. Without that hook, structure long
 sessions as short handler turns (each turn checks `StopRequested` on the
 event that started it before doing more work), or receive the stop signal
 out-of-band through your own channel (for example, your own Linear webhook

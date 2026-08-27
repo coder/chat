@@ -525,9 +525,12 @@ The runtime implements the full upstream-aligned strategy set (ADR 0012):
   superseded follow-ups are observable, never silent.
 - `ConcurrencyDebounce`: each new event resets a `DebounceInterval` timer; only
   the final event in a quiet period dispatches. Requires deferred dispatch.
+  Coalescing (like queue supersession) is per runtime instance; instances
+  sharing a state are serialized by the thread lock, not coalesced.
 - `ConcurrencyBurst`: events collect for `DebounceInterval` on an idle scope,
   then the whole batch dispatches — in the order events joined the window —
-  under one lock hold. Requires deferred dispatch.
+  under one lock hold and a fresh `DetachTimeout` that starts when the window
+  closes. Requires deferred dispatch.
 - `ConcurrencyConcurrent`: no thread lock at all; every event dispatches in its
   own execution, bounded by `MaxConcurrent`.
 
@@ -812,7 +815,6 @@ include:
   interaction response needs
 - no bundled metrics framework, exporters, or scrape endpoint (an optional no-op
   `Observer` seam is provided; OpenTelemetry stays out of the core import graph)
-
 - no built-in HTTP server or router integrations
 - no adapter marketplace/package conventions
 

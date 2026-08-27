@@ -178,6 +178,57 @@ func TestBurstWindowOpenedDuringDispatchRunsAfterCurrentBatch(t *testing.T) {
 	}
 }
 
+func TestBurstDispatchBudgetStartsWhenWindowCloses(t *testing.T) {
+	t.Parallel()
+
+	state := newFakeState()
+	adapter := newFakeAdapter("fake")
+	var logs syncBuffer
+	// The window consumes most of one DetachTimeout; the batch must still get a
+	// full execution budget of its own once the window closes.
+	bot := newBurstRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
+		o.DebounceInterval = 400 * time.Millisecond
+		o.DetachTimeout = 500 * time.Millisecond
+	})
+
+	var mu sync.Mutex
+	var handled []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		time.Sleep(60 * time.Millisecond)
+		mu.Lock()
+		handled = append(handled, ev.Event.ID)
+		mu.Unlock()
+		return nil
+	})
+
+	for _, id := range []string{"a", "b", "c"} {
+		if status := postEvent(t, bot, "fake", mentionEvent(id, "fake:v1:thread-1")); status != http.StatusOK {
+			t.Fatalf("%s status = %d", id, status)
+		}
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(handled)
+		mu.Unlock()
+		if n >= 3 {
+			break
+		}
+		select {
+		case <-deadline:
+			mu.Lock()
+			got := append([]string(nil), handled...)
+			mu.Unlock()
+			t.Fatalf("collection time consumed the batch's execution budget, handled = %v", got)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if strings.Contains(logs.String(), "chat burst batch abandoned") {
+		t.Fatalf("batch abandoned despite a fresh post-window budget; logs:\n%s", logs.String())
+	}
+}
+
 func TestBurstAbandonedWaiterSurfacesObservation(t *testing.T) {
 	t.Parallel()
 

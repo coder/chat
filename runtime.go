@@ -26,14 +26,24 @@ const (
 	// skipped through Runtime Observation, never silently. Requires deferred
 	// dispatch (a synchronous webhook cannot park an event past the platform's
 	// acknowledgement deadline).
+	//
+	// Like queue supersession, coalescing is per runtime instance: events for
+	// one scope delivered to different instances sharing a State are not
+	// superseded across instances (each instance dispatches its own final
+	// event, serialized by the Thread Lock). Cross-instance coalescing needs
+	// the wait/coalesce State-contract extension anticipated by ADR 0012.
 	ConcurrencyDebounce
 	// ConcurrencyBurst collects routed events for a scope while a
 	// DebounceInterval window is open, then dispatches the whole batch — in the
 	// order the events joined the window — under a single Thread Lock hold. No
-	// event is skipped. Join order follows each event's admission through the
-	// dispatch prelude; ordering of concurrent webhook deliveries is
-	// platform-dependent and not re-established by the runtime. Requires
-	// deferred dispatch, like ConcurrencyDebounce.
+	// event is skipped, and the batch dispatch runs under a fresh DetachTimeout
+	// starting when the window closes, so collection time never consumes the
+	// batch's execution budget. Join order follows each event's admission
+	// through the dispatch prelude; ordering of concurrent webhook deliveries
+	// is platform-dependent and not re-established by the runtime. Windows are
+	// per runtime instance (like debounce coalescing), serialized across
+	// instances by the Thread Lock. Requires deferred dispatch, like
+	// ConcurrencyDebounce.
 	ConcurrencyBurst
 	// ConcurrencyConcurrent is the explicit opt-out of per-scope serialization:
 	// every routed event dispatches immediately in its own execution, bounded by
@@ -1372,6 +1382,14 @@ func (c *Chat) runBurstScope(ctx context.Context, scope string) {
 	b.open = false
 	c.burstMu.Unlock()
 	assert(len(batch) > 0, "burst window closed with no collected events")
+
+	// The batch dispatch gets a fresh DetachTimeout starting when the window
+	// closes, so time spent collecting can never consume the execution budget
+	// of accepted batch members. Derived from baseCtx so Shutdown still cancels
+	// it.
+	dispatchCtx, dispatchCancel := context.WithTimeout(c.baseCtx, c.options.DetachTimeout)
+	defer dispatchCancel()
+	ctx = dispatchCtx
 
 	first := batch[0].event
 	lease, outcome, err := c.pollForLock(ctx, scope, nil)
