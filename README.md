@@ -519,9 +519,9 @@ chat.RuntimeOptions{
 
 Two concurrency strategies are implemented: `ConcurrencyDrop` (the default)
 acknowledges and drops events that hit a locked thread, and `ConcurrencyQueue`
-waits for the lock and runs only the most recent superseded follow-up
-(ADR 0012). Burst, debounce, force, and concurrent strategies remain proposed
-in ADR 0012 and are not implemented.
+waits for the lock and runs only the most recent superseded follow-up, with
+most-recent coalescing scoped per process (ADR 0012). Burst, debounce, force,
+and concurrent strategies remain proposed in ADR 0012 and are not implemented.
 
 Thread locks use token-owned lock leases. Release and extend operations must
 verify the token so an expired handler cannot release or extend another

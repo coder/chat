@@ -8,10 +8,10 @@ resolving per-tenant credentials at webhook time (see
 
 The boundary is deliberate:
 
-- **The runtime resolves credentials.** You provide an
+- **The runtime resolves credentials.** You provide a
   `chat.InstallStore` and the adapter calls it with the platform tenant
-  (Slack team ID, Linear organization ID) extracted from each verified
-  webhook.
+  (Slack team ID, Linear organization ID) extracted from each webhook.
+  Verification timing differs per adapter — see the caution below.
 - **You own the OAuth web flow.** The authorize redirect, callback route,
   token exchange, and install database are ordinary application HTTP routes
   and storage — the runtime does not mount them. App-user account linking and
@@ -77,8 +77,13 @@ linearAdapter, err := linear.New(ctx, linear.Options{
 ```
 
 For Slack, the signing secret is app-level and shared; signature verification
-happens before any store lookup. For Linear, the webhook secret is
-per-install and resolved through the store.
+happens before any store lookup, so the tenant your store sees came from a
+verified request. For Linear, the webhook secret is itself per-install, so
+the adapter must parse the organization ID from the **unverified** body and
+call `Lookup` first to fetch the secret it verifies with. Treat the Linear
+tenant argument as untrusted routing input: keep `Lookup` a cheap indexed
+read, do not let unknown tenants trigger expensive work, and rely on
+`ErrInstallNotFound` (not errors) for tenants you do not know.
 
 ## Wire Up Your OAuth Flow
 

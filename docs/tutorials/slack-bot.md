@@ -156,9 +156,20 @@ rendered with bold and italics. You have a running Slack bot.
 ## Step 8: Make It Yours
 
 The bot currently answers every mention but forgets the conversation
-immediately. Make it stay in the conversation. Open
-`examples/slack-hello-world/main.go` and replace the `OnNewMention` handler
-registration with:
+immediately. Make it stay in the conversation.
+
+First, let Slack deliver unmentioned channel messages to your bot — without
+this, only mentions ever reach it:
+
+1. In **OAuth & Permissions**, add the `channels:history` bot scope.
+2. In **Event Subscriptions**, add the `message.channels` bot event.
+3. Reinstall the app from **OAuth & Permissions**.
+
+(If you set up `message.im` in Step 2, you can skip this and test the
+follow-up flow in a direct message instead.)
+
+Then open `examples/slack-hello-world/main.go` and replace the
+`OnNewMention` handler registration with:
 
 ```go
 bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {

@@ -62,7 +62,7 @@ bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
 	switch ev.Interaction.ActionID {
 	case "approve":
 		_, err := ev.Thread.Post(ctx, chat.Text(
-			"Approved by <@" + ev.Interaction.Actor.ID + ">",
+			"Approved (by user " + ev.Interaction.Actor.ID + ")",
 		))
 		return err
 	default:
@@ -75,8 +75,10 @@ bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
 `ev.Interaction.Raw` preserves the full Slack payload — including
 `response_url`, `trigger_id`, action values, and view state — as the platform
 escape hatch. The normalized `Actor` carries the Slack user ID, not a display
-name (the interactivity payload does not include one); post a `<@USERID>`
-mention as above, or resolve the name yourself via the Slack API.
+name (the interactivity payload does not include one). Note that plain
+`chat.Text` is posted with Slack formatting disabled, so `<@USERID>` mention
+syntax renders literally; to render a real mention, resolve the display
+name via the Slack API or post native Block Kit content instead.
 
 Mind the acknowledgement timing: under the default `DispatchSync` mode the
 adapter writes the empty 2xx only *after* your handler returns, so a slow

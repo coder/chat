@@ -46,7 +46,11 @@ bot, err := chat.New(ctx,
   detached handler holds the thread lock, follow-up events on the same thread
   wait instead of being dropped, and only the most recent superseded follow-up
   runs. The default `chat.ConcurrencyDrop` acknowledges and drops conflicting
-  events instead.
+  events instead. Note that the queue's "only the most recent follow-up runs"
+  coalescing is **per process**: with multiple bot replicas, the shared state
+  lock still serializes handlers, but follow-ups that landed on different
+  replicas each run in turn. If superseded events must never execute twice,
+  route each thread's webhooks to one replica or make handlers idempotent.
 
 ## Write Handlers For The Detached Context
 

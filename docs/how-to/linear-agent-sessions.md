@@ -50,8 +50,8 @@ bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 Linear expects a first activity within roughly 10 seconds of a session event
 and further activity within roughly 30 minutes. Post a quick thought or
 response fast, and use [deferred dispatch](deferred-dispatch.md) for real
-work — the Linear webhook is acknowledged first and your handler runs on the
-detached context.
+work — your handler moves to a detached work context launched at ack time, so
+the webhook acknowledgement no longer waits on it.
 
 ## Use The Full Activity Surface
 
@@ -113,6 +113,14 @@ if raw, ok := linear.RawMessageFrom(ev.Message); ok && raw.StopRequested() {
 	return nil // wind down gracefully
 }
 ```
+
+This check only runs when the stop event reaches your handler, and events on
+one thread are serialized by the thread lock — a stop arriving while a
+handler is still running cannot preempt it (`ConcurrencyDrop` discards it on
+conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
+returns). To cancel active work, maintain an application-owned signal — for
+example a per-thread cancellation flag in your own store that long-running
+handlers poll.
 
 ## Generic Issue Comments
 
