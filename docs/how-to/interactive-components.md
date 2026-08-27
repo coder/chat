@@ -1,0 +1,158 @@
+# How To Handle Interactive Components
+
+Buttons and menus are Interaction Events: normalized events with their own
+single-slot hook, `OnInteraction`, riding the same dispatch spine as messages
+(see [ADR 0004](../adr/0004-interactive-components.md)). This slice covers
+Slack `block_actions` on **messages** — button clicks and menu selections on
+Block Kit content posted to a channel, thread, or DM. `block_actions`
+originating inside a modal view carry a view container without a
+channel/message anchor and are not normalized yet; they are rejected before
+routing.
+
+There is deliberately no cross-platform card DSL. Portable posting stays plain
+text and portable Markdown; platform-native rich content (Block Kit) is posted
+as an opaque payload through typed adapter access.
+
+## Configure Slack
+
+In your Slack app dashboard, under **Interactivity & Shortcuts**, enable
+interactivity and set the **Request URL** to your existing webhook:
+
+```text
+https://YOUR_PUBLIC_HOST/webhooks/slack
+```
+
+## Post Something Clickable
+
+Block Kit content is `NativeContent`, posted through the Slack adapter's
+`NativeContentPoster` capability:
+
+```go
+slackAdapter, ok := chat.AdapterAs[*slack.Adapter](bot, "slack")
+if !ok {
+	return errors.New("slack adapter is not registered")
+}
+
+ref, err := slackAdapter.ValidateThreadID(ev.Thread.ID())
+if err != nil {
+	return err
+}
+
+sent, err := slackAdapter.PostNative(ctx, ref, chat.NativeContent{
+	Adapter: "slack",
+	Payload: []any{
+		map[string]any{
+			"type": "actions",
+			"elements": []any{
+				map[string]any{
+					"type":      "button",
+					"action_id": "approve",
+					"text":      map[string]any{"type": "plain_text", "text": "Approve"},
+				},
+			},
+		},
+	},
+})
+if err != nil {
+	return err
+}
+_ = sent // sent.ID identifies the posted message, like portable posting
+```
+
+The payload is opaque to the runtime: the adapter neither validates nor
+translates it. A `NativeContent` whose `Adapter` does not match the target
+adapter is an error, never a silent portable downgrade.
+
+## Handle The Click
+
+```go
+bot.OnInteraction(func(ctx context.Context, ev *chat.InteractionEvent) error {
+	switch ev.Interaction.ActionID {
+	case "approve":
+		_, err := ev.Thread.Post(ctx, chat.Text(
+			"Approved (by user " + ev.Interaction.Actor.ID + ")",
+		))
+		return err
+	default:
+		return nil
+	}
+})
+```
+
+`ev.Interaction.Kind` is `chat.InteractionBlockAction` for this slice, and
+`ev.Interaction.Raw` preserves the full Slack payload — including
+`response_url`, `trigger_id`, action values, and view state — as the platform
+escape hatch. Be aware that the concrete payload type behind `Raw` is
+unexported: the raw-accepting adapter methods (`RespondURL`,
+`OpenModalFromRaw`) consume it directly, but reading a menu's *selected
+option value* is not yet possible without re-parsing the webhook JSON
+yourself (tracked in [#46](https://github.com/coder/chat/issues/46)). Design
+around distinct `action_id`s where you can until #46 lands.
+
+The normalized `Actor` carries the Slack user ID, not a display name (the
+interactivity payload does not include one). Note that plain `chat.Text` is
+posted with Slack formatting disabled, so `<@USERID>` mention syntax renders
+literally. For plain-text *attribution*, resolve the display name via the
+Slack API and include it as ordinary text; for a real, clickable Slack
+mention, post native Block Kit content with an `mrkdwn` text element
+containing `<@USERID>`.
+
+**Known limitation:** the interaction event identity is currently anchored on
+the message timestamp, not the individual activation — so when the same user
+activates the same `action_id` on the same message more than once within
+`DedupeTTL` (default 24 hours), only the first activation reaches
+`OnInteraction`; the rest are dropped as duplicates. This also affects a menu
+whose options share one action ID. Tracked in
+[#43](https://github.com/coder/chat/issues/43). Until it lands, give
+repeat-activatable controls distinct `action_id`s (or replace the message's
+blocks after each click).
+
+Mind the acknowledgement timing: under the default `DispatchSync` mode the
+adapter writes the empty 2xx only *after* your handler returns, so a slow
+handler can miss Slack's 3-second acknowledgement budget. Enable
+[deferred dispatch](deferred-dispatch.md) (with `chat.ConcurrencyQueue`) so
+the acknowledgement is not blocked on your handler — the handler moves to a
+detached tail launched at ack time.
+
+## Open A Modal
+
+The Slack adapter opens modals via `views.open` straight from the escape
+hatch — pass the event's `Raw` value and the adapter extracts the preserved
+`trigger_id` itself:
+
+```go
+err := slackAdapter.OpenModalFromRaw(ctx, ev.Interaction.Raw, modalView)
+```
+
+In multi-tenant mode (`InstallStore` configured), use the tenant-aware
+variant with the event's tenant so the right workspace token is resolved:
+
+```go
+err := slackAdapter.OpenModalForTenantFromRaw(ctx, ev.Event.Tenant, ev.Interaction.Raw, modalView)
+```
+
+(`OpenModal` / `OpenModalForTenant` remain for callers that already hold a
+`trigger_id` string.) The same `Raw` values work from `ev.Command.Raw` in a
+slash-command handler.
+
+Slack invalidates `trigger_id` after 3 seconds, so open modals promptly —
+and note that under `chat.ConcurrencyQueue` a queued interaction waits for
+the thread lock *before* your handler runs, so an interaction that queues
+behind a long-running handler can arrive with its `trigger_id` already
+expired and the modal open fails no matter how promptly the handler calls
+it. Keep handlers on modal-bearing threads fast, or accept that modals from
+lock-contended interactions may fail.
+
+Modal *submissions* are not part of this slice: the synchronous
+`view_submission` response (`response_action`) requires responding in the
+webhook's HTTP response body, which is incompatible with ack-then-work, so
+the adapter acknowledges `view_submission` payloads and drops them —
+application code cannot observe submitted view values today.
+
+## Respond Via response_url
+
+For ephemeral-style responses to the person who clicked:
+
+```go
+err := slackAdapter.RespondURL(ctx, ev.Interaction.Raw, chat.Text("Working on it."))
+```

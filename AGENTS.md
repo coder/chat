@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-Issues and PRDs are tracked as local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+GitHub issues (https://github.com/coder/chat/issues) are the public source of truth for roadmap and bugs; `.scratch/` holds internal working notes only. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

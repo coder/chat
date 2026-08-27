@@ -11,31 +11,64 @@ feature parity. The goal is semantic compatibility where the model maps cleanly
 to Go, with deliberate Go-shaped differences where that makes the runtime
 simpler, safer, or easier to operate.
 
-Status: the Slack-first MVP is implemented, and a narrow Linear app-actor
-slice is implemented for Linear agent sessions. The public surface is still
-early, but the core runtime, Slack adapter, Linear app-actor adapter, memory
-state, Redis and Postgres state modules, examples, and public contract tests are
-in place.
+Status: the core runtime, the Slack adapter, the Linear adapter (agent
+sessions and generic issue comments), four state backends (memory, Redis,
+Postgres, NATS JetStream), runnable examples, and public contract tests are in
+place. The public Go API surface is still early and may change.
+
+## Adapter Maturity
+
+Adapters are tiered honestly:
+
+- **`supported`** — production-grade: hardening test suites, rate-limit
+  handling, multi-tenant installs, and documentation. A reasonable default
+  choice for production.
+- **`experimental`** — implemented and tested, but no promises: the platform
+  surface, the adapter API, or both may still change.
+
+| Adapter | Tier | Notes |
+| --- | --- | --- |
+| Slack (`adapters/slack`) | `supported` | Hardening tests for rate-limit retry ([ADR 0005](docs/adr/0005-rate-limit-handling.md)), multi-tenant installs ([ADR 0006](docs/adr/0006-multi-tenant-install.md)), history read-through ([ADR 0009](docs/adr/0009-message-history.md)), and interactivity. No live end-to-end Slack test runs in CI. |
+| Linear (`adapters/linear`) | `experimental` | Fully implemented and hardened (agent sessions, generic comments, rate-limit retry, multi-tenant, history read-through), but the upstream Linear agent API is itself in developer preview and [capability gaps remain](docs/linear-agent-capabilities.md) (some operations are GraphQL-escape-hatch only). |
+| Microsoft Teams | spike | [ADR 0007](docs/adr/0007-teams-adapter.md) is a proposal gated on a live-tenant spike (draft [PR #4](https://github.com/coder/chat/pull/4), tracked in [#6](https://github.com/coder/chat/issues/6)). Not usable yet. |
+
+## Documentation
+
+Documentation follows [Diátaxis](https://diataxis.fr/). The
+[docs index](docs/README.md) maps it all; the short version:
+
+- **Tutorial**: [your first Slack bot](docs/tutorials/slack-bot.md) — zero to
+  a running bot in under 30 minutes.
+- **How-to guides**: [state backends](docs/how-to/choose-a-state-backend.md),
+  [deferred dispatch](docs/how-to/deferred-dispatch.md),
+  [slash commands](docs/how-to/slash-commands.md),
+  [interactive components](docs/how-to/interactive-components.md),
+  [multi-tenant installs](docs/how-to/multi-tenant-install.md), and
+  [Linear agent sessions](docs/how-to/linear-agent-sessions.md).
+- **Reference**: [package and API reference](docs/reference.md) (pkg.go.dev
+  pointers and per-adapter capability status).
+- **Explanation**: [architecture and design decisions](docs/explanation.md)
+  — an index over [`CONTEXT.md`](CONTEXT.md) and the [ADRs](docs/adr/).
 
 ## Vercel Chat SDK Alignment
 
-This project follows Vercel Chat SDK's conversation semantics where they fit Go,
-then narrows the MVP to a production-shaped Slack slice. The table below is the
+This project follows Vercel Chat SDK's conversation semantics where they fit
+Go, built outward from a production-shaped Slack slice. The table below is the
 quick status map for readers familiar with Vercel Chat SDK:
 
 | Vercel Chat SDK concept | Chat SDK Go status |
 | --- | --- |
 | `Chat` runtime | Implemented as `chat.Chat` |
-| Platform adapters | Slack MVP and Linear app-actor MVP implemented |
+| Platform adapters | Slack (supported) and Linear (experimental) implemented; Teams is a spike |
 | Normalized events and thread-scoped replies | Implemented |
 | `onNewMention` | Implemented as `OnNewMention` |
 | `onSubscribedMessage` | Implemented as `OnSubscribedMessage` |
 | Thread subscriptions | Implemented with explicit `Thread.Subscribe` / `Thread.Unsubscribe` |
-| Runtime state adapters | Memory, Redis, and Postgres implemented |
+| Runtime state adapters | Memory, Redis, Postgres, and NATS JetStream implemented |
 | Direct messages | Routed as implicit new mentions, then subscribed messages |
 | Ephemeral messages | Slack native ephemeral plus explicit DM fallback |
 | Thread handle reconstruction | Implemented with `Chat.Thread` |
-| AI streaming responses | Not yet implemented |
+| AI streaming responses | Deferred from core, not foreclosed (ADR 0011); long generation uses ack-then-work |
 | Slash commands | Implemented as `OnCommand` Command Events (Slack) |
 | Interactive components (buttons, menus) | Implemented as `OnInteraction` block_actions (Slack) |
 | Native rich content (Block Kit) | Implemented as `NativeContentPoster` Optional Capability (Slack) |
@@ -46,7 +79,7 @@ quick status map for readers familiar with Vercel Chat SDK:
 | Observability metrics/tracing | Optional `Observer` seam, no-op default, no OTel dependency in core |
 | Message history persistence | App-owned (Thread Application State); thin live read-through via `HistoryReader` Optional Capability (Slack, Linear) |
 | AI-message conversion helpers | Not yet implemented |
-| Multiple production adapters | Not yet implemented |
+| Multiple production adapters | Slack is the only `supported` adapter; Linear is `experimental` |
 | Middleware | Not yet implemented |
 
 ## Design Goals
@@ -56,12 +89,13 @@ quick status map for readers familiar with Vercel Chat SDK:
 - Slack-first vertical slice before claiming multi-platform portability.
 - Required runtime state for subscriptions, dedupe, and locks.
 - Memory state for tests and local development.
-- Redis or Postgres state for horizontally scaled production deployments.
+- Redis, Postgres, or NATS JetStream state for horizontally scaled production
+  deployments.
 - Thread-oriented application code: handle a message, subscribe the thread,
   reply to the thread.
 - Platform escape hatches without making raw platform structs the normal API.
 - Vercel Chat SDK behavior as the default precedent unless it is non-idiomatic
-  in Go or outside the MVP scope.
+  in Go or outside the documented scope.
 
 ## Install
 
@@ -71,13 +105,14 @@ The core module is:
 go get github.com/coder/chat
 ```
 
-Redis and Postgres state are optional and live in separate modules so
+Redis, Postgres, and NATS state are optional and live in separate modules so
 applications that only use core, Slack, or memory state do not pull production
 state dependencies:
 
 ```sh
 go get github.com/coder/chat/state/redis
 go get github.com/coder/chat/state/postgres
+go get github.com/coder/chat/state/nats
 ```
 
 Package layout:
@@ -87,6 +122,7 @@ github.com/coder/chat
 github.com/coder/chat/adapters/slack
 github.com/coder/chat/adapters/linear
 github.com/coder/chat/state/memory
+github.com/coder/chat/state/nats
 github.com/coder/chat/state/postgres
 github.com/coder/chat/state/redis
 ```
@@ -99,13 +135,15 @@ state modules, and example modules.
 Which example should you run?
 
 - Start with `examples/slack-hello-world` if you are new to the SDK or want a
-  memory-backed bot with no local infrastructure.
+  memory-backed bot with no local infrastructure. The
+  [tutorial](docs/tutorials/slack-bot.md) walks through it end to end.
 - Use `examples/linear-agent-hello-world` if you want to dogfood Linear
   app-actor agent sessions with memory state.
 - Use `examples/slack-redis-state` to try durable runtime coordination with
   Redis.
 - Use `examples/slack-postgres-state` if Postgres is already your coordination
   store.
+- Use `examples/slack-nats-state` if you already run NATS with JetStream.
 
 The memory-backed Slack example runs without local infrastructure:
 
@@ -122,11 +160,12 @@ go run ./examples/linear-agent-hello-world
 ```
 
 The state-backed Slack examples live in separate example modules so the core
-module does not pull Redis or Postgres dependencies just to build the basic
-example:
+module does not pull Redis, Postgres, or NATS dependencies just to build the
+basic example:
 
 - `examples/slack-redis-state`
 - `examples/slack-postgres-state`
+- `examples/slack-nats-state`
 
 Each state-backed example has its own `compose.yaml`, `pitchfork.toml`, and
 README with the backend URL, service startup commands, and Slack setup steps.
@@ -336,7 +375,7 @@ the Slack webhook handler and never reaches application handlers.
 
 ## Routing
 
-The MVP has two message routing hooks:
+The runtime has two message routing hooks:
 
 ```go
 bot.OnNewMention(func(context.Context, *chat.MessageEvent) error)
@@ -386,11 +425,12 @@ lock-conflict acknowledge-and-drop) but route to their own single-slot hooks:
 
 Both hooks are single-slot and no-op-when-unset, like the message hooks; an unset
 handler is still acknowledged. The platform ack is adapter-owned: the Slack adapter
-returns an empty 2xx within Slack's 3-second budget and preserves `response_url` /
-`trigger_id` on the `Raw` Platform Escape Hatch. Long command/interaction work uses
-the same `DispatchDeferred` ack-then-work primitive as messages (ADR 0002); bots
-expecting commands or clicks mid-conversation should select the `queue`
-Concurrency Strategy.
+returns an empty 2xx and preserves `response_url` / `trigger_id` on the `Raw`
+Platform Escape Hatch. Under the default synchronous dispatch the handler runs
+before that ack, so long command/interaction work should use the same
+`DispatchDeferred` ack-then-work primitive as messages (ADR 0002) to stay inside
+Slack's 3-second budget; bots expecting commands or clicks mid-conversation
+should select the `queue` Concurrency Strategy.
 
 Native command/interaction responses and Block Kit content are NOT added to
 Postable Message, which stays Plain Text + Portable Markdown. They are reached
@@ -399,9 +439,10 @@ deliberately through typed Adapter Access:
 - `chat.NativeContentPoster.PostNative` posts opaque Block Kit blocks. A
   `NativeContent` whose adapter does not match the target is an error, never a
   silent portable downgrade.
-- The Slack adapter's `OpenModal` opens a modal via `views.open` using a preserved
-  `trigger_id`. The synchronous modal `view_submission` response is deferred
-  because it is incompatible with ack-then-work.
+- The Slack adapter's `OpenModalFromRaw` (and `OpenModal` for callers holding a
+  `trigger_id`) opens a modal via `views.open` using the `trigger_id` preserved
+  on the `Raw` escape hatch. The synchronous modal `view_submission` response is
+  deferred because it is incompatible with ack-then-work.
 - The Slack adapter's `RespondURL` posts to a preserved `response_url`.
 
 ### Observability
@@ -421,8 +462,12 @@ latency is measured to handler completion.
 
 ## Dispatch And Acknowledgement
 
-MVP dispatch is synchronous and uses the inbound webhook request context.
-Long-running work should be explicitly detached or queued by application code.
+The default dispatch mode is synchronous (`DispatchSync`): handlers run on the
+inbound webhook request context before the platform acknowledgement. For
+long-running work, opt in to `DispatchDeferred` (ack-then-work, ADR 0002): the
+dedupe/lock prelude runs before the ack, then the handler runs on a detached
+work context with automatic lock lease renewal. See the
+[deferred dispatch guide](docs/how-to/deferred-dispatch.md).
 
 Once a webhook is verified and normalized into an accepted event, handler errors
 are recorded but acknowledged to the platform by default. This avoids platform
@@ -453,6 +498,10 @@ State implementations:
   separate `github.com/coder/chat/state/postgres` module
 - `state/redis`: production and horizontally scaled deployments, kept in the
   separate `github.com/coder/chat/state/redis` module
+- `state/nats`: production deployments that already run NATS with JetStream,
+  kept in the separate `github.com/coder/chat/state/nats` module
+
+The [state backend guide](docs/how-to/choose-a-state-backend.md) compares them.
 
 ## Dedupe, Locks, And Concurrency
 
@@ -469,8 +518,11 @@ chat.RuntimeOptions{
 }
 ```
 
-The MVP implements only `ConcurrencyDrop`. Queue, debounce, force, and
-concurrent strategies are future-compatible names, not MVP behavior.
+Two concurrency strategies are implemented: `ConcurrencyDrop` (the default)
+acknowledges and drops events that hit a locked thread, and `ConcurrencyQueue`
+waits for the lock and runs only the most recent superseded follow-up, with
+most-recent coalescing scoped per process (ADR 0012). Burst, debounce, force,
+and concurrent strategies remain proposed in ADR 0012 and are not implemented.
 
 Thread locks use token-owned lock leases. Release and extend operations must
 verify the token so an expired handler cannot release or extend another
@@ -481,7 +533,7 @@ observed as unhandled runtime contention and should not trigger platform retry.
 
 ## Messages
 
-The MVP outbound surface is intentionally small:
+The portable outbound surface is intentionally small:
 
 ```go
 ev.Thread.Post(ctx, chat.Text("plain text"))
@@ -494,8 +546,10 @@ platform-native rich payload. Adapters may render, translate, or degrade it.
 The Slack adapter uses Slack's `markdown_text` posting field for Markdown
 messages rather than converting CommonMark to `mrkdwn` itself.
 
-Posting returns `SentMessage` identity. Edit, delete, reactions, files, cards,
-modals, and native rich payload builders are outside the MVP.
+Posting returns `SentMessage` identity. Edit, delete, reactions, files, and
+typed rich payload builders are outside the portable surface. Platform-native
+content and Slack modal opening are reachable deliberately through typed
+adapter access (see [Command And Interaction Events](#command-and-interaction-events)).
 
 ## Ephemeral Messages
 
@@ -601,12 +655,12 @@ if !ok {
 
 Examples should prefer this helper over unchecked type assertions.
 
-## Slack MVP Status
+## Slack Adapter Status
 
-The Slack adapter is the first production-shaped adapter. The MVP
-implementation covers:
+The Slack adapter is the first `supported` adapter. The implementation covers:
 
 - single-install configuration
+- multi-tenant installs via an application-implemented `InstallStore` (ADR 0006)
 - signing secret verification
 - URL verification
 - bot identity discovery during adapter initialization
@@ -621,31 +675,50 @@ implementation covers:
   for Markdown messages
 - native ephemeral messages
 - explicit ephemeral DM fallback
+- slash commands as Command Events and `block_actions` as Interaction Events
+  (ADR 0003, ADR 0004)
+- native Block Kit posting, modal open, and `response_url` responses via typed
+  adapter access
+- Web API rate-limit retry with `Retry-After` handling, bounded backoff, and a
+  typed `RateLimited` error (ADR 0005)
+- thread history read-through via the `HistoryReader` Optional Capability
+  (ADR 0009)
 
-The adapter should use local structs for the Slack payload shapes it supports,
-preserve raw payload data as an escape hatch, and validate required fields for
-supported event types.
+The adapter uses local structs for the Slack payload shapes it supports,
+preserves raw payload data as an escape hatch, and validates required fields
+for supported event types.
 
-This is a runtime and adapter MVP, not a complete Slack product surface. The
-goal is to prove the conversation model, state coordination, and posting
-contract before adding Slack-specific product features.
+This is still not a complete Slack product surface: see
+[Intentional Gaps](#intentional-gaps) for what is deliberately absent.
 
-## Linear App-Actor MVP Status
+## Linear Adapter Status
 
-The Linear adapter is a narrow app-actor slice, not a full Linear adapter. The
-MVP implementation covers:
+The Linear adapter is `experimental`: the implementation is broad and
+hardened, but the upstream Linear agent API is itself in developer preview,
+so no production promises are made yet. The implementation covers:
 
 - single-install app-actor client credentials with granted-scope verification
+- multi-tenant installs via an application-implemented `InstallStore`, with
+  per-install webhook secrets and credentials or pre-exchanged access tokens
+  (ADR 0006)
 - webhook signing secret verification and timestamp replay checks
 - app actor and organization identity discovery during adapter initialization
 - Linear `AgentSessionEvent` created and prompted normalization, including
   assignment/delegation-created sessions emitted by Linear
+- generic issue/comment participation outside agent sessions, with a
+  thread-kind discriminator in the opaque thread ID (ADR 0013)
 - source-comment-based event identity for dedupe
-- tenant-correct opaque Linear agent session thread IDs
+- tenant-correct opaque Linear thread IDs
 - runtime self-message filtering through the discovered app actor identity
-- thread handle reconstruction for stored Linear agent session thread IDs
-- final responses as Linear agent activity responses
-- ephemeral thoughts through typed adapter access with `PostThought`
+- thread handle reconstruction for stored Linear thread IDs
+- the full agent activity surface through typed adapter access: thoughts,
+  responses, actions, elicitations, errors, and session updates with plans and
+  external URLs (ADR 0008)
+- thread history read-through via the `HistoryReader` Optional Capability,
+  reading agent-session activities and issue-comment threads (ADR 0009)
+- GraphQL rate-limit retry with a typed `RateLimited` error (ADR 0005)
+- a `GraphQL` escape hatch and a `RawMessage` escape hatch (including the
+  user-initiated stop signal)
 - plain text and portable markdown pass-through for Linear activity bodies
 - one memory-backed hello-world example with setup and dogfooding instructions
 
@@ -655,29 +728,61 @@ platform-specific behavior is exposed through narrow methods rather than a raw
 Linear client.
 
 For the tracked list of Linear agent APIs and best-practice behaviors that are
-not yet implemented, see `docs/linear-agent-capabilities.md`.
+not yet implemented, see
+[`docs/linear-agent-capabilities.md`](docs/linear-agent-capabilities.md).
 
-## Intentional MVP Gaps
+## Non-Goals
 
-These are not bugs in the MVP:
+These are deliberate design boundaries, each recorded in an ADR. Most are
+permanent ownership boundaries; streaming is the one explicitly *deferred*
+boundary — out of the core runtime today, not foreclosed forever:
+
+- **Streaming token transport in the core runtime** — [ADR 0011](docs/adr/0011-resumable-streaming.md)
+  defers token streaming and pub/sub transports out of core (without
+  foreclosing a future optional capability); long generation is ack-then-work
+  ([ADR 0002](docs/adr/0002-async-dispatch.md)) posting one finished message.
+- **LLM routing and prompt orchestration** — the runtime coordinates
+  conversations; LLM calls, prompt assembly, and generation pipelines are
+  application concerns inside handlers ([ADR 0011](docs/adr/0011-resumable-streaming.md)
+  classifies generation and stream persistence as app/LLM concerns;
+  [`CONTEXT.md`](CONTEXT.md) defines the runtime boundary).
+- **A generative-UI card DSL** — [ADR 0004](docs/adr/0004-interactive-components.md)
+  rejected a cross-platform card model as lossy; platform-native payloads ship
+  opaquely via `NativeContentPoster` instead.
+- **RAG and embeddings** — [ADR 0009](docs/adr/0009-message-history.md) keeps
+  embeddings, summaries, and RAG corpora as Thread Application State in the
+  application's own database keyed by Thread ID.
+- **Durable transcript persistence in `chat.State`** — [ADR 0009](docs/adr/0009-message-history.md)
+  rejected baking a message store into runtime state; `chat.State` stays
+  subscriptions, dedupe, and locks.
+- **App-user auth orchestration** — [ADR 0006](docs/adr/0006-multi-tenant-install.md)
+  scopes the install store to platform-tenant credentials; account linking,
+  login prompts, and OAuth web flows are Application Identity and stay
+  app-owned.
+
+## Intentional Gaps
+
+These are not bugs; they are things the current scope deliberately does not
+include:
 
 - no TypeScript API compatibility
 - no full Vercel Chat SDK feature parity
 - no multiple handlers per routing hook
 - no lazy runtime initialization
-- no full Linear adapter beyond the app-actor agent-session slice
-- no Linear personal API key, static access-token, generic comments mode, or
-  multi-tenant OAuth installation flow
-- no Linear streaming, plans, actions, reactions, history, or Markdown conversion
-- no multi-workspace Slack OAuth installation flow
+- no Linear personal API key mode, and no single-install static access token
+  (pre-exchanged access tokens are supported through the multi-tenant
+  `InstallStore`)
+- no Linear streaming, reactions, or Markdown conversion
+- no built-in OAuth web flow: authorize/callback/token-exchange routes and
+  install storage are application-owned (ADR 0006)
 - no live Slack end-to-end test in CI
-- no Slack Web API rate-limit retry/backoff policy
 - no dedicated `OnDirectMessage` hook
 - no public proactive `OpenDM`, except adapter behavior needed for explicit
   ephemeral fallback
 - no pattern handlers
 - no middleware
-- no message history APIs
+- no history persistence APIs: `HistoryReader` is a storage-free live
+  read-through, implemented by the Slack and Linear adapters
 - no thread application state APIs
 - no JSX cards, files, or typed Block Kit / Adaptive Card payload builders
   (native Block Kit content ships as an opaque payload via `NativeContentPoster`)
@@ -690,7 +795,8 @@ These are not bugs in the MVP:
   interaction response needs
 - no bundled metrics framework, exporters, or scrape endpoint (an optional no-op
   `Observer` seam is provided; OpenTelemetry stays out of the core import graph)
-- no queue, debounce, force, or concurrent lock-conflict strategies
+- no burst, debounce, force, or concurrent lock-conflict strategies (drop and
+  queue are implemented)
 - no built-in HTTP server or router integrations
 - no adapter marketplace/package conventions
 
@@ -708,7 +814,7 @@ Required test families:
 - direct-message implicit mention routing
 - self-message filtering
 - accepted, ignored, rejected, duplicate, and lock-conflict events
-- state conformance across memory, Redis, and Postgres
+- state conformance across memory, Redis, Postgres, and NATS
 - token-owned lock lease acquire, release, extend, expiry, and stale release
 - Slack signature verification and URL verification
 - Slack golden payload normalization
@@ -725,11 +831,13 @@ mise run test
 mise run test:root
 mise run test:adapters
 mise run test:examples
+mise run test:nats
 mise run test:postgres
 mise run test:redis
 ```
 
 `mise run test` is a composite task that runs the root module tests,
 `test:adapters`, and `test:examples`. The adapter-focused task also exercises
-the Redis and Postgres state modules. The Redis and Postgres state tests use
-Testcontainers for real backend coverage and skip when Docker is unavailable.
+the NATS, Redis, and Postgres state modules. The Redis and Postgres state
+tests use Testcontainers for real backend coverage and skip when Docker is
+unavailable; the NATS tests run against an embedded JetStream server.
