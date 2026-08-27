@@ -1,5 +1,7 @@
 # Chat SDK Go
 
+[![CI](https://github.com/coder/chat/actions/workflows/ci.yaml/badge.svg?branch=main)](https://github.com/coder/chat/actions/workflows/ci.yaml)
+
 Chat SDK Go is a Go-native semantic subset of Vercel Chat SDK's
 conversation runtime: adapters, normalized events, threads, subscriptions,
 state-backed dedupe, and thread-scoped replies.
