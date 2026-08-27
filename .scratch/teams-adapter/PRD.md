@@ -81,7 +81,7 @@ This slice is a single-platform vertical that proves Teams against the existing 
 - Enforce all documented checks: Bearer scheme; valid JWT; `iss == https://api.botframework.com`; `aud == bot Microsoft App ID`; validity window with 5-minute clock skew; RS256 signature against a key in the keys doc; token `serviceUrl` claim matches `Activity.serviceUrl`.
 - Enforce channel endorsement: if `msteams` requires endorsement, the signing key's `endorsements` must include `msteams` or return HTTP 403. (Exact enforcement is spike-required.)
 - Cache the JWKS keys (>=24h) and refresh on cache miss / key rotation. Never expose a config flag to disable validation. Return HTTP 403 on any validation failure.
-- Use a maintained JWT/JWKS library (current `golang-jwt` / `lestrrat-go/jwx`), not the versions pinned by `msbotbuilder-go`.
+- Implement JWT/JWKS validation with the standard library only (`crypto/rsa` over a public key rebuilt from the JWK `n`/`e`); no JWT library dependency. Resolved by the ADR 0007 spike (see its Spike Findings) — `golang-jwt`/`jwx` proved unnecessary and `msbotbuilder-go`'s pinned versions are not used.
 
 ```go
 // Illustrative shape only; not an implementation.

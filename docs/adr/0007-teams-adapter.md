@@ -30,7 +30,7 @@ Build a Teams **Platform Adapter** under `adapters/msteams` (adapter name `mstea
 The adapter will:
 
 - Expose a **Webhook Handler** at the bot messaging endpoint that decodes the inbound `Activity` as a **Supported Platform Shape** (permissive unknown-field handling), validates the inbound JWT, normalizes a `message` `Activity` into a runtime **Event**/**Message**/**Actor**, and hands it to **Runtime Dispatch**. Non-`message` activity types are **Ignored Events** in this slice; `invoke` activities are out of scope here -- Teams `invoke` is a transport that carries both command-style invokes (-> **Command Event**, ADR 0003) and card-action invokes (-> **Interaction Event**, ADR 0004).
-- Own **inbound** JWT/JWKS validation enforcing all documented checks (Bearer, valid JWT, `iss`, `aud == App ID`, validity window with 5-minute skew, RS256 against the keys doc, `serviceUrl`-claim match), plus channel endorsement (return HTTP 403 when an `msteams` activity's signing key omits the `msteams` endorsement). JWKS keys are cached (>=24h) and refreshed on rotation. There is no flag to disable validation. Validation failures return HTTP 403. Use a maintained `golang-jwt` / `lestrrat-go/jwx`, not the versions pinned by `msbotbuilder-go`.
+- Own **inbound** JWT/JWKS validation enforcing all documented checks (Bearer, valid JWT, `iss`, `aud == App ID`, validity window with 5-minute skew, RS256 against the keys doc, `serviceUrl`-claim match), plus channel endorsement (return HTTP 403 when an `msteams` activity's signing key omits the `msteams` endorsement). JWKS keys are cached (>=24h) and refreshed on rotation. There is no flag to disable validation. Validation failures return HTTP 403. JWT/JWKS validation is implemented with the standard library only (`crypto/rsa`; see Spike Findings) — no JWT library is added.
 - Own **outbound** `client_credentials` token minting (`scope=https://api.botframework.com/.default`), cached in adapter process memory and refreshed lazily before expiry. **Runtime State** is not expanded to store adapter credentials, matching the Linear app-actor token-cache decision (ADR 0001).
 - Mint an opaque **Thread ID** as a versioned serialization of the minimal `conversationReference` -- at least `{serviceUrl, conversation.id, tenantId, bot.id, channelId}` -- so out-of-webhook and proactive posting survive process restarts. `serviceUrl` is refreshed from each inbound `Activity` because Microsoft warns it can change. `ValidateThreadID` decodes this into a `ThreadRef` (`Adapter: msteams`, `Tenant: tenantId`, `Channel: conversation.id`, `Direct` from personal scope, `Raw` = stored `conversationReference`), so **Thread Handle** reconstruction works.
 - Normalize: `Event.Adapter = msteams`; `Event.Tenant = conversation.tenantId`; `Event.ID = Activity.id`; `Event.Raw = Activity` (**Platform Escape Hatch**). `Message.Text = Activity.text` with the leading bot `<at>@bot</at>` stripped; `Message.Mentioned` from `entities[]`; inbound **Actor** from `from` (**Bot Kind** human); `BotActor()` from `recipient` (**Bot Kind** bot). `OnNewMention` fires from the bot's presence in `entities[]` Mention objects, never from text matching.
@@ -124,17 +124,24 @@ Rejected. The inbound ack/turn contract, endorsement enforcement, Markdown fidel
 ## Spike Findings
 
 A code spike of the adapter exists on the `spike/msteams-adapter` branch
-([PR #4](https://github.com/coder/chat/pull/4)). It resolved **Open Question 9**:
+([PR #4](https://github.com/coder/chat/pull/4)). It resolved the SDK-adoption decision in
+**Open Question 9**:
 
 - **`msbotbuilder-go` is not adopted.** It is rejected as unmaintained (dormant for years,
   superseded transitive deps), confirming the assessment under Alternatives Considered.
 - **Inbound JWT/JWKS validation is standard library only.** The spike implements every
   mandatory inbound check with `crypto/rsa` over a public key rebuilt from the JWK
   `n`/`e`, so the otherwise zero-dependency module gains no JWT library at all —
-  `golang-jwt`/`jwx` proved unnecessary. This is a deliberate deviation from this ADR's
-  "use a maintained `golang-jwt`" note, chosen to preserve the repo's zero-dependency,
-  stdlib-direct stance (Slack/Linear precedent).
+  `golang-jwt`/`jwx` proved unnecessary. The Decision above records this stdlib-only
+  choice, which preserves the repo's zero-dependency, stdlib-direct stance (Slack/Linear
+  precedent).
+
+Q9's remaining verification steps are superseded rather than resolved: with
+`msbotbuilder-go` rejected, exercising *its* auth against a real Teams-issued token is
+moot, and validating the replacement stdlib validator against real tokens carries over
+into the live-validation checklist below.
 
 The remaining Open Questions still require live validation against a real Azure Bot
 resource and Teams tenant before this ADR moves to Accepted; that validation is tracked
-in [issue #6](https://github.com/coder/chat/issues/6).
+in `.scratch/teams-adapter/issues/01-live-tenant-validation.md` (public tracking:
+[issue #6](https://github.com/coder/chat/issues/6)).
