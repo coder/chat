@@ -64,11 +64,28 @@ func (a *Adapter) handleCommandForm(w http.ResponseWriter, r *http.Request, disp
 		return
 	}
 	if err := dispatch(r.Context(), event); err != nil {
+		if errors.Is(err, chat.ErrAdmissionRejected) {
+			// Slack does not redeliver slash commands, so a retry-inducing
+			// status would lose the invocation with only a generic Slack error
+			// shown. The shape's acknowledgement contract renders the ack body
+			// as an ephemeral message to the invoking user, so answer 200 with
+			// a truthful busy signal instead — never a silent failure, never a
+			// fake success.
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(commandBusyMessage))
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
 }
+
+// commandBusyMessage is the truthful busy signal a slash command invoker sees
+// when the runtime's Admission Bound rejects the invocation (ADR 0015). It
+// renders as the command's ephemeral response.
+const commandBusyMessage = "The bot is at capacity right now. Your command was not run — please try again in a moment."
 
 // normalizeCommand decodes and validates a slash command into a Command Event. A
 // missing required field or a cross-tenant team is a 400, like a malformed event.
@@ -226,6 +243,15 @@ func (a *Adapter) handleInteractionForm(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if err := dispatch(r.Context(), event); err != nil {
+		if errors.Is(err, chat.ErrAdmissionRejected) {
+			// Slack does not redeliver block_actions, and the shape's ack body
+			// is not rendered to the user; a non-2xx ack is the truthful
+			// signal the shape supports — Slack surfaces the failed delivery
+			// as a visible warning on the activated component, and the
+			// rejection stays observable through Runtime Observation.
+			http.Error(w, "slack runtime at capacity", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

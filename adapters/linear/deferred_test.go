@@ -38,6 +38,7 @@ func TestDeferredDispatchPostsFromDetachedTail(t *testing.T) {
 			DedupeTTL:     time.Hour,
 			ThreadLockTTL: time.Hour,
 			Dispatch:      chat.DispatchDeferred,
+			MaxDetached:   1024,
 			DetachTimeout: 5 * time.Second,
 		}),
 	)

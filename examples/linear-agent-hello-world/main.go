@@ -41,6 +41,10 @@ func main() {
 			ThreadLockTTL: 2 * time.Minute,
 			Dispatch:      chat.DispatchDeferred,
 			DetachTimeout: 5 * time.Minute,
+			// Deferred dispatch requires an Admission Bound: MaxDetached caps
+			// admitted-but-incomplete deliveries so a webhook flood cannot grow
+			// goroutines/memory without limit (ADR 0015).
+			MaxDetached: 1024,
 		}),
 	)
 	if err != nil {

@@ -20,6 +20,7 @@ func newDebounceRuntime(t *testing.T, state chat.State, adapter chat.Adapter, lo
 		Concurrency:      chat.ConcurrencyDebounce,
 		DebounceInterval: 50 * time.Millisecond,
 		Dispatch:         chat.DispatchDeferred,
+		MaxDetached:      1024,
 		DetachTimeout:    5 * time.Second,
 	}
 	for _, m := range mutate {
@@ -449,6 +450,7 @@ func TestDebounceConstructionValidation(t *testing.T) {
 			Concurrency:      chat.ConcurrencyDebounce,
 			DebounceInterval: 50 * time.Millisecond,
 			Dispatch:         chat.DispatchDeferred,
+			MaxDetached:      1024,
 			DetachTimeout:    time.Second,
 		}
 		mutate(&options)

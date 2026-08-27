@@ -63,6 +63,19 @@ bot, err := chat.New(ctx,
     follow-up is cancelled without running (it was already deduped, so it
     will not be redelivered). Size `DetachTimeout` to cover your longest
     handler *plus* the queue wait behind it.
+- `MaxDetached` (required under `DispatchDeferred`; `DefaultRuntimeOptions()`
+  sets 1024) is the admission bound from
+  [ADR 0015](../adr/0015-runtime-coordination.md): it caps
+  admitted-but-incomplete deferred deliveries — running handlers, queued and
+  debounced waiters, concurrent slot-waiters — so an event flood cannot grow
+  goroutines and retained payloads without limit. A delivery arriving at the
+  cap is rejected with `chat.ErrAdmissionRejected` **before** the ack and
+  **before** dedupe marking; the adapter maps that to a retry-inducing 503 for
+  platform-redelivered shapes (Slack Events API callbacks, Linear webhooks) and
+  a truthful busy signal for direct invocations (Slack slash commands and
+  interactivity). The optional `MaxDetachedPerTenant` additionally caps one
+  installation's share through the same rejection path. Sizing guidance lives
+  on the `MaxDetached` GoDoc.
 
 ## Write Handlers For The Detached Context
 

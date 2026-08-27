@@ -41,6 +41,7 @@ func newConcurrentRuntime(t *testing.T, state chat.State, adapter chat.Adapter, 
 		Concurrency:   chat.ConcurrencyConcurrent,
 		MaxConcurrent: 4,
 		Dispatch:      chat.DispatchDeferred,
+		MaxDetached:   1024,
 		DetachTimeout: 5 * time.Second,
 	}
 	for _, m := range mutate {

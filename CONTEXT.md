@@ -194,6 +194,10 @@ _Avoid_: Synchronous handler, fire-and-forget goroutine
 A runtime-derived context that outlives the inbound request so a deferred handler keeps working after acknowledgement; bounded by a detach timeout and cancelled by **Runtime Shutdown**.
 _Avoid_: Request context, context.Background()
 
+**Admission Bound**:
+The per-instance cap on admitted-but-incomplete deferred deliveries (`MaxDetached`, optionally `MaxDetachedPerTenant` per installation): a delivery arriving at the cap is rejected before acknowledgement and before dedupe marking with a typed signal the adapter maps to a shape-aware overload response.
+_Avoid_: Rate limit, drop policy, queue depth
+
 **Accepted Event**:
 A verified and normalized inbound event that the runtime has taken responsibility for, regardless of handler success.
 _Avoid_: Successful handler, retriable event

@@ -21,6 +21,7 @@ func newDeferredRuntime(t *testing.T, state chat.State, adapter chat.Adapter, op
 		ThreadLockTTL: time.Hour,
 		Concurrency:   chat.ConcurrencyDrop,
 		Dispatch:      chat.DispatchDeferred,
+		MaxDetached:   1024,
 		DetachTimeout: 5 * time.Second,
 	}
 	for _, opt := range opts {
@@ -505,6 +506,7 @@ func TestRuntimeConstructionValidatesDispatchAndConcurrency(t *testing.T) {
 		DedupeTTL:     time.Hour,
 		ThreadLockTTL: time.Hour,
 		Dispatch:      chat.DispatchDeferred,
+		MaxDetached:   1024,
 		DetachTimeout: 0,
 	}); err == nil {
 		t.Fatal("expected deferred dispatch without detach timeout to fail")
@@ -564,6 +566,7 @@ func TestQueueStrategyDispatchesMostRecentSupersededFollowUp(t *testing.T) {
 			ThreadLockTTL: 40 * time.Millisecond,
 			Concurrency:   chat.ConcurrencyQueue,
 			Dispatch:      chat.DispatchDeferred,
+			MaxDetached:   1024,
 			DetachTimeout: 5 * time.Second,
 		}),
 	)
@@ -708,6 +711,7 @@ func TestDeferredDispatchObservationRecords(t *testing.T) {
 			ThreadLockTTL: 40 * time.Millisecond,
 			Concurrency:   chat.ConcurrencyDrop,
 			Dispatch:      chat.DispatchDeferred,
+			MaxDetached:   1024,
 			DetachTimeout: 5 * time.Second,
 		}),
 	)
@@ -777,6 +781,7 @@ func TestDeferredHandlerCancelledOnLeaseLoss(t *testing.T) {
 			ThreadLockTTL: 100 * time.Millisecond,
 			Concurrency:   chat.ConcurrencyDrop,
 			Dispatch:      chat.DispatchDeferred,
+			MaxDetached:   1024,
 			DetachTimeout: 5 * time.Second,
 		}),
 	)

@@ -19,6 +19,7 @@ func newQueueRuntime(t *testing.T, state chat.State, adapter chat.Adapter, logs 
 		ThreadLockTTL: 40 * time.Millisecond,
 		Concurrency:   chat.ConcurrencyQueue,
 		Dispatch:      chat.DispatchDeferred,
+		MaxDetached:   1024,
 		DetachTimeout: 5 * time.Second,
 	}
 	for _, m := range mutate {
@@ -222,6 +223,7 @@ func TestQueueDropRemainsDefaultRegression(t *testing.T) {
 			DedupeTTL:     time.Hour,
 			ThreadLockTTL: time.Hour,
 			Dispatch:      chat.DispatchDeferred,
+			MaxDetached:   1024,
 			DetachTimeout: 5 * time.Second,
 		}),
 	)

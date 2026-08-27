@@ -91,6 +91,7 @@ func TestDeferredDispatchAckPrecedesHandlerWorkWithRecordingAdapter(t *testing.T
 			ThreadLockTTL: time.Hour,
 			Concurrency:   chat.ConcurrencyDrop,
 			Dispatch:      chat.DispatchDeferred,
+			MaxDetached:   1024,
 			DetachTimeout: 5 * time.Second,
 		}),
 	)

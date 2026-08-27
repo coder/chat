@@ -37,8 +37,9 @@ const (
 	// Like queue supersession, coalescing is per runtime instance: events for
 	// one scope delivered to different instances sharing a State are not
 	// superseded across instances (each instance dispatches its own final
-	// event, serialized by the Thread Lock). Cross-instance coalescing needs
-	// the wait/coalesce State-contract extension anticipated by ADR 0012.
+	// event, serialized by the Thread Lock). Per-instance supersession is the
+	// decided v0.x contract (ADR 0015); cross-instance coalescing is rejected
+	// for now behind that ADR's reopening bar.
 	ConcurrencyDebounce
 	// ConcurrencyConcurrent is the explicit opt-out of per-scope serialization:
 	// every routed event dispatches immediately in its own execution, bounded by
@@ -47,9 +48,10 @@ const (
 	ConcurrencyConcurrent
 )
 
-// The burst strategy and the force/steerability (OnLockConflict) hook from ADR
-// 0012 are staged on a separate branch pending the deferred-dispatch admission
-// and fenced-coordination design work; their names remain reserved.
+// The burst strategy and force/steerability names from ADR 0012 remain
+// reserved. Per ADR 0015, burst revives as its own PR under the Admission
+// Bound's invariants, while force/steerability is rejected pending that ADR's
+// formal-design bar.
 
 // LockScope selects what key the Thread Lock guards. The opaque Thread ID is
 // unchanged; the scope only chooses the serialization key.
@@ -94,6 +96,31 @@ type RuntimeOptions struct {
 	// ConcurrencyConcurrent. It must be positive under that strategy and is
 	// ignored otherwise.
 	MaxConcurrent int
+	// MaxDetached is the deferred-dispatch Admission Bound (ADR 0015): a
+	// per-instance cap on admitted-but-incomplete deferred deliveries.
+	// Everything a delivery retains under DispatchDeferred counts against it —
+	// running detached tails, parked queue/debounce waiters, and concurrent
+	// slot-waiters — and capacity frees only when that retention ends. A
+	// delivery arriving at the cap is rejected with ErrAdmissionRejected
+	// before acknowledgement and before dedupe marking, so a platform retry is
+	// never deduped away. It must be positive under DispatchDeferred and is
+	// ignored under DispatchSync; DefaultRuntimeOptions sets 1024.
+	//
+	// Sizing: the bound is a count, not bytes — the runtime cannot measure
+	// retained platform payloads or handler closures. Budget roughly
+	// MaxDetached x (platform payload ceiling + one goroutine stack + whatever
+	// the handler closure pins) against the instance's memory; sustained
+	// rejection is the platform-visible backpressure signal, so size the cap
+	// to be reached only under genuine overload and keep front-door rate
+	// limiting for fleet-level control.
+	MaxDetached int
+	// MaxDetachedPerTenant additionally caps any single installation's share
+	// of MaxDetached, keyed on the delivery's (adapter, tenant) installation
+	// identity (ADR 0006). It is a ceiling through the same rejection path,
+	// not a reservation: a hot tenant is capped, but no capacity is guaranteed
+	// to the others. Zero disables the ceiling; it must not be negative under
+	// DispatchDeferred and is ignored under DispatchSync.
+	MaxDetachedPerTenant int
 }
 
 func DefaultRuntimeOptions() RuntimeOptions {
@@ -104,6 +131,7 @@ func DefaultRuntimeOptions() RuntimeOptions {
 		Dispatch:      DispatchSync,
 		DetachTimeout: 0,
 		LockScope:     LockScopeThread,
+		MaxDetached:   1024,
 	}
 }
 
@@ -174,6 +202,10 @@ type Chat struct {
 	// ConcurrencyConcurrent; nil under every other strategy.
 	concurrencySlots chan struct{}
 
+	// admission is the deferred-dispatch Admission Bound (ADR 0015); nil under
+	// DispatchSync.
+	admission *admissionGate
+
 	shutdownMu   sync.Mutex
 	shutdown     bool
 	shutdownDone chan struct{}
@@ -226,6 +258,9 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 	}
 	if cfg.options.Concurrency == ConcurrencyConcurrent {
 		chat.concurrencySlots = make(chan struct{}, cfg.options.MaxConcurrent)
+	}
+	if cfg.options.Dispatch == DispatchDeferred {
+		chat.admission = newAdmissionGate(cfg.options.MaxDetached, cfg.options.MaxDetachedPerTenant)
 	}
 	for _, adapter := range cfg.adapters {
 		if adapter == nil {
@@ -292,6 +327,12 @@ func validateRuntimeOptions(options RuntimeOptions) error {
 	case DispatchDeferred:
 		if options.DetachTimeout <= 0 {
 			return errors.New("chat: detach timeout must be positive under deferred dispatch")
+		}
+		if options.MaxDetached <= 0 {
+			return errors.New("chat: max detached must be positive under deferred dispatch")
+		}
+		if options.MaxDetachedPerTenant < 0 {
+			return errors.New("chat: max detached per tenant must not be negative under deferred dispatch")
 		}
 	default:
 		return errors.New("chat: unsupported dispatch mode")
@@ -398,12 +439,28 @@ func (c *Chat) Shutdown(ctx context.Context) error {
 	c.shutdownMu.Unlock()
 	defer close(done)
 
-	// Cancel detached tails, then drain (bounded by ctx) before shutting down
-	// adapters and state.
+	// Close admission first so a delivery racing Shutdown is rejected with
+	// ErrAdmissionRejected (the platform's retry covers it) instead of being
+	// admitted into a runtime about to cancel its work. Then cancel detached
+	// tails and drain (bounded by ctx) before shutting down adapters and state.
+	//
+	// The drain waits on admission slots before the tail WaitGroup: a delivery
+	// that won the admission race is retained from admit until its tail
+	// goroutine returns, so waiting for every slot covers deliveries still in
+	// their synchronous prelude — which hold no WaitGroup count yet — and
+	// guarantees no tail is spawned (and no WaitGroup Add happens) after the
+	// slot drain completes.
+	var admissionDrained <-chan struct{}
+	if c.admission != nil {
+		admissionDrained = c.admission.close()
+	}
 	c.baseCancel()
 	var drainErr error
 	drained := make(chan struct{})
 	go func() {
+		if admissionDrained != nil {
+			<-admissionDrained
+		}
 		c.inflight.Wait()
 		close(drained)
 	}()
@@ -482,12 +539,35 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64) error
 
 // dispatchDeferred runs the prelude under the request context and, on a routed
 // event, launches the detached tail and returns so the adapter can acknowledge
-// the platform (ack-then-work).
+// the platform (ack-then-work). The Admission Bound gate runs first, before
+// any acknowledgement and before dedupe marking: a delivery rejected at the
+// cap fails fast with ErrAdmissionRejected, is never marked in Event Identity
+// (so a platform retry is not deduped away), and does no State work at all —
+// under saturation even a redelivered duplicate receives the overload
+// response, converging to the ordinary duplicate acknowledgement once
+// capacity frees (ADR 0015).
 func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64) error {
-	work, resolved, err := c.prelude(ctx, event, seq)
-	if err != nil || resolved {
+	if err := validateEvent(event); err != nil {
 		return err
 	}
+	assert(c.admission != nil, "deferred dispatch requires the admission gate")
+	release, admitted := c.admission.admit(event.Adapter, event.Tenant)
+	if !admitted {
+		spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
+		c.logger.Warn("chat deferred dispatch admission rejected", "adapter", event.Adapter, "tenant", event.Tenant, "event_id", event.ID)
+		c.safeEvent(spanCtx, ObsAdmissionRejected, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
+		c.safeEnd(span, OutcomeAdmissionRejected)
+		return fmt.Errorf("chat: deferred dispatch admission rejected for adapter %q: %w", event.Adapter, ErrAdmissionRejected)
+	}
+	work, resolved, err := c.prelude(ctx, event, seq)
+	if err != nil || resolved {
+		// The delivery retains nothing past the prelude: an errored or
+		// resolved (duplicate, dropped, ignored, unrouted) prelude frees its
+		// admission slot immediately.
+		release()
+		return err
+	}
+	work.releaseAdmission = release
 	c.startDetachedTail(work)
 	return nil
 }
@@ -520,6 +600,11 @@ type preludeWork struct {
 	// noLock is true under the concurrent strategy: no Thread Lock is taken and
 	// the run is bounded by a MaxConcurrent slot instead.
 	noLock bool
+	// releaseAdmission frees the delivery's Admission Bound slot. It is set
+	// only under DispatchDeferred and runs when the detached tail goroutine
+	// returns — not when the handler returns — so stalled cleanup (lock
+	// release, lease refresh drain) still counts as retention.
+	releaseAdmission func()
 	// span is opened in the prelude and closed by the tail, so deferred dispatch
 	// measures Ack-Then-Work latency to handler completion.
 	span DispatchSpan
@@ -807,9 +892,14 @@ func (c *Chat) routedWork(
 // superseded or abandoned waiter exits without running the handler. Concurrent
 // tails wait for a MaxConcurrent slot rather than a lock.
 func (c *Chat) startDetachedTail(work preludeWork) {
+	assert(work.releaseAdmission != nil, "detached tail requires a held admission slot")
 	tailCtx, tailCancel := context.WithTimeout(c.baseCtx, c.options.DetachTimeout)
 	c.inflight.Add(1)
 	go func() {
+		// The admission slot is held until this goroutine returns: everything
+		// the tail retains — the parked wait, the handler run, and cleanup
+		// (lock release, refresh-loop drain) — counts against MaxDetached.
+		defer work.releaseAdmission()
 		defer c.inflight.Done()
 		defer tailCancel()
 

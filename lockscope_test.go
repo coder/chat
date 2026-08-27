@@ -40,6 +40,7 @@ func newLockScopeRuntime(t *testing.T, state chat.State, adapter chat.Adapter, l
 		Concurrency:   chat.ConcurrencyDrop,
 		LockScope:     chat.LockScopeChannel,
 		Dispatch:      chat.DispatchDeferred,
+		MaxDetached:   1024,
 		DetachTimeout: 5 * time.Second,
 	}
 	for _, m := range mutate {
