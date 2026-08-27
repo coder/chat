@@ -61,7 +61,8 @@ platform-specific surfaces differ:
 | Rate-limit retry with typed `RateLimited` error | Yes | Yes |
 | Multi-tenant installs (`InstallStore`) | Yes | Yes |
 | Platform escape hatch | Raw payloads on events | `RawMessage`, `GraphQL` |
-| Agent activities (thought/action/elicitation/error/plan) | n/a | Yes |
+| Agent activities (thought/response/action/elicitation/error) | n/a | Yes |
+| Session updates (plan, external URLs) | n/a | Yes (`UpdateSession`) |
 
 For the tracked list of Linear agent APIs that are not yet wrapped in typed
 helpers, see [linear-agent-capabilities.md](linear-agent-capabilities.md).

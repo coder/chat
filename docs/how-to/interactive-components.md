@@ -3,7 +3,11 @@
 Buttons and menus are Interaction Events: normalized events with their own
 single-slot hook, `OnInteraction`, riding the same dispatch spine as messages
 (see [ADR 0004](../adr/0004-interactive-components.md)). This slice covers
-Slack `block_actions` — button clicks and menu selections.
+Slack `block_actions` on **messages** — button clicks and menu selections on
+Block Kit content posted to a channel, thread, or DM. `block_actions`
+originating inside a modal view carry a view container without a
+channel/message anchor and are not normalized yet; they are rejected before
+routing.
 
 There is deliberately no cross-platform card DSL. Portable posting stays plain
 text and portable Markdown; platform-native rich content (Block Kit) is posted
@@ -88,8 +92,10 @@ distinct `action_id`s where you can until #12 lands.
 The normalized `Actor` carries the Slack user ID, not a display name (the
 interactivity payload does not include one). Note that plain `chat.Text` is
 posted with Slack formatting disabled, so `<@USERID>` mention syntax renders
-literally; to render a real mention, resolve the display name via the Slack
-API or post native Block Kit content instead.
+literally. For plain-text *attribution*, resolve the display name via the
+Slack API and include it as ordinary text; for a real, clickable Slack
+mention, post native Block Kit content with an `mrkdwn` text element
+containing `<@USERID>`.
 
 **Known limitation:** the interaction event identity is currently anchored on
 the message timestamp, not the individual activation — so when the same user

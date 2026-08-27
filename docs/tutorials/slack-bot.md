@@ -187,8 +187,11 @@ bot.OnSubscribedMessage(func(ctx context.Context, ev *chat.MessageEvent) error {
 ```
 
 Restart the bot (`Ctrl-C`, then `go run ./examples/slack-hello-world` again)
-and mention it once more. From then on, every follow-up message in that thread
-gets echoed back — no mention required. Two things to notice:
+and mention it once more. From then on, follow-up messages in that thread get
+echoed back — no mention required. (If you type several messages faster than
+the bot replies, some may be skipped: the default concurrency strategy drops
+events that arrive while the thread's previous event is still being handled.)
+Two things to notice:
 
 - Replying never subscribes a thread. `Thread.Subscribe` is always an explicit
   decision, and it lasts until you call `Thread.Unsubscribe`.

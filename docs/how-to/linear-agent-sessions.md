@@ -149,8 +149,12 @@ the flag must be set by something outside the runtime's serialized dispatch).
 ## Generic Issue Comments
 
 The adapter also participates in plain Linear issue comments (outside agent
-sessions): a comment that @-mentions your app routes to `OnNewMention` on a
-comment-backed thread, and `Thread.Post` replies in that comment thread.
+sessions): a comment that @-mentions your app arrives on a comment-backed
+thread, and `Thread.Post` replies in that comment thread. Normal routing
+precedence applies: the mention routes to `OnNewMention` only while the
+thread is unsubscribed — in a thread you have subscribed, every comment
+(mention or not) routes to `OnSubscribedMessage`, so do not put
+mention-specific handling exclusively in `OnNewMention`.
 Agent-activity methods (`PostThought`, `UpdateSession`, ...) are rejected on
 comment threads — they only make sense inside agent sessions.
 

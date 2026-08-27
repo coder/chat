@@ -120,6 +120,9 @@ Uninstalls: delete the row; subsequent events from that tenant resolve to
 
 Thread IDs, actors, and dedupe keys all carry the platform tenant, so two
 workspaces never collide in runtime state. Thread handle reconstruction
-(`bot.Thread(ctx, threadID)`) resolves credentials for the stored tenant
-through the same install store — proactive posts work across installs without
-extra plumbing.
+(`bot.Thread(ctx, threadID)`) decodes and validates the stored ID without
+touching the install store; the credential lookup for the stored tenant
+happens when the reconstructed handle actually posts. Proactive posts work
+across installs without extra plumbing — but a successful `bot.Thread` call
+is not proof the tenant is still installed; an uninstalled tenant surfaces as
+an error from the post.
