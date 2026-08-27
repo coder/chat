@@ -63,11 +63,19 @@ bot, err := chat.New(ctx,
     follow-up is cancelled without running (it was already deduped, so it
     will not be redelivered). Size `DetachTimeout` to cover your longest
     handler *plus* the queue wait behind it.
+- `Concurrency: chat.ConcurrencyBurst` batches instead of coalescing: events
+  for a thread collect during a fixed `BurstWindow`, then run as one batch in
+  join order under a single lock hold, each member with its own
+  `DetachTimeout` budget — no accepted event is dropped. `MaxBurstBatch`
+  optionally seals a full window early; batches dispatch in seal order.
+  Batching is per process, like queue coalescing. See the
+  `chat.ConcurrencyBurst` GoDoc for the full lifecycle contract.
 - `MaxDetached` (required under `DispatchDeferred`; `DefaultRuntimeOptions()`
   sets 1024) is the admission bound from
   [ADR 0015](../adr/0015-runtime-coordination.md): it caps
   admitted-but-incomplete deferred deliveries — running handlers, queued and
-  debounced waiters, concurrent slot-waiters — so an event flood cannot grow
+  debounced waiters, concurrent slot-waiters, parked burst batch members — so
+  an event flood cannot grow
   goroutines and retained payloads without limit. A delivery arriving at the
   cap is rejected with `chat.ErrAdmissionRejected` **before** the ack and
   **before** dedupe marking; the adapter maps that to a retry-inducing 503 for

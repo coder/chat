@@ -46,12 +46,36 @@ const (
 	// MaxConcurrent. No Thread Lock is taken, so the caller accepts interleaved
 	// replies and races on Thread Application State.
 	ConcurrencyConcurrent
+	// ConcurrencyBurst collects routed events for a scope into a batch while a
+	// BurstWindow collection window is open, then dispatches the batch under a
+	// single Thread Lock hold, running every member in join order, each with
+	// its own DetachTimeout execution budget. The window is anchored at its
+	// first member's join and is never extended by later arrivals; a window
+	// reaching MaxBurstBatch seals immediately (the cap-reaching member is the
+	// batch's last member) and the next event opens a rolled window dispatched
+	// strictly after its predecessor. Batch shaping is delivery-preserving
+	// (ADR 0015): boundaries move, but an accepted member is never dropped.
+	// Requires deferred dispatch (a synchronous webhook cannot park an event
+	// past the platform's acknowledgement deadline).
+	//
+	// Parked members hold Admission Bound slots until their terminal
+	// disposition, so burst retention stays inside MaxDetached. A member whose
+	// handler returns an error does not abort its batch; losing the Lock
+	// Lease mid-batch cancels the running member (ErrPreempted) and skips the
+	// remaining members observably rather than running them unserialized.
+	// Like every deferred handler, member cancellation is cooperative: a
+	// handler that ignores its context blocks the members behind it.
+	//
+	// Like queue supersession and debounce coalescing, batching is per runtime
+	// instance (ADR 0015): events for one scope delivered to different
+	// instances sharing a State batch independently, serialized by the Thread
+	// Lock. Cross-instance coalescing is rejected for now behind that ADR's
+	// reopening bar.
+	ConcurrencyBurst
 )
 
-// The burst strategy and force/steerability names from ADR 0012 remain
-// reserved. Per ADR 0015, burst revives as its own PR under the Admission
-// Bound's invariants, while force/steerability is rejected pending that ADR's
-// formal-design bar.
+// The force/steerability names from ADR 0012 remain reserved: per ADR 0015
+// they are rejected pending that ADR's formal-design bar.
 
 // LockScope selects what key the Thread Lock guards. The opaque Thread ID is
 // unchanged; the scope only chooses the serialization key.
@@ -96,12 +120,29 @@ type RuntimeOptions struct {
 	// ConcurrencyConcurrent. It must be positive under that strategy and is
 	// ignored otherwise.
 	MaxConcurrent int
+	// BurstWindow is the ConcurrencyBurst collection window: routed events for
+	// a scope collect for this long — anchored at the window's first member,
+	// never extended by later arrivals — before dispatching as one batch. It
+	// must be positive under that strategy and is ignored otherwise. The
+	// window is collection time, not execution time: it does not consume the
+	// batch's lock-wait budget or any member's DetachTimeout.
+	BurstWindow time.Duration
+	// MaxBurstBatch caps how many members one burst batch may collect. A
+	// window reaching the cap seals immediately, with the cap-reaching member
+	// as the sealed batch's last member; the next event opens a rolled window
+	// dispatched strictly after its predecessor. The cap shapes batches — it
+	// never rejects or drops an accepted member (delivery-preserving shaping,
+	// ADR 0015) — and parked members remain bounded by MaxDetached regardless.
+	// Zero disables the cap; it must not be negative under the burst strategy
+	// and is ignored otherwise.
+	MaxBurstBatch int
 	// MaxDetached is the deferred-dispatch Admission Bound (ADR 0015): a
 	// per-instance cap on admitted-but-incomplete deferred deliveries.
 	// Everything a delivery retains under DispatchDeferred counts against it —
-	// running detached tails, parked queue/debounce waiters, and concurrent
-	// slot-waiters — and capacity frees only when that retention ends. A
-	// delivery arriving at the cap is rejected with ErrAdmissionRejected
+	// running detached tails, parked queue/debounce waiters, concurrent
+	// slot-waiters, and parked burst batch members — and capacity frees only
+	// when that retention ends. A delivery arriving at the cap is rejected
+	// with ErrAdmissionRejected
 	// before acknowledgement and before dedupe marking, so a platform retry is
 	// never deduped away. It must be positive under DispatchDeferred and is
 	// ignored under DispatchSync; DefaultRuntimeOptions sets 1024.
@@ -202,6 +243,10 @@ type Chat struct {
 	// ConcurrencyConcurrent; nil under every other strategy.
 	concurrencySlots chan struct{}
 
+	// burstMu guards burstScopes, the per-scope burst collection state.
+	burstMu     sync.Mutex
+	burstScopes map[string]*burstScope
+
 	// admission is the deferred-dispatch Admission Bound (ADR 0015); nil under
 	// DispatchSync.
 	admission *admissionGate
@@ -255,6 +300,7 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		baseCtx:          baseCtx,
 		baseCancel:       baseCancel,
 		pending:          map[string]*pendingWaiter{},
+		burstScopes:      map[string]*burstScope{},
 	}
 	if cfg.options.Concurrency == ConcurrencyConcurrent {
 		chat.concurrencySlots = make(chan struct{}, cfg.options.MaxConcurrent)
@@ -313,6 +359,16 @@ func validateRuntimeOptions(options RuntimeOptions) error {
 	case ConcurrencyConcurrent:
 		if options.MaxConcurrent <= 0 {
 			return errors.New("chat: max concurrent must be positive under the concurrent strategy")
+		}
+	case ConcurrencyBurst:
+		if options.BurstWindow <= 0 {
+			return errors.New("chat: burst window must be positive under the burst strategy")
+		}
+		if options.MaxBurstBatch < 0 {
+			return errors.New("chat: max burst batch must not be negative under the burst strategy")
+		}
+		if options.Dispatch != DispatchDeferred {
+			return errors.New("chat: burst strategy requires deferred dispatch")
 		}
 	default:
 		return errors.New("chat: unsupported concurrency strategy")
@@ -568,6 +624,15 @@ func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64) e
 		return err
 	}
 	work.releaseAdmission = release
+	if work.burst {
+		// A burst member parks in its scope's collection window instead of
+		// owning a detached tail; its admission slot travels with it and the
+		// scope's runner releases it at the member's terminal disposition, so
+		// a parked member counts against MaxDetached for as long as its
+		// payload and closure are retained.
+		c.joinBurstBatch(work)
+		return nil
+	}
 	c.startDetachedTail(work)
 	return nil
 }
@@ -600,6 +665,11 @@ type preludeWork struct {
 	// noLock is true under the concurrent strategy: no Thread Lock is taken and
 	// the run is bounded by a MaxConcurrent slot instead.
 	noLock bool
+	// burst is true under the burst strategy: the routed event joins its
+	// scope's collection window as a batch member instead of owning a detached
+	// tail; the scope's runner owns its span, its admission slot, and its
+	// terminal disposition.
+	burst bool
 	// releaseAdmission frees the delivery's Admission Bound slot. It is set
 	// only under DispatchDeferred and runs when the detached tail goroutine
 	// returns — not when the handler returns — so stalled cleanup (lock
@@ -675,8 +745,9 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64) (preludeWo
 	}
 	scope := c.lockScopeKey(event, ref)
 
-	// The prelude acquires the Thread Lock only under drop/queue; debounce
-	// always coordinates in the tail, and concurrent takes no lock at all.
+	// The prelude acquires the Thread Lock only under drop/queue; debounce and
+	// burst always coordinate in the tail (keeping ack prompt and free of lock
+	// contention), and concurrent takes no lock at all.
 	var lease LockLease
 	conflicted := false
 	switch c.options.Concurrency {
@@ -706,7 +777,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64) (preludeWo
 			}
 			conflicted = true
 		}
-	case ConcurrencyDebounce, ConcurrencyConcurrent:
+	case ConcurrencyDebounce, ConcurrencyBurst, ConcurrencyConcurrent:
 	}
 
 	// releaseOnResolve releases the lease when the event resolves here; an event
@@ -875,6 +946,15 @@ func (c *Chat) routedWork(
 
 	case ConcurrencyConcurrent:
 		work.noLock = true
+		return work, false, nil
+
+	case ConcurrencyBurst:
+		// The routed event becomes a burst member: dispatchDeferred parks it
+		// in its scope's collection window with its admission slot attached.
+		// Burst requires deferred dispatch (validated at construction), so
+		// dispatchSync never sees this flag.
+		assert(c.options.Dispatch == DispatchDeferred, "burst strategy requires deferred dispatch")
+		work.burst = true
 		return work, false, nil
 	}
 
