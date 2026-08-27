@@ -312,6 +312,62 @@ func TestSlackOpenModalRejectedInMultiTenant(t *testing.T) {
 	}
 }
 
+// TestSlackOpenModalFromRawTenantPaths proves the escape-hatch modal flow under
+// multi-tenant mode: OpenModalFromRaw (no tenant) is rejected, the ForTenant
+// variant resolves the per-workspace token and posts the preserved trigger_id,
+// an uninstalled tenant fails cleanly, and a foreign raw errors.
+func TestSlackOpenModalFromRawTenantPaths(t *testing.T) {
+	t.Parallel()
+	api := newSlackAPIServer(t)
+	now := time.Unix(1_700_000_000, 0)
+	store := newFakeInstallStore()
+	store.set("T1", chat.Install{Tenant: "T1", Credential: slack.SlackInstall{BotToken: "xoxb-T1", BotUserID: "UBOT1"}})
+	bot, adapter := mtHardenSlackRuntime(t, api, store, now)
+
+	var captured any
+	bot.OnCommand(func(ctx context.Context, ev *chat.CommandEvent) error {
+		captured = ev.Command.Raw
+		return nil
+	})
+	handler, err := bot.Webhook("slack")
+	if err != nil {
+		t.Fatalf("webhook: %v", err)
+	}
+	form := url.Values{
+		"command":    {"/deploy"},
+		"team_id":    {"T1"},
+		"channel_id": {"C1"},
+		"user_id":    {"U1"},
+		"trigger_id": {"TRIG-MT"},
+	}
+	if rec := serveSlackForm(t, handler, "secret", now, form); rec.Code != http.StatusOK {
+		t.Fatalf("command status = %d", rec.Code)
+	}
+	if captured == nil {
+		t.Fatal("command handler not called")
+	}
+
+	view := map[string]any{"type": "modal"}
+	if err := adapter.OpenModalFromRaw(context.Background(), captured, view); err == nil {
+		t.Fatal("OpenModalFromRaw must require a workspace token in multi-tenant mode")
+	}
+	if err := adapter.OpenModalForTenantFromRaw(context.Background(), "T1", captured, view); err != nil {
+		t.Fatalf("OpenModalForTenantFromRaw: %v", err)
+	}
+	api.mu.Lock()
+	gotTrigger := api.openViewTrigID
+	api.mu.Unlock()
+	if gotTrigger != "TRIG-MT" {
+		t.Fatalf("views.open trigger_id = %q, want the trigger preserved on the escape hatch", gotTrigger)
+	}
+	if err := adapter.OpenModalForTenantFromRaw(context.Background(), "T_GONE", captured, view); err == nil {
+		t.Fatal("OpenModalForTenantFromRaw must fail for an uninstalled tenant")
+	}
+	if err := adapter.OpenModalForTenantFromRaw(context.Background(), "T1", "not an escape hatch", view); err == nil {
+		t.Fatal("foreign raw must error")
+	}
+}
+
 // TestSlackMultiTenantEmptyBotTokenIsError proves an install record whose credential
 // carries no bot token is a clean error (5xx), not a silent empty-Bearer post.
 func TestSlackMultiTenantEmptyBotTokenIsError(t *testing.T) {

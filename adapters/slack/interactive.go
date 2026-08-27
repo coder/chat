@@ -381,6 +381,30 @@ func (a *Adapter) openModalWithToken(ctx context.Context, token string, triggerI
 	return nil
 }
 
+// OpenModalFromRaw opens a modal using the trigger_id preserved on a Command or
+// Interaction Event's Raw escape hatch (which must be produced by this adapter),
+// matching the RespondURL shape so application code never handles trigger_id
+// directly. Multi-tenant deployments use OpenModalForTenantFromRaw.
+func (a *Adapter) OpenModalFromRaw(ctx context.Context, raw any, view any) error {
+	triggerID := triggerIDFromRaw(raw)
+	if triggerID == "" {
+		return errors.New("slack: no trigger_id on the escape hatch")
+	}
+	return a.OpenModal(ctx, triggerID, view)
+}
+
+// OpenModalForTenantFromRaw opens a modal using the trigger_id preserved on the
+// Raw escape hatch, authorizing with the workspace resolved from the given
+// Platform Tenant, for multi-tenant deployments. Single-install callers use
+// OpenModalFromRaw.
+func (a *Adapter) OpenModalForTenantFromRaw(ctx context.Context, tenant string, raw any, view any) error {
+	triggerID := triggerIDFromRaw(raw)
+	if triggerID == "" {
+		return errors.New("slack: no trigger_id on the escape hatch")
+	}
+	return a.OpenModalForTenant(ctx, tenant, triggerID, view)
+}
+
 // RespondURL posts a portable reply to the response_url carried on a Command or
 // Interaction Event's Raw escape hatch (which must be produced by this adapter).
 // It keeps the native response path adapter-owned without widening Postable Message.
@@ -428,6 +452,23 @@ func responseURLFromRaw(raw any) string {
 		return v.ResponseURL
 	case *interactionPayload:
 		return v.ResponseURL
+	default:
+		return ""
+	}
+}
+
+// triggerIDFromRaw extracts the preserved trigger_id from a Command.Raw or
+// Interaction.Raw escape hatch.
+func triggerIDFromRaw(raw any) string {
+	switch v := raw.(type) {
+	case commandForm:
+		return v.TriggerID
+	case *commandForm:
+		return v.TriggerID
+	case interactionPayload:
+		return v.TriggerID
+	case *interactionPayload:
+		return v.TriggerID
 	default:
 		return ""
 	}
