@@ -28,7 +28,11 @@ const (
 	// acknowledgement deadline).
 	//
 	// "Final" follows the dispatch admission order on this instance: a delivery
-	// delayed in its prelude never displaces a waiter admitted after it.
+	// delayed in its prelude never displaces a waiter admitted after it. The
+	// quiet period is measured over registered waiters: a delivery stalled in
+	// its prelude (validation, dedupe, routing) for longer than the interval
+	// does not reset the running timer and dispatches separately afterwards —
+	// still serialized by the Thread Lock and never lost, but not coalesced.
 	//
 	// Like queue supersession, coalescing is per runtime instance: events for
 	// one scope delivered to different instances sharing a State are not
@@ -864,12 +868,14 @@ func (c *Chat) runLockedTail(tailCtx context.Context, work preludeWork) {
 
 	stopRefresh, leaseLost := c.startLockRefresh(tailCtx, work.lease, work.event.ThreadID, cancel)
 	err := work.run(runCtx)
-	stopRefresh()
-
-	// The lease-loss outcome follows the cancellation cause, not the handler's
-	// return convention: a handler that observes ctx.Done, shuts down cleanly,
-	// and returns nil still lost its lease.
+	// The classification snapshot is taken before stopRefresh drains the loop:
+	// a lease-loss result observed only after the handler already returned must
+	// not reclassify its completed run (and must not suppress a real handler
+	// error). Within the run, the outcome follows the cancellation cause, not
+	// the handler's return convention: a handler that observes ctx.Done, shuts
+	// down cleanly, and returns nil still lost its lease.
 	preempted := errors.Is(context.Cause(runCtx), ErrPreempted)
+	stopRefresh()
 	if preempted && tailCtx.Err() == nil {
 		c.logger.Info("chat handler preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "route", work.route)
 		c.safeEnd(work.span, OutcomePreempted, RouteAttr(work.route))
