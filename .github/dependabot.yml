@@ -1,0 +1,20 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directories:
+      - "/"
+      - "/state/nats"
+      - "/state/postgres"
+      - "/state/redis"
+      - "/examples/slack-nats-state"
+      - "/examples/slack-postgres-state"
+      - "/examples/slack-redis-state"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
