@@ -60,14 +60,16 @@ Two rules carried from the failure classes: each batch member runs with its own 
 
 ### 3. Cross-instance coalescing (issue #50): Waiter Fences on an optional `Coalescer` capability
 
-Queue supersession and debounce coalescing extend across instances through a per-scope, State-issued monotonic **Waiter Fence** — a fencing token that totally orders coalescing participants for a scope. New optional capability:
+Queue supersession and debounce coalescing extend across instances through a State-issued monotonic **Waiter Fence** — a fencing token that totally orders coalescing participants. New optional capability:
 
 ```go
-// Coalescer is an optional State capability providing per-scope fencing for
-// cross-instance waiter supersession. Fences are strictly increasing per scope.
+// Coalescer is an optional State capability providing fenced cross-instance
+// waiter supersession.
 type Coalescer interface {
-	// NextFence allocates the next fence for the scope.
-	NextFence(ctx context.Context, scope string, ttl time.Duration) (uint64, error)
+	// NextFence allocates the next fence from one non-resetting monotonic
+	// sequence shared by all scopes. Allocator state is O(1) and permanent;
+	// fences are never reissued.
+	NextFence(ctx context.Context) (uint64, error)
 	// RegisterWaiter records fence as the scope's newest waiter iff it is newer
 	// than the currently registered fence; registered=false means the caller is
 	// already superseded.
@@ -77,24 +79,26 @@ type Coalescer interface {
 }
 ```
 
-Protocol — for `queue` and `debounce` only (burst is delivery-preserving and drop is first-wins; neither coalesces by fence):
+Fences come from **one global, non-resetting sequence**, not per-scope counters: a per-scope counter would need a TTL to avoid unbounded per-scope State growth, and an expired-then-reset counter would let an old delivery's high fence outrank a fresh low one, reversing newest-wins. A global sequence keeps allocator state O(1) and permanent while per-scope *register* entries expire freely — an expired register only ever degrades to per-instance semantics, never reorders.
 
-- **Allocate early.** A routed queue/debounce delivery allocates its fence right after the lock scope is derived, before the reorderable prelude work (the dedupe mark and lock acquisition — the State round-trips where deliveries actually stall). This is the cross-instance analog of the local admission sequence: a delivery delayed in its prelude can never displace a waiter fenced after it (class 7).
-- **Register only on park.** Only a delivery that actually parks (a queue **Lock Conflict** waiter; every debounce waiter) registers its fence. Allocation alone supersedes no one — duplicates, unrouted events, and prelude failures can never displace a live waiter. `RegisterWaiter` returning false means a newer waiter already exists: the delivery skips immediately with the existing superseded observation, exactly like local supersession.
-- **Check on dispatch.** A delivery that parked (or preempted — §4) re-reads `NewestWaiter` once, after acquiring the **Thread Lock** and before running the handler. If a newer fence is registered, it skips: release the lock, emit the observable skip. A delivery that never conflicted dispatches unconditionally — the in-flight turn is never retroactively superseded, matching local queue semantics.
+Protocol — for `queue` and `debounce` under `DispatchDeferred` only. Burst is delivery-preserving and drop is first-wins, so neither coalesces by fence. Synchronous queue waits are excluded by design: a sync park is bounded only by the caller's request context, which need not carry a deadline, so no finite park horizon exists from which to derive a sound registration TTL (see Non-goals). Under deferred dispatch every park is bounded by `DetachTimeout`.
+
+- **Allocate early.** A routed queue/debounce delivery allocates its fence before the reorderable prelude work (the dedupe mark and lock acquisition — the State round-trips where deliveries actually stall). This is the cross-instance analog of the local admission sequence: a delivery delayed in its prelude can never displace a waiter fenced after it (class 7).
+- **Every routed delivery registers.** Whether it parks or acquires the **Thread Lock** immediately, a routed queue/debounce delivery registers its fence; only duplicates, unrouted events, and prelude failures never register (so they can never displace a live waiter). Registering the immediate acquirer is what closes the barging hole: a newer delivery that wins the lock race against a parked older waiter publishes its fence, so the older waiter observes it at dispatch time and skips — an older event can never dispatch *after* a newer one ran. `RegisterWaiter` returning false means a newer waiter is already registered: the delivery is superseded and skips immediately (releasing any lease it holds), exactly like local supersession.
+- **Check on dispatch — the turn-claim point.** Every registered delivery (including a preemptor — §4) re-reads `NewestWaiter` once, after acquiring the **Thread Lock** and immediately before running the handler. If a newer fence is registered, it skips: release the lock, emit the observable skip. Once a handler starts it is never retroactively superseded — a follow-up arriving after the turn is claimed queues behind it, matching local queue semantics.
 
 The guarantee split, stated honestly:
 
 - **Per-instance (unchanged, always):** most-recent-wins by admission order; superseded waiters exit promptly; skips are observable.
-- **Cross-instance (capability present):** at most the newest registered waiter per coalesced group dispatches. "Newest" is defined by fence-allocation order at the shared State, which approximates arrival order — not platform send order — under delivery skew.
-- **Capability absent:** exactly today's documented per-instance behavior — correct per instance, weaker globally, logged once at startup. Never a constructor error: per-instance coalescing is valid semantics, not a broken configuration.
+- **Cross-instance (capability present, deferred dispatch):** among registered deliveries that have not yet claimed their turn, at most the newest dispatches. "Newest" is defined by fence-allocation order at the shared State, which approximates arrival order — not platform send order — under delivery skew.
+- **Capability absent (or sync dispatch):** exactly today's documented per-instance behavior — correct per instance, weaker globally, logged once at startup. Never a constructor error: per-instance coalescing is valid semantics, not a broken configuration.
 
 Failure modes accepted and documented, not hidden:
 
-- **Register-then-never-run loses the coalesced turn.** If the instance holding the newest fence crashes, shuts down, or abandons its waiter (`DetachTimeout`) after older waiters skipped, no instance dispatches that group's turn — where per-instance coalescing would have dispatched a stale event. This is the coordination-only price: takeover would require the event payload in State (a message store — refused). Register entries carry a TTL no shorter than the strategy's maximum park horizon; expiry degrades to per-instance semantics rather than blocking dispatch. The loss window is the same class ADR 0002 already accepts for deferred dispatch (a crash after ack loses the work).
-- **Register unavailability degrades, never blocks.** A `Coalescer` error falls back to per-instance semantics for that dispatch, with an observation; events are never lost to a register outage — they serialize under the **Thread Lock** as today.
+- **Register-then-never-run loses the coalesced turn.** If the instance holding the newest fence crashes, shuts down, or abandons its delivery (`DetachTimeout`) after older waiters skipped, no instance dispatches that group's turn — where per-instance coalescing would have dispatched a stale event. This is the coordination-only price: takeover would require the event payload in State (a message store — refused). Register entries carry a TTL no shorter than the deferred park horizon (`DetachTimeout`); expiry degrades to per-instance semantics rather than blocking dispatch. The loss window is the same class ADR 0002 already accepts for deferred dispatch (a crash after ack loses the work).
+- **Backend unavailability degrades; the delivery's own cancellation does not.** A `Coalescer` backend error falls back to per-instance semantics for that dispatch, with an observation; events are never lost to a register outage — they serialize under the **Thread Lock** as today. Cancellation or deadline expiry of the delivery's own context is *not* a degradation case: it is the existing abandonment path (exit without running), so a delivery whose execution budget ended at the dispatch-time check can never "fall back" into running the handler past its budget.
 
-Backend fit — all four in-repo States implement it, and the conformance suite grows a capability section: **Memory State** (mutex + counter), **Redis State** (`INCR` + compare-greater script), **Postgres State** (per-scope row with a bigint fence + expiry), **NATS State** (KV writes whose per-key revisions provide the monotonic source). Third-party States keep compiling and keep today's semantics.
+Backend fit — all four in-repo States implement it, and the conformance suite grows a capability section: **Memory State** (atomic counter + per-scope register map with lazy expiry), **Redis State** (one persistent `INCR` key + per-scope compare-greater script with TTL), **Postgres State** (a sequence + per-scope register row with expiry), **NATS State** (the revision of a single allocation key + register keys). Third-party States keep compiling and keep today's semantics.
 
 ### 4. Preemption on a fenced Lock Takeover (`LockForcer` reshaped; issue #50's scope extension)
 
@@ -163,6 +167,7 @@ This design explicitly refuses to promise:
 - **Fleet-wide admission control.** `MaxDetached` protects one instance's memory; fleet capacity management belongs to the operator's front door.
 - **Zero-overlap — or even hard-bounded — preemption.** A strict victim-drain handoff is exactly the class-4/5 churn machine, and Go cannot forcibly stop a handler regardless: the contract is prompt cancellation and cooperative termination, nothing stronger.
 - **Admission control for synchronous dispatch.** Under `DispatchSync` the goroutine and payload exist at the HTTP layer before the runtime sees the delivery; a runtime cap cannot shed that load, and `net/http` imposes no request-concurrency limit of its own. Bounding synchronous serving is an explicit serving-layer operator contract (request limiting in front of the **Webhook Handler**), not a runtime promise.
+- **Cross-instance coalescing for synchronous dispatch.** A synchronous queue park is bounded only by the caller's request context, which need not carry a deadline, so no sound registration TTL exists for it. Sync queue keeps per-instance semantics; cross-instance coalescing pairs with `DispatchDeferred`, whose parks `DetachTimeout` bounds.
 - **State watch/notify primitives.** Coalescing is check-at-dispatch; no backend is required to push notifications.
 
 ## Consequences
@@ -170,7 +175,7 @@ This design explicitly refuses to promise:
 - Two new **Runtime Options** (`MaxDetached`, `MaxBurstBatch`), one new sentinel (`ErrAdmissionRejected`), and one observation/outcome pair for admission. `MaxDetached` positive is required under `DispatchDeferred`: existing deferred configurations built without `DefaultRuntimeOptions` must set it. Deliberate — no unbounded production default survives this ADR.
 - Adapters gain one honesty duty: map `ErrAdmissionRejected` to the platform's retry-inducing response. Sustained rejection can trip platform webhook-health policies; the alternative (acknowledging discarded work) is worse, and sizing guidance lives with the option's GoDoc.
 - The `State` interface itself does not change; both extensions are optional capabilities (ADR 0009 precedent). All four in-repo States implement both; the conformance suite grows capability sections (fence monotonicity, register-only-newer, TTL expiry, observe/take atomicity under contention, extend-churn non-defeat).
-- Queue/debounce dispatch gains up to three State round-trips (allocate, register, check) when `Coalescer` is present — the cost of global newest-wins. Absent the capability, nothing new is paid.
+- Queue/debounce dispatch under `DispatchDeferred` gains up to three State round-trips (allocate, register, check) when `Coalescer` is present — the cost of global newest-wins. Absent the capability, or under sync dispatch, nothing new is paid.
 - ADR 0012's proposed force surface is superseded by §4 (flagged per the domain docs' ADR-conflict rule). ADR 0012's status note and the CONTEXT.md glossary (**Admission Bound**, **Waiter Fence**, **Lock Takeover**) update when this ADR is accepted and implementation lands.
 - Implementation sequencing, each step its own gated PR: (1) admission bound — closes #44; (2) `Coalescer` + backends + conformance; (3) queue/debounce fence integration — closes #50; (4) burst revival; (5) fenced preemption.
 
@@ -210,6 +215,10 @@ Rejected. A globally-reset quiet period needs watch/notify primitives or polling
 
 ### Single-phase fence allocation (allocate at registration time)
 
-Rejected. Registration order diverges from arrival order when preludes stall on State round-trips: a stale delivery could fence out a newer waiter (class 7, cross-instance). Allocating before the reorderable work pins the order; registering only on park keeps duplicates and failures from superseding anyone.
+Rejected. Registration order diverges from arrival order when preludes stall on State round-trips: a stale delivery could fence out a newer waiter (class 7, cross-instance). Allocating before the reorderable work pins the order; registering only routed deliveries keeps duplicates and failures from superseding anyone.
+
+### Per-scope fence counters with TTL
+
+Rejected. A per-scope counter must either live forever — unique-scope traffic then grows Memory/Redis/Postgres coordination state permanently — or expire, and an expired-then-reset counter lets an old delivery's high fence outrank a fresh low one, reversing newest-wins exactly when a scope goes quiet. One global non-resetting sequence costs O(1) permanent state, preserves strict ordering across expiry of the per-scope register entries, and its per-scope subsequence is still strictly increasing.
 
 Cross-references: ADR 0002 (deferred dispatch, crash-loss contract), ADR 0009 (optional-capability precedent), ADR 0012 (strategy set; force surface reshaped here), ADR 0014 (NATS State mechanics reused for fences and takeover); issues #44 and #50; the PR #38 review history and PR #53 (the staged branch this ADR disposes).
