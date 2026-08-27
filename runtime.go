@@ -20,7 +20,47 @@ const (
 	// ConcurrencyQueue waits for the in-flight handler, then dispatches the most
 	// recent superseded event for the scope.
 	ConcurrencyQueue
+	// ConcurrencyDebounce coalesces rapid follow-ups: each new routed event for a
+	// scope supersedes the previous waiter and only the final event in a
+	// DebounceInterval quiet period dispatches. Superseded events are surfaced as
+	// skipped through Runtime Observation, never silently. Requires deferred
+	// dispatch (a synchronous webhook cannot park an event past the platform's
+	// acknowledgement deadline).
+	ConcurrencyDebounce
+	// ConcurrencyBurst collects routed events for a scope while a
+	// DebounceInterval window is open, then dispatches the whole batch in arrival
+	// order under a single Thread Lock hold. No event is skipped. Requires
+	// deferred dispatch, like ConcurrencyDebounce.
+	ConcurrencyBurst
+	// ConcurrencyConcurrent is the explicit opt-out of per-scope serialization:
+	// every routed event dispatches immediately in its own execution, bounded by
+	// MaxConcurrent. No Thread Lock is taken, so the caller accepts interleaved
+	// replies and races on Thread Application State.
+	ConcurrencyConcurrent
 )
+
+// LockScope selects what key the Thread Lock guards. The opaque Thread ID is
+// unchanged; the scope only chooses the serialization key.
+type LockScope int
+
+const (
+	// LockScopeThread serializes handlers per Thread. This is the default.
+	LockScopeThread LockScope = iota
+	// LockScopeChannel widens serialization from a single Thread to its whole
+	// channel, for platforms whose model requires channel-wide ordering. A
+	// Thread whose adapter reports no channel falls back to per-Thread locking
+	// rather than sharing one adapter-wide key.
+	LockScopeChannel
+)
+
+// LockConflictHook is the force/steerability hook consulted on a Lock Conflict
+// for a routed, accepted event. Returning true preempts the in-flight handler:
+// the runtime cancels the local Detached Work Context with ErrPreempted, force
+// releases the current Lock Lease through the state's LockForcer capability,
+// and dispatches the new event under a fresh lease. Returning false falls back
+// to the configured Concurrency Strategy. The hook must be fast and must not
+// block dispatch; a panicking hook is recovered and treated as false.
+type LockConflictHook func(context.Context, *Event) bool
 
 // DispatchMode selects whether the routed handler runs before or after the
 // adapter acknowledges the platform.
@@ -41,6 +81,23 @@ type RuntimeOptions struct {
 	Concurrency   ConcurrencyStrategy
 	Dispatch      DispatchMode
 	DetachTimeout time.Duration
+	// LockScope selects the Thread Lock key: per Thread (default) or per
+	// channel.
+	LockScope LockScope
+	// DebounceInterval is the quiet period (ConcurrencyDebounce) or the
+	// collection window (ConcurrencyBurst). It must be positive under those
+	// strategies and is ignored otherwise.
+	DebounceInterval time.Duration
+	// MaxConcurrent bounds simultaneous handler executions under
+	// ConcurrencyConcurrent. It must be positive under that strategy and is
+	// ignored otherwise.
+	MaxConcurrent int
+	// OnLockConflict, when set, lets a new delivery preempt an in-flight handler
+	// on a Lock Conflict instead of being dropped or queued. It requires
+	// deferred dispatch (the Detached Work Context is what makes the preempted
+	// handler cancellable), the drop or queue strategy, and a State that
+	// implements LockForcer.
+	OnLockConflict LockConflictHook
 }
 
 func DefaultRuntimeOptions() RuntimeOptions {
@@ -50,6 +107,7 @@ func DefaultRuntimeOptions() RuntimeOptions {
 		Concurrency:   ConcurrencyDrop,
 		Dispatch:      DispatchSync,
 		DetachTimeout: 0,
+		LockScope:     LockScopeThread,
 	}
 }
 
@@ -113,6 +171,19 @@ type Chat struct {
 	queueMu sync.Mutex
 	pending map[string]*Event
 
+	// burstMu guards burstScopes, the per-scope burst collection windows.
+	burstMu     sync.Mutex
+	burstScopes map[string]*burstScope
+
+	// inflightMu guards inflightCancels, the per-scope cancel functions for
+	// running lock-holding handlers, used by preemption.
+	inflightMu      sync.Mutex
+	inflightCancels map[string]*inflightCancel
+
+	// concurrencySlots bounds simultaneous handler executions under
+	// ConcurrencyConcurrent; nil under every other strategy.
+	concurrencySlots chan struct{}
+
 	shutdownMu   sync.Mutex
 	shutdown     bool
 	shutdownDone chan struct{}
@@ -150,6 +221,11 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 	if err := validateRuntimeOptions(cfg.options); err != nil {
 		return nil, err
 	}
+	if cfg.options.OnLockConflict != nil {
+		if _, ok := cfg.state.(LockForcer); !ok {
+			return nil, errors.New("chat: on-lock-conflict hook requires a State implementing LockForcer")
+		}
+	}
 
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	chat := &Chat{
@@ -162,6 +238,11 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		baseCtx:          baseCtx,
 		baseCancel:       baseCancel,
 		pending:          map[string]*Event{},
+		burstScopes:      map[string]*burstScope{},
+		inflightCancels:  map[string]*inflightCancel{},
+	}
+	if cfg.options.Concurrency == ConcurrencyConcurrent {
+		chat.concurrencySlots = make(chan struct{}, cfg.options.MaxConcurrent)
 	}
 	for _, adapter := range cfg.adapters {
 		if adapter == nil {
@@ -198,8 +279,34 @@ func validateRuntimeOptions(options RuntimeOptions) error {
 	}
 	switch options.Concurrency {
 	case ConcurrencyDrop, ConcurrencyQueue:
+	case ConcurrencyDebounce, ConcurrencyBurst:
+		if options.DebounceInterval <= 0 {
+			return errors.New("chat: debounce interval must be positive under the debounce and burst strategies")
+		}
+		if options.Dispatch != DispatchDeferred {
+			return errors.New("chat: debounce and burst strategies require deferred dispatch")
+		}
+	case ConcurrencyConcurrent:
+		if options.MaxConcurrent <= 0 {
+			return errors.New("chat: max concurrent must be positive under the concurrent strategy")
+		}
 	default:
 		return errors.New("chat: unsupported concurrency strategy")
+	}
+	switch options.LockScope {
+	case LockScopeThread, LockScopeChannel:
+	default:
+		return errors.New("chat: unsupported lock scope")
+	}
+	if options.OnLockConflict != nil {
+		if options.Dispatch != DispatchDeferred {
+			return errors.New("chat: on-lock-conflict hook requires deferred dispatch")
+		}
+		switch options.Concurrency {
+		case ConcurrencyDrop, ConcurrencyQueue:
+		default:
+			return errors.New("chat: on-lock-conflict hook requires the drop or queue strategy")
+		}
 	}
 	switch options.Dispatch {
 	case DispatchSync:
@@ -354,21 +461,30 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 // dispatchSync runs the prelude and the routed handler inline under the request
 // context, releasing the Thread Lock when the handler returns. Under the queue
 // strategy a Lock Conflict waits inline (bounded by ctx) for the in-flight
-// handler before the routed handler runs.
+// handler before the routed handler runs. Under the concurrent strategy the
+// request waits inline for a MaxConcurrent slot instead of a lock.
 func (c *Chat) dispatchSync(ctx context.Context, event *Event) error {
 	work, resolved, err := c.prelude(ctx, event)
 	if err != nil || resolved {
 		return err
 	}
-	if work.needsLock {
-		lease, outcome := c.queueForLock(ctx, work.scope, event)
-		if outcome != acquireHeld {
+	if work.noLock {
+		if !c.acquireConcurrencySlot(ctx, event) {
 			c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 			return nil
 		}
-		work.lease = lease
+		defer c.releaseConcurrencySlot()
+	} else {
+		if work.needsLock {
+			lease, outcome := c.queueForLock(ctx, work.scope, event, work.waitLabel)
+			if outcome != acquireHeld {
+				c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
+				return nil
+			}
+			work.lease = lease
+		}
+		defer c.releaseLock(ctx, work.lease, event.ThreadID)
 	}
-	defer c.releaseLock(ctx, work.lease, event.ThreadID)
 	if err := work.run(ctx); err != nil {
 		c.logger.Error("chat handler failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "route", work.route)
 		c.safeEvent(ctx, ObsHandlerError, AdapterAttr(event.Adapter), RouteAttr(work.route))
@@ -402,10 +518,26 @@ type preludeWork struct {
 	run   func(context.Context) error
 	route string
 	scope string
-	// needsLock is true when the prelude registered the event as pending under the
-	// queue strategy without holding the lock; the tail must wait for and acquire
-	// it before running the handler.
+	// needsLock is true when the prelude did not acquire the Thread Lock (a
+	// queued/preempting Lock Conflict, or the debounce strategy); the tail must
+	// wait for and acquire it before running the handler.
 	needsLock bool
+	// waitLabel names the coordination mode ("queue", "debounce", or "preempt")
+	// in wait observations so a log line names the strategy that produced it.
+	waitLabel string
+	// debounce is true when the tail must hold the event through the
+	// DebounceInterval quiet period before waiting for the lock.
+	debounce bool
+	// preempt is true when the OnLockConflict hook elected to preempt the
+	// in-flight handler: the tail cancels it locally and force releases the
+	// current Lock Lease before waiting for a fresh one.
+	preempt bool
+	// noLock is true under the concurrent strategy: no Thread Lock is taken and
+	// the run is bounded by a MaxConcurrent slot instead.
+	noLock bool
+	// burstRunner marks a scope-level burst runner tail rather than an
+	// event-level dispatch; only event and scope are set.
+	burstRunner bool
 	// span is opened in the prelude and closed by the tail, so deferred dispatch
 	// measures Ack-Then-Work latency to handler completion.
 	span DispatchSpan
@@ -465,37 +597,55 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 		return preludeWork{}, true, err
 	}
 
-	scope := string(event.ThreadID)
-	lease, acquired, err := c.state.AcquireLock(ctx, scope, c.options.ThreadLockTTL)
-	if err != nil {
-		err := finish(fmt.Errorf("chat: acquire thread lock: %w", err))
+	// The Thread ID is validated before the Thread Lock so the lock scope key
+	// (which may be channel-wide) comes from the adapter-validated ThreadRef; an
+	// event with an invalid Thread ID never touches the lock.
+	ref, validateErr := adapter.ValidateThreadID(event.ThreadID)
+	if validateErr != nil {
+		err := finish(fmt.Errorf("chat: validate event thread id: %w", validateErr))
 		c.safeEnd(span, OutcomeError)
 		return preludeWork{}, true, err
 	}
-	queued := false
-	if !acquired {
-		if c.options.Concurrency != ConcurrencyQueue {
-			accepted, err := acceptEvent()
-			if err != nil {
-				c.safeEnd(span, OutcomeError)
-				return preludeWork{}, true, err
-			}
-			if !accepted {
-				c.safeEnd(span, OutcomeDuplicate)
+	scope := c.lockScopeKey(event, ref)
+
+	// The prelude acquires the Thread Lock only under drop/queue; debounce and
+	// burst always coordinate in the tail, and concurrent takes no lock at all.
+	var lease LockLease
+	conflicted := false
+	switch c.options.Concurrency {
+	case ConcurrencyDrop, ConcurrencyQueue:
+		acquiredLease, acquired, err := c.state.AcquireLock(ctx, scope, c.options.ThreadLockTTL)
+		if err != nil {
+			err := finish(fmt.Errorf("chat: acquire thread lock: %w", err))
+			c.safeEnd(span, OutcomeError)
+			return preludeWork{}, true, err
+		}
+		lease = acquiredLease
+		if !acquired {
+			if c.options.Concurrency == ConcurrencyDrop && c.options.OnLockConflict == nil {
+				accepted, err := acceptEvent()
+				if err != nil {
+					c.safeEnd(span, OutcomeError)
+					return preludeWork{}, true, err
+				}
+				if !accepted {
+					c.safeEnd(span, OutcomeDuplicate)
+					return preludeWork{}, true, nil
+				}
+				c.logger.Info("chat lock conflict dropped", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
+				c.safeEvent(ctx, ObsLockConflict, AdapterAttr(event.Adapter))
+				c.safeEnd(span, OutcomeDroppedLockConflict)
 				return preludeWork{}, true, nil
 			}
-			c.logger.Info("chat lock conflict dropped", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
-			c.safeEvent(ctx, ObsLockConflict, AdapterAttr(event.Adapter))
-			c.safeEnd(span, OutcomeDroppedLockConflict)
-			return preludeWork{}, true, nil
+			conflicted = true
 		}
-		queued = true
+	case ConcurrencyDebounce, ConcurrencyBurst, ConcurrencyConcurrent:
 	}
 
-	// releaseOnResolve releases the lease when the event resolves here; a queued
-	// event holds no lease yet.
+	// releaseOnResolve releases the lease when the event resolves here; an event
+	// whose strategy defers lock coordination to the tail holds no lease yet.
 	releaseOnResolve := func() {
-		if queued {
+		if lease == (LockLease{}) {
 			return
 		}
 		c.releaseLock(ctx, lease, event.ThreadID)
@@ -525,10 +675,6 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 		return preludeWork{}, true, nil
 	}
 
-	ref, err := adapter.ValidateThreadID(event.ThreadID)
-	if err != nil {
-		return resolveError(fmt.Errorf("chat: validate event thread id: %w", err))
-	}
 	thread := c.newThread(adapter, ref)
 	bot := adapter.BotActor()
 
@@ -547,7 +693,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 			return resolveIgnored("no-command-handler", "chat ignored command with no handler", slog.LevelInfo)
 		}
 		cmdEvent := &CommandEvent{Event: event, Thread: thread, Command: event.Command}
-		return c.routedWork(span, event, lease, scope, queued, "command", func(ctx context.Context) error {
+		return c.routedWork(ctx, span, event, lease, scope, conflicted, "command", func(ctx context.Context) error {
 			return handler(ctx, cmdEvent)
 		}, acceptEvent, releaseOnResolve)
 
@@ -562,7 +708,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 			return resolveIgnored("no-interaction-handler", "chat ignored interaction with no handler", slog.LevelInfo)
 		}
 		intEvent := &InteractionEvent{Event: event, Thread: thread, Interaction: event.Interaction}
-		return c.routedWork(span, event, lease, scope, queued, "interaction", func(ctx context.Context) error {
+		return c.routedWork(ctx, span, event, lease, scope, conflicted, "interaction", func(ctx context.Context) error {
 			return handler(ctx, intEvent)
 		}, acceptEvent, releaseOnResolve)
 	}
@@ -583,20 +729,22 @@ func (c *Chat) prelude(ctx context.Context, event *Event) (preludeWork, bool, er
 	}
 
 	msgEvent := &MessageEvent{Event: event, Thread: thread, Message: event.Message}
-	return c.routedWork(span, event, lease, scope, queued, route, func(ctx context.Context) error {
+	return c.routedWork(ctx, span, event, lease, scope, conflicted, route, func(ctx context.Context) error {
 		return handler(ctx, msgEvent)
 	}, acceptEvent, releaseOnResolve)
 }
 
-// routedWork accepts a routed event (deduping), registers it as a queue waiter
-// when it is waiting for the lock, and builds the handler-agnostic preludeWork. A
-// duplicate or a dedupe error resolves here instead.
+// routedWork accepts a routed event (deduping), applies the Concurrency
+// Strategy's coordination decision (queue/preempt/debounce/burst/concurrent),
+// and builds the handler-agnostic preludeWork. A duplicate, a dedupe error, or
+// a dropped Lock Conflict resolves here instead.
 func (c *Chat) routedWork(
+	ctx context.Context,
 	span DispatchSpan,
 	event *Event,
 	lease LockLease,
 	scope string,
-	queued bool,
+	conflicted bool,
 	route string,
 	run func(context.Context) error,
 	acceptEvent func() (bool, error),
@@ -614,27 +762,88 @@ func (c *Chat) routedWork(
 		return preludeWork{}, true, nil
 	}
 
-	if queued {
-		c.registerPending(scope, event)
+	work := preludeWork{
+		event: event,
+		lease: lease,
+		run:   run,
+		route: route,
+		scope: scope,
+		span:  span,
 	}
 
-	return preludeWork{
-		event:     event,
-		lease:     lease,
-		run:       run,
-		route:     route,
-		scope:     scope,
-		needsLock: queued,
-		span:      span,
-	}, false, nil
+	switch c.options.Concurrency {
+	case ConcurrencyDrop, ConcurrencyQueue:
+		if !conflicted {
+			return work, false, nil
+		}
+		// A Lock Conflict on a routed, accepted event: the steerability hook may
+		// preempt the in-flight handler; otherwise the strategy decides.
+		work.needsLock = true
+		if c.options.OnLockConflict != nil && c.safeLockConflictHook(ctx, event) {
+			work.preempt = true
+			work.waitLabel = "preempt"
+			c.registerPending(scope, event, work.waitLabel)
+			return work, false, nil
+		}
+		if c.options.Concurrency == ConcurrencyQueue {
+			work.waitLabel = "queue"
+			c.registerPending(scope, event, work.waitLabel)
+			return work, false, nil
+		}
+		// Drop fallback: the hook declined, so the conflict is acknowledged and
+		// dropped exactly like the plain drop strategy.
+		c.logger.Info("chat lock conflict dropped", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
+		c.safeEvent(ctx, ObsLockConflict, AdapterAttr(event.Adapter))
+		c.safeEnd(span, OutcomeDroppedLockConflict)
+		return preludeWork{}, true, nil
+
+	case ConcurrencyDebounce:
+		work.needsLock = true
+		work.debounce = true
+		work.waitLabel = "debounce"
+		c.registerPending(scope, event, work.waitLabel)
+		return work, false, nil
+
+	case ConcurrencyBurst:
+		// The event joins its scope's collection window; the runner tail (started
+		// by at most one joining event per window chain) owns every joined span.
+		if c.joinBurstBatch(scope, work) {
+			return preludeWork{event: event, scope: scope, burstRunner: true}, false, nil
+		}
+		return preludeWork{}, true, nil
+
+	case ConcurrencyConcurrent:
+		work.noLock = true
+		return work, false, nil
+	}
+
+	// Unreachable: the strategy set is validated at construction.
+	releaseOnResolve()
+	c.safeEnd(span, OutcomeError)
+	return preludeWork{}, true, fmt.Errorf("chat: unsupported concurrency strategy %d", c.options.Concurrency)
+}
+
+// safeLockConflictHook invokes the steerability hook best-effort: a panicking
+// hook is recovered and treated as "follow the configured strategy".
+func (c *Chat) safeLockConflictHook(ctx context.Context, event *Event) (preempt bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			c.logger.Warn("chat lock conflict hook panicked", "recovered", r, "adapter", event.Adapter, "event_id", event.ID)
+			preempt = false
+		}
+	}()
+	return c.options.OnLockConflict(ctx, event)
 }
 
 // startDetachedTail runs the routed handler on the detached work context after
 // ack: the Thread Lock is held across the tail, refreshed via ExtendLock, and
 // released on exit. The context is derived from baseCtx, bounded by
 // DetachTimeout, and cancelled by Shutdown. When needsLock, the tail first waits
-// for the lock under the queue strategy; a superseded or abandoned waiter exits
-// without running the handler.
+// for the lock (after the debounce quiet period and/or preemption when the work
+// asks for them); a superseded or abandoned waiter exits without running the
+// handler. Burst runner tails coordinate their scope's batch instead of a
+// single event, and concurrent tails wait for a MaxConcurrent slot rather than
+// a lock.
 func (c *Chat) startDetachedTail(work preludeWork) {
 	tailCtx, tailCancel := context.WithTimeout(c.baseCtx, c.options.DetachTimeout)
 	c.inflight.Add(1)
@@ -642,8 +851,33 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 		defer c.inflight.Done()
 		defer tailCancel()
 
+		if work.burstRunner {
+			c.runBurstScope(tailCtx, work.scope)
+			return
+		}
+
+		if work.noLock {
+			if !c.acquireConcurrencySlot(tailCtx, work.event) {
+				c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
+				return
+			}
+			defer c.releaseConcurrencySlot()
+			c.logger.Info("chat deferred dispatch started", "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route)
+			err := work.run(tailCtx)
+			c.endHandlerRun(tailCtx, work.event, work.route, work.span, err)
+			return
+		}
+
+		if work.debounce && !c.waitDebounceQuietPeriod(tailCtx, work) {
+			return
+		}
+
+		if work.preempt {
+			c.preemptScope(tailCtx, work)
+		}
+
 		if work.needsLock {
-			lease, outcome := c.queueForLock(tailCtx, work.scope, work.event)
+			lease, outcome := c.queueForLock(tailCtx, work.scope, work.event, work.waitLabel)
 			if outcome != acquireHeld {
 				// A superseded or abandoned waiter never runs the handler.
 				c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
@@ -653,28 +887,162 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 		}
 
 		c.logger.Info("chat deferred dispatch started", "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route)
-
-		stopRefresh, leaseLost := c.startLockRefresh(tailCtx, work.lease, work.event.ThreadID)
-		err := work.run(tailCtx)
-		stopRefresh()
-
-		if err != nil {
-			if ctxErr := tailCtx.Err(); ctxErr != nil {
-				c.logger.Error("chat deferred handler timed out", "error", err, "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route)
-			} else {
-				c.logger.Error("chat handler failed", "error", err, "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route, "mode", "deferred")
-			}
-			c.safeEvent(tailCtx, ObsHandlerError, AdapterAttr(work.event.Adapter), RouteAttr(work.route))
-			c.safeEnd(work.span, OutcomeError, RouteAttr(work.route))
-		} else {
-			c.safeEnd(work.span, OutcomeHandled, RouteAttr(work.route))
-		}
-
-		// A failed release is expected (lease gone) when the context was cancelled
-		// or the refresh loop already lost the lease, so downgrade it from WARN.
-		benignRelease := tailCtx.Err() != nil || leaseLost()
-		c.releaseTailLock(tailCtx, work.lease, work.event.ThreadID, benignRelease)
+		c.runLockedTail(tailCtx, work)
 	}()
+}
+
+// runLockedTail runs a lock-holding deferred handler: the Lock Lease refresh
+// loop runs alongside, the handler is registered as preemptible when the
+// steerability hook is configured, and the lease is released on exit.
+func (c *Chat) runLockedTail(tailCtx context.Context, work preludeWork) {
+	runCtx := tailCtx
+	preemptible := c.options.OnLockConflict != nil
+	var onLeaseLost context.CancelCauseFunc
+	if preemptible {
+		var cancel context.CancelCauseFunc
+		runCtx, cancel = context.WithCancelCause(tailCtx)
+		defer cancel(nil)
+		unregister := c.registerInflightCancel(work.scope, cancel)
+		defer unregister()
+		onLeaseLost = cancel
+	}
+
+	stopRefresh, leaseLost := c.startLockRefresh(tailCtx, work.lease, work.event.ThreadID, onLeaseLost)
+	err := work.run(runCtx)
+	stopRefresh()
+
+	preempted := preemptible && errors.Is(context.Cause(runCtx), ErrPreempted)
+	if err != nil && preempted && tailCtx.Err() == nil {
+		c.logger.Info("chat handler preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "route", work.route)
+		c.safeEnd(work.span, OutcomePreempted, RouteAttr(work.route))
+	} else {
+		c.endHandlerRun(tailCtx, work.event, work.route, work.span, err)
+	}
+
+	// A failed release is expected (lease gone) when the context was cancelled,
+	// the refresh loop already lost the lease, or the lease was force released
+	// by a preempting delivery, so downgrade it from WARN.
+	benignRelease := tailCtx.Err() != nil || leaseLost() || preempted
+	c.releaseTailLock(tailCtx, work.lease, work.event.ThreadID, benignRelease)
+}
+
+// endHandlerRun closes one deferred handler run with the shared terminal
+// logging, observation, and span outcome.
+func (c *Chat) endHandlerRun(tailCtx context.Context, event *Event, route string, span DispatchSpan, err error) {
+	if err != nil {
+		if ctxErr := tailCtx.Err(); ctxErr != nil {
+			c.logger.Error("chat deferred handler timed out", "error", err, "adapter", event.Adapter, "event_id", event.ID, "route", route)
+		} else {
+			c.logger.Error("chat handler failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "route", route, "mode", "deferred")
+		}
+		c.safeEvent(tailCtx, ObsHandlerError, AdapterAttr(event.Adapter), RouteAttr(route))
+		c.safeEnd(span, OutcomeError, RouteAttr(route))
+		return
+	}
+	c.safeEnd(span, OutcomeHandled, RouteAttr(route))
+}
+
+// waitDebounceQuietPeriod holds the routed event through its DebounceInterval
+// quiet period. A newer event for the scope supersedes this one via the pending
+// registry (checked by the lock wait that follows); the wait itself only ends
+// early when the Detached Work Context does. It reports false when the wait was
+// abandoned (the span is closed here).
+func (c *Chat) waitDebounceQuietPeriod(ctx context.Context, work preludeWork) bool {
+	timer := time.NewTimer(c.options.DebounceInterval)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		c.clearPending(work.scope, work.event)
+		c.logger.Info("chat debounce wait abandoned", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "error", ctx.Err())
+		c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+// preemptScope preempts the scope's in-flight handler on behalf of a new
+// delivery: the local handler (if any) is cancelled with ErrPreempted and the
+// current Lock Lease is force released so this delivery can acquire a fresh
+// one. The token-owned lease invariant is preserved: the lease is explicitly
+// invalidated through the LockForcer capability, never deleted by presenting
+// another holder's token. A remote holder (another runtime instance) is not
+// cancelled directly; it observes the loss on its next lease refresh.
+func (c *Chat) preemptScope(ctx context.Context, work preludeWork) {
+	c.cancelInflight(work.scope)
+	forcer, ok := c.state.(LockForcer)
+	assert(ok, "preempt requires a LockForcer state (validated at construction)")
+	released, err := forcer.ForceReleaseLock(context.WithoutCancel(ctx), work.scope)
+	if err != nil {
+		// The lock wait that follows still polls; a stale lease expires at TTL.
+		c.logger.Error("chat force release thread lock failed", "error", err, "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID)
+		return
+	}
+	c.logger.Info("chat lock preempted", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "released", released)
+	c.safeEvent(ctx, ObsLockPreempted, AdapterAttr(work.event.Adapter))
+}
+
+// inflightCancel is one scope's registered preemption cancel; entries are
+// compared by identity so an old tail can never unregister a newer handler's
+// registration.
+type inflightCancel struct {
+	cancel context.CancelCauseFunc
+}
+
+// registerInflightCancel exposes a running lock-holding handler to preemption
+// and returns its identity-safe unregister.
+func (c *Chat) registerInflightCancel(scope string, cancel context.CancelCauseFunc) (unregister func()) {
+	entry := &inflightCancel{cancel: cancel}
+	c.inflightMu.Lock()
+	c.inflightCancels[scope] = entry
+	c.inflightMu.Unlock()
+	return func() {
+		c.inflightMu.Lock()
+		if c.inflightCancels[scope] == entry {
+			delete(c.inflightCancels, scope)
+		}
+		c.inflightMu.Unlock()
+	}
+}
+
+// cancelInflight cancels the scope's registered in-flight handler, if any, with
+// ErrPreempted.
+func (c *Chat) cancelInflight(scope string) {
+	c.inflightMu.Lock()
+	entry := c.inflightCancels[scope]
+	c.inflightMu.Unlock()
+	if entry != nil {
+		entry.cancel(ErrPreempted)
+	}
+}
+
+// acquireConcurrencySlot blocks until a MaxConcurrent slot frees, bounded by
+// ctx. It reports false when the wait was abandoned.
+func (c *Chat) acquireConcurrencySlot(ctx context.Context, event *Event) bool {
+	assert(c.concurrencySlots != nil, "concurrency slots are only used under the concurrent strategy")
+	select {
+	case c.concurrencySlots <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		c.logger.Info("chat concurrent slot wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
+		return false
+	}
+}
+
+func (c *Chat) releaseConcurrencySlot() {
+	<-c.concurrencySlots
+}
+
+// lockScopeKey chooses what key the Thread Lock guards. Thread scope (the
+// default) keys by the opaque Thread ID, unchanged from prior behavior. Channel
+// scope widens serialization to the Thread's channel; a Thread whose adapter
+// reports no channel falls back to per-Thread locking rather than sharing one
+// adapter-wide key.
+func (c *Chat) lockScopeKey(event *Event, ref ThreadRef) string {
+	if c.options.LockScope == LockScopeChannel && ref.Channel != "" {
+		return "channel::" + event.Adapter + "::" + ref.Tenant + "::" + ref.Channel
+	}
+	return string(event.ThreadID)
 }
 
 // startLockRefresh extends the Lock Lease on a cadence below ThreadLockTTL so it
@@ -682,7 +1050,11 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 // context.WithoutCancel so a refresh in flight at cancellation still completes.
 // stop halts the loop and blocks until it exits; leaseLost reports whether the
 // loop saw the lease already gone, and is safe to read once stop has returned.
-func (c *Chat) startLockRefresh(ctx context.Context, lease LockLease, threadID ThreadID) (stop func(), leaseLost func() bool) {
+// When onLeaseLost is non-nil, a lost lease also cancels the handler with
+// ErrPreempted: under the steerability hook a vanished lease means another
+// delivery force released it (locally or on another runtime instance), so the
+// preempted handler must actually stop.
+func (c *Chat) startLockRefresh(ctx context.Context, lease LockLease, threadID ThreadID, onLeaseLost context.CancelCauseFunc) (stop func(), leaseLost func() bool) {
 	interval := c.options.ThreadLockTTL / 2
 	if interval <= 0 {
 		interval = c.options.ThreadLockTTL
@@ -709,6 +1081,9 @@ func (c *Chat) startLockRefresh(ctx context.Context, lease LockLease, threadID T
 				if !extended {
 					c.logger.Warn("chat thread lock lease lost", "thread_id", threadID)
 					lost.Store(true)
+					if onLeaseLost != nil {
+						onLeaseLost(ErrPreempted)
+					}
 					return
 				}
 				c.logger.Debug("chat thread lock refreshed", "thread_id", threadID)
@@ -740,12 +1115,14 @@ const (
 
 // registerPending records event as the most-recent pending event for its scope,
 // superseding any earlier waiter. Recording supersession here, where the
-// displacing event's id is known, lets the record carry superseded_by.
-func (c *Chat) registerPending(scope string, event *Event) {
+// displacing event's id is known, lets the record carry superseded_by. label
+// names the coordination mode ("queue", "debounce", or "preempt") so the
+// observation names the strategy that displaced the waiter.
+func (c *Chat) registerPending(scope string, event *Event, label string) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
 	if prev := c.pending[scope]; prev != nil {
-		c.logger.Info("chat queue superseded", "adapter", prev.Adapter, "event_id", prev.ID, "thread_id", prev.ThreadID, "superseded_by", event.ID)
+		c.logger.Info("chat "+label+" superseded", "adapter", prev.Adapter, "event_id", prev.ID, "thread_id", prev.ThreadID, "superseded_by", event.ID)
 	}
 	c.pending[scope] = event
 }
@@ -754,46 +1131,194 @@ func (c *Chat) registerPending(scope string, event *Event) {
 // registered as a pending waiter for its scope, polling AcquireLock until the
 // in-flight handler releases. It returns acquireSuperseded if a newer follow-up
 // displaced this waiter, acquireAbandoned if ctx ended, acquireFailed on an
-// AcquireLock error, or the lease (acquireHeld) once acquired.
-func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event) (LockLease, acquireOutcome) {
+// AcquireLock error, or the lease (acquireHeld) once acquired. label names the
+// coordination mode in the wait observations.
+func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, label string) (LockLease, acquireOutcome) {
+	superseded := func() bool {
+		c.queueMu.Lock()
+		defer c.queueMu.Unlock()
+		return c.pending[scope] != event
+	}
+	lease, outcome, err := c.pollForLock(ctx, scope, superseded)
+	switch outcome {
+	case acquireHeld:
+		c.clearPending(scope, event)
+	case acquireSuperseded:
+		// registerPending already emitted the superseded_by record; this waiter
+		// just stops.
+		c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
+	case acquireAbandoned:
+		c.clearPending(scope, event)
+		c.logger.Info("chat "+label+" wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
+	case acquireFailed:
+		c.clearPending(scope, event)
+		c.logger.Error("chat "+label+" acquire lock failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
+	}
+	return lease, outcome
+}
+
+// pollForLock polls AcquireLock until it is held, the optional superseded check
+// trips, ctx ends, or the state fails. Waiters poll because State does not
+// signal release.
+func (c *Chat) pollForLock(ctx context.Context, scope string, superseded func() bool) (LockLease, acquireOutcome, error) {
 	ticker := time.NewTicker(c.queuePollInterval())
 	defer ticker.Stop()
-	abandon := func() (LockLease, acquireOutcome) {
-		c.clearPending(scope, event)
-		c.logger.Info("chat queue wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
-		return LockLease{}, acquireAbandoned
-	}
 	for {
-		c.queueMu.Lock()
-		superseded := c.pending[scope] != event
-		c.queueMu.Unlock()
-		if superseded {
-			// registerPending already emitted the superseded_by record; this waiter
-			// just stops.
-			c.logger.Debug("chat queue waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
-			return LockLease{}, acquireSuperseded
+		if superseded != nil && superseded() {
+			return LockLease{}, acquireSuperseded, nil
 		}
 
 		lease, acquired, err := c.state.AcquireLock(ctx, scope, c.options.ThreadLockTTL)
 		if err != nil {
 			if ctx.Err() != nil {
-				return abandon()
+				return LockLease{}, acquireAbandoned, ctx.Err()
 			}
-			c.clearPending(scope, event)
-			c.logger.Error("chat queue acquire lock failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
-			return LockLease{}, acquireFailed
+			return LockLease{}, acquireFailed, err
 		}
 		if acquired {
-			c.clearPending(scope, event)
-			return lease, acquireHeld
+			return lease, acquireHeld, nil
 		}
 
 		select {
 		case <-ctx.Done():
-			return abandon()
+			return LockLease{}, acquireAbandoned, ctx.Err()
 		case <-ticker.C:
 		}
 	}
+}
+
+// burstScope is one scope's burst collection state: the currently open window
+// (if any) and whether a runner tail owns the scope. runnerActive stays true
+// across a runner handoff so arrivals never double-start a runner, and a window
+// opened while a batch dispatches is handed to a fresh successor runner so
+// windows never race each other for the Thread Lock.
+type burstScope struct {
+	open         bool
+	openedAt     time.Time
+	batch        []preludeWork
+	runnerActive bool
+}
+
+// joinBurstBatch appends the routed work to its scope's collection window,
+// opening a new window when none is open. It reports whether the caller must
+// start the scope's runner tail (no runner is active for the scope).
+func (c *Chat) joinBurstBatch(scope string, work preludeWork) (startRunner bool) {
+	c.burstMu.Lock()
+	defer c.burstMu.Unlock()
+	b := c.burstScopes[scope]
+	if b == nil {
+		b = &burstScope{}
+		c.burstScopes[scope] = b
+	}
+	if !b.open {
+		b.open = true
+		b.openedAt = time.Now()
+	}
+	b.batch = append(b.batch, work)
+	if b.runnerActive {
+		return false
+	}
+	b.runnerActive = true
+	return true
+}
+
+// runBurstScope is the detached burst runner for one collection window: it
+// sleeps until the window closes, takes the batch, acquires the scope's Thread
+// Lock once, and runs every collected handler in arrival order under the single
+// hold. It owns every joined work's span.
+func (c *Chat) runBurstScope(ctx context.Context, scope string) {
+	c.burstMu.Lock()
+	b := c.burstScopes[scope]
+	assert(b != nil && b.open, "burst runner started without an open window")
+	deadline := b.openedAt.Add(c.options.DebounceInterval)
+	c.burstMu.Unlock()
+
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		c.abandonBurstWindow(ctx, scope)
+		return
+	case <-timer.C:
+	}
+
+	c.burstMu.Lock()
+	batch := b.batch
+	b.batch = nil
+	b.open = false
+	c.burstMu.Unlock()
+	assert(len(batch) > 0, "burst window closed with no collected events")
+
+	first := batch[0].event
+	lease, outcome, err := c.pollForLock(ctx, scope, nil)
+	if outcome != acquireHeld {
+		if outcome == acquireFailed {
+			c.logger.Error("chat burst acquire lock failed", "error", err, "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch))
+		} else {
+			c.logger.Info("chat burst wait abandoned", "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch), "error", ctx.Err())
+		}
+		for _, work := range batch {
+			c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
+		}
+		c.finishBurstScope(scope)
+		return
+	}
+
+	c.logger.Info("chat burst batch dispatch", "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch))
+	stopRefresh, leaseLost := c.startLockRefresh(ctx, lease, first.ThreadID, nil)
+	for i, work := range batch {
+		if ctx.Err() != nil {
+			c.logger.Info("chat burst batch abandoned", "adapter", first.Adapter, "thread_id", first.ThreadID, "remaining", len(batch)-i, "error", ctx.Err())
+			for _, rest := range batch[i:] {
+				c.safeEnd(rest.span, OutcomeIgnored, RouteAttr(rest.route))
+			}
+			break
+		}
+		c.logger.Info("chat deferred dispatch started", "adapter", work.event.Adapter, "event_id", work.event.ID, "route", work.route)
+		c.endHandlerRun(ctx, work.event, work.route, work.span, work.run(ctx))
+	}
+	stopRefresh()
+	benignRelease := ctx.Err() != nil || leaseLost()
+	c.releaseTailLock(ctx, lease, first.ThreadID, benignRelease)
+	c.finishBurstScope(scope)
+}
+
+// abandonBurstWindow surfaces an abandoned (cancelled or timed-out) collection
+// window: every collected work's span closes as ignored, and the scope is
+// finished so a window opened afterwards still gets a runner.
+func (c *Chat) abandonBurstWindow(ctx context.Context, scope string) {
+	c.burstMu.Lock()
+	b := c.burstScopes[scope]
+	batch := b.batch
+	b.batch = nil
+	b.open = false
+	c.burstMu.Unlock()
+	if len(batch) > 0 {
+		first := batch[0].event
+		c.logger.Info("chat burst wait abandoned", "adapter", first.Adapter, "thread_id", first.ThreadID, "size", len(batch), "error", ctx.Err())
+	}
+	for _, work := range batch {
+		c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
+	}
+	c.finishBurstScope(scope)
+}
+
+// finishBurstScope retires the scope's runner: a window opened while the batch
+// dispatched is handed to a fresh successor runner (with its own DetachTimeout);
+// otherwise the scope goes idle. runnerActive stays true across the handoff so
+// an arrival can never double-start a runner, and the successor is started
+// before this runner's inflight slot is released so Shutdown still drains it.
+func (c *Chat) finishBurstScope(scope string) {
+	c.burstMu.Lock()
+	b := c.burstScopes[scope]
+	if b.open {
+		c.burstMu.Unlock()
+		c.startDetachedTail(preludeWork{scope: scope, burstRunner: true})
+		return
+	}
+	b.runnerActive = false
+	delete(c.burstScopes, scope)
+	c.burstMu.Unlock()
 }
 
 func (c *Chat) clearPending(scope string, event *Event) {

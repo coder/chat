@@ -162,6 +162,10 @@ _Avoid_: Lock implementation detail
 A per-**Thread** coordination guard that prevents concurrent handler execution for the same conversation.
 _Avoid_: Event lock, adapter lock, handler lock
 
+**Lock Scope**:
+The **Runtime Options** choice of what key the **Thread Lock** guards: a single **Thread** (default) or the Thread's whole channel where the platform's model requires channel-wide serialization.
+_Avoid_: Lock granularity flag, channel lock
+
 **Lock Lease**:
 A token-owned **Thread Lock** record that can only be released or extended by its current owner.
 _Avoid_: Untokened lock, delete-only lock
@@ -416,7 +420,8 @@ _Avoid_: Full platform schema, strict external SDK model
 - Default **Runtime Options** use a 24 hour dedupe TTL and a 2 minute **Thread Lock** TTL.
 - **Runtime Options** TTL values must be positive.
 - **Runtime Options** include a **Concurrency Strategy** that defaults to drop.
-- The runtime implements the drop (default) and queue **Concurrency Strategy** values; burst, debounce, concurrent, lock-scope, and force/steerability remain reserved for future slices.
+- The runtime implements the full upstream-aligned **Concurrency Strategy** set: drop (default), queue, debounce, burst, and concurrent, plus a **Lock Scope** option (thread default, channel opt-in) and a force/steerability hook that preempts an in-flight handler by force-releasing its **Lock Lease** through an optional **Runtime State** capability.
+- Debounce and burst coalesce on a configured interval and require deferred **Dispatch Mode**; concurrent takes no **Thread Lock** and is bounded by a configured maximum; skipped (superseded) events are always observable, never silent.
 - A **Thread Lock** coordinates processing of distinct **Webhook Events** for the same **Thread**; it never deduplicates them, and what happens to a conflicting event is decided by the **Concurrency Strategy** (drop acknowledges and drops it; queue coalesces waiters per process and runs the most recent after the lock releases).
 - A **Thread Lock** is represented as a **Lock Lease** with an ownership token.
 - Releasing or extending a **Lock Lease** must verify the ownership token so an expired holder cannot affect a newer holder.

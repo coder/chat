@@ -26,6 +26,11 @@ type State struct {
 	once   sync.Once
 }
 
+var (
+	_ chat.State      = (*State)(nil)
+	_ chat.LockForcer = (*State)(nil)
+)
+
 func New(ctx context.Context, opts Options) (*State, error) {
 	if opts.Client == nil {
 		return nil, errors.New("redis state: client is required")
@@ -112,6 +117,20 @@ func (s *State) ExtendLock(ctx context.Context, lease chat.LockLease, ttl time.D
 		return false, err
 	}
 	return result == 1, nil
+}
+
+// ForceReleaseLock invalidates the current lock for key regardless of owner
+// (chat.LockForcer): the previous holder's lease token no longer matches
+// anything, so its ExtendLock and ReleaseLock fail cleanly.
+func (s *State) ForceReleaseLock(ctx context.Context, key string) (bool, error) {
+	if key == "" {
+		return false, errors.New("redis state: lock key is required")
+	}
+	deleted, err := s.client.Del(ctx, s.key("lock", key)).Result()
+	if err != nil {
+		return false, err
+	}
+	return deleted == 1, nil
 }
 
 func (s *State) ReleaseLock(ctx context.Context, lease chat.LockLease) (bool, error) {

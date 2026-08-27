@@ -529,7 +529,7 @@ func TestRuntimeConstructionValidatesDispatchAndConcurrency(t *testing.T) {
 		t.Fatalf("queue concurrency should be accepted: %v", err)
 	}
 
-	// Unimplemented strategies (burst/debounce/concurrent) remain rejected.
+	// Unknown strategy values remain rejected.
 	if err := newRuntime(chat.RuntimeOptions{
 		DedupeTTL:     time.Hour,
 		ThreadLockTTL: time.Hour,

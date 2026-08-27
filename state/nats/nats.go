@@ -35,7 +35,10 @@ type State struct {
 	once  sync.Once
 }
 
-var _ chat.State = (*State)(nil)
+var (
+	_ chat.State      = (*State)(nil)
+	_ chat.LockForcer = (*State)(nil)
+)
 
 func New(ctx context.Context, opts Options) (*State, error) {
 	if opts.Conn == nil {
@@ -217,6 +220,29 @@ func (s *State) ExtendLock(ctx context.Context, lease chat.LockLease, ttl time.D
 			return false, nil
 		}
 		return false, fmt.Errorf("nats state: extend lock update: %w", err)
+	}
+	return true, nil
+}
+
+// ForceReleaseLock invalidates the current lock for key regardless of owner
+// (chat.LockForcer): the revision gate is intentionally absent because a force
+// release invalidates the current lease by design, so the previous holder's
+// ExtendLock and ReleaseLock fail cleanly on the vanished entry.
+func (s *State) ForceReleaseLock(ctx context.Context, key string) (bool, error) {
+	if key == "" {
+		return false, errors.New("nats state: lock key is required")
+	}
+	encoded := encodeKey(key)
+	if _, err := s.lock.Get(ctx, encoded); errors.Is(err, jetstream.ErrKeyNotFound) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("nats state: force release lock get: %w", err)
+	}
+	if err := s.lock.Delete(ctx, encoded); err != nil {
+		if errors.Is(err, jetstream.ErrKeyNotFound) {
+			return false, nil
+		}
+		return false, fmt.Errorf("nats state: force release lock: %w", err)
 	}
 	return true, nil
 }

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -778,6 +779,7 @@ type fakeState struct {
 	subscribed                 map[chat.ThreadID]bool
 	seen                       map[string]bool
 	locked                     map[string]chat.LockLease
+	lockSeq                    int
 	acquireLockErr             error
 	isThreadSubscribedErr      error
 	isThreadSubscribedStarted  chan struct{}
@@ -863,7 +865,10 @@ func (s *fakeState) AcquireLock(ctx context.Context, key string, ttl time.Durati
 	if _, ok := s.locked[key]; ok {
 		return chat.LockLease{}, false, nil
 	}
-	lease := chat.LockLease{Key: key, Token: key + "-token"}
+	// Tokens are unique per acquisition: a stale lease must never match a newer
+	// lock for the same key (the token-owned Lock Lease invariant).
+	s.lockSeq++
+	lease := chat.LockLease{Key: key, Token: fmt.Sprintf("%s-token-%d", key, s.lockSeq)}
 	s.locked[key] = lease
 	return lease, true, nil
 }
@@ -876,6 +881,19 @@ func (s *fakeState) ExtendLock(ctx context.Context, lease chat.LockLease, ttl ti
 	defer s.mu.Unlock()
 	held, ok := s.locked[lease.Key]
 	return ok && held.Token == lease.Token, nil
+}
+
+func (s *fakeState) ForceReleaseLock(ctx context.Context, key string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.locked[key]; !ok {
+		return false, nil
+	}
+	delete(s.locked, key)
+	return true, nil
 }
 
 func (s *fakeState) ReleaseLock(ctx context.Context, lease chat.LockLease) (bool, error) {

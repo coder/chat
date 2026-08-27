@@ -25,7 +25,10 @@ type State struct {
 	once      sync.Once
 }
 
-var _ chat.State = (*State)(nil)
+var (
+	_ chat.State      = (*State)(nil)
+	_ chat.LockForcer = (*State)(nil)
+)
 
 func New(ctx context.Context, opts Options) (*State, error) {
 	if opts.Pool == nil {
@@ -161,6 +164,23 @@ func (s *State) ExtendLock(ctx context.Context, lease chat.LockLease, ttl time.D
 		SET expires_at = now() + ($4::bigint * interval '1 microsecond')
 		WHERE namespace = $1 AND lock_key = $2 AND token = $3 AND expires_at > now()
 	`, s.namespace, lease.Key, lease.Token, ttlMicros)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// ForceReleaseLock invalidates the current lock for key regardless of owner
+// (chat.LockForcer): the previous holder's lease token no longer matches
+// anything, so its ExtendLock and ReleaseLock fail cleanly.
+func (s *State) ForceReleaseLock(ctx context.Context, key string) (bool, error) {
+	if key == "" {
+		return false, errors.New("postgres state: lock key is required")
+	}
+	tag, err := s.pool.Exec(ctx, `
+		DELETE FROM chat_runtime_locks
+		WHERE namespace = $1 AND lock_key = $2 AND expires_at > now()
+	`, s.namespace, key)
 	if err != nil {
 		return false, err
 	}

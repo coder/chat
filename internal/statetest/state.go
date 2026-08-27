@@ -159,6 +159,71 @@ func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
 		}
 	})
 
+	t.Run("force release", func(t *testing.T) {
+		t.Parallel()
+		harness := newState(t)
+		state := harness.State
+		forcer, ok := state.(chat.LockForcer)
+		if !ok {
+			t.Fatal("state does not implement chat.LockForcer")
+		}
+
+		released, err := forcer.ForceReleaseLock(context.Background(), "thread-force")
+		if err != nil {
+			t.Fatalf("force release unheld lock: %v", err)
+		}
+		if released {
+			t.Fatal("force release of an unheld lock should report false")
+		}
+
+		lease, acquired, err := state.AcquireLock(context.Background(), "thread-force", time.Minute)
+		if err != nil {
+			t.Fatalf("acquire lock: %v", err)
+		}
+		if !acquired {
+			t.Fatal("first lock acquire should succeed")
+		}
+
+		released, err = forcer.ForceReleaseLock(context.Background(), "thread-force")
+		if err != nil {
+			t.Fatalf("force release held lock: %v", err)
+		}
+		if !released {
+			t.Fatal("force release of a held lock should report true")
+		}
+
+		// The invalidated lease must not extend the key or steal a newer lock.
+		extended, err := state.ExtendLock(context.Background(), lease, time.Minute)
+		if err != nil {
+			t.Fatalf("extend force-released lease: %v", err)
+		}
+		if extended {
+			t.Fatal("force-released lease should not extend")
+		}
+
+		fresh, acquired, err := state.AcquireLock(context.Background(), "thread-force", time.Minute)
+		if err != nil {
+			t.Fatalf("acquire after force release: %v", err)
+		}
+		if !acquired {
+			t.Fatal("acquire should succeed after force release")
+		}
+		released, err = state.ReleaseLock(context.Background(), lease)
+		if err != nil {
+			t.Fatalf("release force-released lease: %v", err)
+		}
+		if released {
+			t.Fatal("force-released lease should not release the fresh lock")
+		}
+		released, err = state.ReleaseLock(context.Background(), fresh)
+		if err != nil {
+			t.Fatalf("release fresh lock: %v", err)
+		}
+		if !released {
+			t.Fatal("fresh owner should release its lock")
+		}
+	})
+
 	t.Run("context cancellation", func(t *testing.T) {
 		t.Parallel()
 		harness := newState(t)
@@ -194,6 +259,11 @@ func RunStateConformance(t *testing.T, newState func(*testing.T) Harness) {
 
 		if _, _, err := state.AcquireLock(ctx, lockKey, time.Minute); err == nil {
 			t.Fatal("expected cancelled context to stop lock mutation")
+		}
+		if forcer, ok := state.(chat.LockForcer); ok {
+			if _, err := forcer.ForceReleaseLock(ctx, lockKey); err == nil {
+				t.Fatal("expected cancelled context to stop force release")
+			}
 		}
 		_, acquired, err := state.AcquireLock(bg, lockKey, time.Minute)
 		if err != nil {

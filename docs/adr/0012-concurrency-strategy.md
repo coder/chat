@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted (implementation staged: the `queue` strategy is implemented as the `DispatchDeferred` companion; `burst`, `debounce`, `concurrent`, `lockScope`, and force/steerability remain proposed and unbuilt).
+Accepted (implemented: `drop`, `queue`, `debounce`, `burst`, and `concurrent` strategies, the `LockScope` option, and force/steerability via `RuntimeOptions.OnLockConflict` + the `LockForcer` **Runtime State** capability all ship in the runtime; `debounce`/`burst` and the steerability hook require `DispatchDeferred`).
 
 ## Context
 
