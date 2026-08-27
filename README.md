@@ -730,8 +730,9 @@ not yet implemented, see
 
 ## Non-Goals
 
-These are deliberate design boundaries, each recorded in an ADR. They are not
-"not yet":
+These are deliberate design boundaries, each recorded in an ADR. Most are
+permanent ownership boundaries; streaming is the one explicitly *deferred*
+boundary — out of the core runtime today, not foreclosed forever:
 
 - **Streaming token transport in the core runtime** — [ADR 0011](docs/adr/0011-resumable-streaming.md)
   defers token streaming and pub/sub transports out of core (without

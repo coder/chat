@@ -58,6 +58,15 @@ The `Credential` field is adapter-specific:
   (either client credentials for token exchange or a pre-exchanged access
   token)
 
+For Linear, treat `BotUserID` (or `Install.BotActorID`) as **required**: in
+multi-tenant mode the adapter does not discover the app's identity per
+install, and that ID is what mention detection and self-message filtering use
+for generic comment participation. An install without it will accept signed
+webhooks but never see its own @-mentions as mentions — and may route the
+app's own comments back to itself. Capture the app user ID during your OAuth
+flow (e.g. query `viewer { id }` with the freshly exchanged token) and store
+it on the install record.
+
 ## Construct The Adapter In Multi-Tenant Mode
 
 `InstallStore` is mutually exclusive with the single-install credential

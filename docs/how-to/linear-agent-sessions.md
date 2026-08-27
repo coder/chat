@@ -33,17 +33,24 @@ self-authored activities are filtered before routing.
 
 ## Handle Sessions Like Any Thread
 
-New and prompted agent sessions route through the normal hooks:
+New and prompted agent sessions route through the normal hooks. Be aware that
+`Thread.Post` on an agent session thread creates an agent activity
+**response** — a terminal, session-completing "here is my answer" activity —
+so only post it when the answer is genuinely final:
 
 ```go
 bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
-	_, err := ev.Thread.Post(ctx, chat.Markdown("On it."))
+	answer, err := solve(ctx, ev.Message.Text) // your actual work
+	if err != nil {
+		return err
+	}
+	_, err = ev.Thread.Post(ctx, chat.Markdown(answer))
 	return err
 })
 ```
 
-`Thread.Post` on an agent session thread creates an agent activity
-**response** — the terminal "here is my answer" activity.
+For sessions that need visible progress before the final answer, start with a
+thought instead (next sections).
 
 ## Mind The Timing Contract
 
@@ -59,7 +66,9 @@ acknowledgement no longer waits on it.
 
 Everything beyond a plain response goes through typed adapter access. Each
 call can fail (validation, auth, rate limiting) — check every error before
-issuing the next activity:
+issuing the next activity.
+
+Nonterminal activities keep the session alive and show progress:
 
 ```go
 la, ok := chat.AdapterAs[*linear.Adapter](bot, "linear")
@@ -81,20 +90,6 @@ if _, err := la.PostAction(ctx, ev.Thread.ID(), linear.ActionInput{
 	return err
 }
 
-// Ask the user a question (optionally with a select/auth signal).
-if _, err := la.PostElicitation(ctx, ev.Thread.ID(), linear.ElicitationInput{
-	Body: "Which environment should I deploy to?",
-}); err != nil {
-	return err
-}
-
-// Terminal failure state.
-if _, err := la.PostError(ctx, ev.Thread.ID(), linear.ErrorInput{
-	Body: "The build failed; see the attached log.",
-}); err != nil {
-	return err
-}
-
 // Maintain the session's plan and external links.
 if err := la.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
 	Plan: []linear.PlanStep{
@@ -105,6 +100,29 @@ if err := la.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
 }); err != nil {
 	return err
 }
+```
+
+A session ends with exactly **one** completion signal — a response
+(`Thread.Post`), an elicitation, or an error. Pick one branch; do not emit
+two completions in the same turn:
+
+```go
+if needsInput {
+	// Ask the user a question (optionally with a select/auth signal).
+	_, err := la.PostElicitation(ctx, ev.Thread.ID(), linear.ElicitationInput{
+		Body: "Which environment should I deploy to?",
+	})
+	return err
+}
+if buildFailed {
+	// Terminal failure state.
+	_, err := la.PostError(ctx, ev.Thread.ID(), linear.ErrorInput{
+		Body: "The build failed; see the attached log.",
+	})
+	return err
+}
+_, err := ev.Thread.Post(ctx, chat.Markdown(answer)) // final response
+return err
 ```
 
 Users can press **Stop** on a session. Check for it through the raw message

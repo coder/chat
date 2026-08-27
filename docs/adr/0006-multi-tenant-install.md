@@ -50,6 +50,8 @@ Specifically:
 
 - **Lookup ordering.** During webhook handling the adapter: (1) parses the **Platform Tenant** out of the **Supported Platform Shape**; (2) calls `InstallStore.Lookup`; (3) verifies the signature using install-record material where the platform signs per-install, or the shared app-level signing secret where it does not (Slack); (4) normalizes the tenant-scoped **Event** and hands it to **Runtime Dispatch**. On platforms with a per-install signing secret the tenant must be read from an unverified body for routing only, then re-validated by signature verification before any side effect.
 
+  *Implementation note (as built):* the Slack adapter verifies the shared app-level signature **before** parsing the tenant or calling `Lookup`, so a Slack `InstallStore` only ever sees tenants from verified requests. The unverified-routing-read ordering above applies to per-install-signed platforms (Linear), where the store's tenant argument is untrusted routing input by necessity.
+
 - **Not-installed is an Ignored Event.** `ErrInstallNotFound` is acknowledged to the platform without dispatch, consistent with CONTEXT.md's **Ignored Event** definition. Any other **Install Store** error is a transport failure the platform may retry.
 
 - **Out-of-webhook posting uses the same resolver.** **Thread Handle** reconstruction decodes the **Platform Tenant** from the **Thread ID**, calls `InstallStore.Lookup`, and posts. A stored **Thread ID** stays postable while the app holds a valid install record.
@@ -71,7 +73,7 @@ Deliberate divergences from the upstream Chat SDK and trade-offs:
 
 - The runtime owns the credential-lookup *contract* but never the store, unlike full marketplace SDKs that ship installation persistence.
 - The OAuth web flow is explicitly out: the app owns authorize/callback routes, matching how the runtime exposes only **Webhook Handlers** and owns no HTTP server.
-- On per-app-signed platforms (Slack) the tenant is parsed from an unverified body before verification. This is a routing read only, re-validated by signature verification before side effects; adapters document the ordering.
+- On per-install-signed platforms (Linear) the tenant is parsed from an unverified body before verification. This is a routing read only, re-validated by signature verification before side effects; adapters document the ordering. (On per-app-signed platforms — Slack — the implementation verifies the shared signature first, so lookup happens post-verification.)
 - The credential payload is adapter-specific (`any`), trading a normalized token model for honesty about how differently Slack and Linear authorize.
 
 Costs: the app must build and secure the **Install Store**; a misimplemented store (returning a stale or wrong-tenant credential) can post to the wrong workspace, so tenant-correctness tests are required. Adapters carry two construction modes to keep tested.
