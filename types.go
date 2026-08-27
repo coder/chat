@@ -111,7 +111,8 @@ type Interaction struct {
 	// carries no value.
 	Value string
 	// Values are the selected option values of a multi-valued component
-	// (multi_static_select, checkboxes). Nil for single-valued components.
+	// (multi_static_select, checkboxes). Nil for single-valued components;
+	// empty but non-nil when a multi-valued component's selection was cleared.
 	Values []string
 	Actor  Actor
 	Raw    any // Platform Escape Hatch: response_url, trigger_id, view state

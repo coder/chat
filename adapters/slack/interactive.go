@@ -272,9 +272,15 @@ func (a *Adapter) normalizeInteraction(r *http.Request, payload interactionPaylo
 	}
 
 	action := payload.Actions[0]
+	// A present-but-empty selected_options (the user cleared every option) must
+	// surface as an empty non-nil Values, distinct from the nil of a
+	// single-valued component.
 	var values []string
-	for _, opt := range action.SelectedOptions {
-		values = append(values, opt.Value)
+	if action.SelectedOptions != nil {
+		values = make([]string, 0, len(action.SelectedOptions))
+		for _, opt := range action.SelectedOptions {
+			values = append(values, opt.Value)
+		}
 	}
 
 	return &chat.Event{

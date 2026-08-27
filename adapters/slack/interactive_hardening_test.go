@@ -287,6 +287,15 @@ func TestSlackSelectionValuesNormalizedPerComponent(t *testing.T) {
 				"selected_options":[{"value":"x"},{"value":"y"}]}`,
 			wantValues: []string{"x", "y"},
 		},
+		{
+			// Clearing every option of a multi-valued component sends a present
+			// but empty selected_options: an empty non-nil Values, distinct from
+			// the nil of a single-valued component.
+			name: "multi_static_select cleared",
+			action: `{"action_id":"a-multi-clear","type":"multi_static_select","action_ts":"1700000020.000008",
+				"selected_options":[]}`,
+			wantValues: []string{},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
