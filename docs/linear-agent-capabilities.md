@@ -35,6 +35,9 @@ hatch rather than typed helpers.
 | Human-to-agent stop signal | Supported | `RawMessageFrom(ev.Message)` exposes `Signal` / `StopRequested()`; see the routing caveat below. |
 | Session updates | Supported | `UpdateSession` sets `externalUrls` and replaces the session plan array. |
 | GraphQL escape hatch | Supported | `GraphQL` (single-install) and `GraphQLForTenant` (multi-tenant) reuse adapter auth and token refresh, surface GraphQL errors, and never expose tokens. |
+| Proactive agent session creation | Supported | `CreateSessionOnIssue` / `CreateSessionOnComment` (plus `ForTenant` variants) wrap `agentSessionCreateOnIssue` / `agentSessionCreateOnComment`; the returned `CreatedAgentSession` carries the adapter's opaque `ThreadID` ([#47](https://github.com/coder/chat/issues/47)). |
+| Repository suggestions | Supported | `SuggestRepositories` wraps `issueRepositorySuggestions` with typed candidates and confidence-scored results ([#48](https://github.com/coder/chat/issues/48)). |
+| Worked UX examples | Supported | Auth/select elicitation loops, `externalUrls` updates, stop handling, proactive sessions, and repository suggestions are worked through in [`docs/how-to/linear-agent-sessions.md`](how-to/linear-agent-sessions.md), extracted from the tested runnable example ([#49](https://github.com/coder/chat/issues/49)). |
 | Rate-limit handling | Supported | Bounded retry on HTTP 429 and GraphQL `RATELIMITED` with a typed `*linear.RateLimited` error (ADR 0005). |
 | Message history read-through | Supported | `chat.HistoryReader` reads agent-session activities and issue-comment threads, newest-first with `Before` paging (ADR 0009). |
 | Thread reconstruction | Supported | Stored Linear `ThreadID`s (agent-session and comment kinds) reconstruct a `Thread` for later posting. |
@@ -43,28 +46,7 @@ hatch rather than typed helpers.
 
 ## Missing Capabilities To Track
 
-### 1. Proactive Agent Session Creation
-
-**Status:** Missing typed helpers; possible via `GraphQL`. Tracked in
-[#47](https://github.com/coder/chat/issues/47).
-
-Linear supports creating sessions when the agent was not mentioned or
-delegated (`agentSessionCreateOnIssue`, `agentSessionCreateOnComment`).
-A typed helper should return a session convertible into this adapter's opaque
-`ThreadID`, with tests proving the created session can be posted to with
-`Thread.Post` and `PostThought`.
-
-### 2. Repository Suggestions
-
-**Status:** Missing typed helpers; possible via `GraphQL`. Tracked in
-[#48](https://github.com/coder/chat/issues/48).
-
-Linear exposes `issueRepositorySuggestions` for ranking candidate
-repositories. A helper should cover the candidate input shape, returned
-suggestions (hostname, repository full name, confidence), and pairing low
-confidence with a `select` elicitation.
-
-### 3. Issue Workflow Best Practices
+### 1. Issue Workflow Best Practices
 
 **Status:** Missing typed helpers; possible via `GraphQL`.
 
@@ -73,7 +55,7 @@ workflow state when work begins and setting the agent as `Issue.delegate`.
 This likely belongs in a higher-level helper package or example workflow, not
 the core adapter.
 
-### 4. Stop Handling Versus Thread Serialization
+### 2. Stop Handling Versus Thread Serialization
 
 **Status:** Inherent limitation; needs an application-owned pattern.
 
@@ -86,10 +68,11 @@ cannot drive active cancellation through this adapter today. Workable
 patterns: split sessions into short handler turns that check `StopRequested`
 at each turn boundary, or deliver the stop out-of-band (an application-owned
 webhook/endpoint outside the runtime's serialized dispatch that sets a
-cancellation flag handlers poll). A documented example is still to be
-written.
+cancellation flag handlers poll). The turn-boundary pattern is worked through
+in [`docs/how-to/linear-agent-sessions.md`](how-to/linear-agent-sessions.md)
+(`confirmStop`); the serialization limitation itself remains.
 
-### 5. Best-Practice Webhook Categories
+### 3. Best-Practice Webhook Categories
 
 **Status:** Partial.
 
@@ -109,19 +92,11 @@ adapter registers handlers for `OAuthApp` revocation, `Comment`,
 Inbox Notification or Permission Change payloads. This adapter follows that
 model. Reaction webhooks are not normalized here either.
 
-### 6. UX Example Coverage
-
-**Status:** Docs gap. Tracked in [#49](https://github.com/coder/chat/issues/49).
-
-The mechanics for auth elicitation (`signalMetadata.url`, optional `userId`),
-select elicitation, and PR/dashboard links via `externalUrls` are all
-implemented, but worked examples (including the follow-up behavior after a
-user completes auth or makes a selection) are still to be written.
-
 ## Planned Work
 
-Future work is sequenced on the public issue tracker, not in this document:
-[#47](https://github.com/coder/chat/issues/47) (proactive session creation),
-[#48](https://github.com/coder/chat/issues/48) (repository suggestions), and
-[#49](https://github.com/coder/chat/issues/49) (worked UX examples). This page
-tracks current capability status only.
+Future work is sequenced on the public issue tracker, not in this document;
+this page tracks current capability status only. The former tracked gaps for
+proactive session creation ([#47](https://github.com/coder/chat/issues/47)),
+repository suggestions ([#48](https://github.com/coder/chat/issues/48)), and
+worked UX examples ([#49](https://github.com/coder/chat/issues/49)) shipped as
+typed helpers and documented loops; see the Current Support table above.

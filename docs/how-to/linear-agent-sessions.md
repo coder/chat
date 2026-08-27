@@ -126,15 +126,24 @@ _, err := ev.Thread.Post(ctx, chat.Markdown(answer)) // final response
 return err
 ```
 
-Users can press **Stop** on a session. Check for it through the raw message
-escape hatch:
+Users can press **Stop** on a session. It arrives as a prompt carrying the
+human-to-agent `stop` signal; Linear expects the agent to halt immediately
+and then confirm with one final `response` (or `error`) activity. The worked
+example detects and confirms it in one helper:
 
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
 ```go
-if raw, ok := linear.RawMessageFrom(ev.Message); ok && raw.StopRequested() {
-	return nil // wind down gracefully
+func confirmStop(ctx context.Context, ev *chat.MessageEvent) (bool, error) {
+	raw, ok := linear.RawMessageFrom(ev.Message)
+	if !ok || !raw.StopRequested() {
+		return false, nil
+	}
+	_, err := ev.Thread.Post(ctx, chat.Text("Stopping as requested — no further changes will be made."))
+	return true, err
 }
 ```
 
+Call it first in every message handler and return when it reports stopped.
 This check only runs when the stop event reaches your handler, and events on
 one thread are serialized by the thread lock — a stop arriving while a
 handler is still running cannot preempt it (`ConcurrencyDrop` discards it on
@@ -142,10 +151,249 @@ conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
 returns). There is no pre-lock hook, so **Linear's Stop control cannot cancel
 in-flight work through this adapter today**. What you can do: structure long
 sessions as short handler turns (each turn checks `StopRequested` on the
-event that started it before doing more work), or receive the stop signal
-out-of-band through your own channel (for example, your own Linear webhook
-endpoint or admin API that sets a cancellation flag your handlers poll —
-the flag must be set by something outside the runtime's serialized dispatch).
+event that started it before doing more work — `confirmStop` above is exactly
+that turn-boundary check), or receive the stop signal out-of-band through
+your own channel (for example, your own Linear webhook endpoint or admin API
+that sets a cancellation flag your handlers poll — the flag must be set by
+something outside the runtime's serialized dispatch).
+
+## Worked Capability Loops
+
+The rest of this page walks the full interaction loops. Every code block is
+extracted from the buildable, tested example
+([`examples/linear-agent-hello-world/capabilities.go`](../../examples/linear-agent-hello-world/capabilities.go));
+a documentation test keeps the snippets and the source in sync. The
+`linearAgentAccess` parameter is the example's small interface over
+`*linear.Adapter` — obtained via `chat.AdapterAs` as shown above — so the
+handlers stay testable against a fake.
+
+### Start A Session Proactively
+
+When work starts from an external trigger (a failing build, a cron job) and
+the agent was neither mentioned nor delegated, create the session yourself.
+`CreateSessionOnIssue` wraps Linear's `agentSessionCreateOnIssue` mutation and
+returns a `CreatedAgentSession` whose `ThreadID` behaves exactly like a
+webhook-minted one:
+
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
+```go
+func startProactiveSession(ctx context.Context, la linearAgentAccess, issueID, dashboardURL string) (chat.ThreadID, error) {
+	created, err := la.CreateSessionOnIssue(ctx, linear.CreateSessionOnIssueInput{
+		IssueID: issueID, // a UUID or an identifier such as "ENG-123"
+		// Seeding externalUrls also keeps the fresh session from being marked
+		// unresponsive before the first activity arrives.
+		ExternalURLs: []linear.ExternalURL{{URL: dashboardURL, Label: "Run dashboard"}},
+	})
+	if err != nil {
+		return "", err
+	}
+	if _, err := la.PostThought(ctx, created.ThreadID, "Investigating this issue."); err != nil {
+		// The session already exists on Linear's side (and the seeded external
+		// URL keeps it responsive), so return its handle with the error: the
+		// caller can retry the activity or end the session cleanly instead of
+		// leaking it — re-running the whole helper would create a duplicate.
+		return created.ThreadID, err
+	}
+	return created.ThreadID, nil
+}
+```
+
+`CreateSessionOnComment` roots the session on an existing issue comment
+instead. In multi-tenant mode (an `InstallStore` configured), use
+`CreateSessionOnIssueForTenant` / `CreateSessionOnCommentForTenant` with the
+target organization id — proactive creation has no inbound webhook to resolve
+the tenant from.
+
+### Pick A Repository With Suggestions
+
+`SuggestRepositories` wraps Linear's `issueRepositorySuggestions` query: pass
+the candidate repositories the agent already has access to, and Linear ranks
+them with confidence scores using issue, session, guidance, and internal
+signals. Proceed when confident; otherwise pair the shortlist with a `select`
+elicitation:
+
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
+```go
+func chooseRepository(ctx context.Context, la linearAgentAccess, ev *chat.MessageEvent, pending *pendingSelections, candidates []linear.CandidateRepository) error {
+	suggestions, err := la.SuggestRepositories(ctx, ev.Thread.ID(), candidates)
+	if err != nil {
+		return err
+	}
+	if best := bestSuggestion(suggestions); best != nil && best.Confidence >= 0.8 {
+		_, err := la.PostThought(ctx, ev.Thread.ID(), "Working in "+best.RepositoryFullName+".")
+		return err
+	}
+	return offerRepositoryChoice(ctx, la, ev.Thread.ID(), pending, suggestions)
+}
+```
+
+(`pendingSelections` is the example's small take-once per-thread registry of
+offered option values — see the select section below.)
+
+### Offer Choices With A Select Elicitation
+
+A `select`-signal elicitation renders the options natively in Linear. It is a
+completion signal: the session waits for the user after you post it.
+
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
+```go
+func offerRepositoryChoice(ctx context.Context, la linearAgentAccess, threadID chat.ThreadID, pending *pendingSelections, suggestions []linear.RepositorySuggestion) error {
+	if len(suggestions) == 0 {
+		_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
+			Body: "I couldn't match a repository — which one should I work in?",
+		})
+		return err
+	}
+	options := make([]linear.SelectOption, 0, len(suggestions))
+	values := make([]string, 0, len(suggestions))
+	for _, s := range suggestions {
+		option := repositoryOptionValue(s)
+		options = append(options, linear.SelectOption{Value: option, Label: option})
+		values = append(values, option)
+	}
+	_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
+		Body:           "Which repository should I work in?",
+		Signal:         "select",
+		SignalMetadata: linear.SelectSignalMetadata{Options: options},
+	})
+	if err != nil {
+		return err
+	}
+	// Record what was offered — and by which workflow — so the next follow-up
+	// on this thread is interpreted as the answer (see handleSelection).
+	pending.set(threadID, pendingSelection{Kind: selectionKindRepository, Values: values})
+	return nil
+}
+```
+
+Qualify option identities with everything needed to disambiguate them — here
+the Git host, so `github.com/acme/backend` and `gitlab.example.com/acme/backend`
+stay distinct choices.
+
+The user's answer arrives as a **regular follow-up prompt** (routed to
+`OnSubscribedMessage` on a subscribed thread): a picked option delivers the
+option's `value` as the message text, but users may instead reply in free
+text, which dismisses the elicitation. Match known values and let everything
+else fall through to your normal prompt handling:
+
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
+```go
+func handleSelection(ctx context.Context, ev *chat.MessageEvent, sel pendingSelection) (bool, error) {
+	answer := strings.TrimSpace(ev.Message.Text)
+	for _, value := range sel.Values {
+		if answer != value {
+			continue
+		}
+		var ack string
+		switch sel.Kind {
+		case selectionKindDeploy:
+			ack = "Deploying to **" + value + "** — I'll report back here."
+		case selectionKindRepository:
+			ack = "Working in **" + value + "** — I'll open a pull request here when I'm done."
+		default:
+			ack = "Got it: **" + value + "**."
+		}
+		_, err := ev.Thread.Post(ctx, chat.Markdown(ack))
+		return true, err
+	}
+	return false, nil
+}
+```
+
+The registry stores which workflow asked (`pendingSelection.Kind`) alongside
+the offered values, so a repository choice continues the repository workflow
+instead of being misread as, say, a deployment target.
+
+Since free-text replies are natural language, a production agent should
+involve its LLM when interpreting an unmatched answer rather than failing.
+
+Only interpret a follow-up as an answer while a choice is actually pending on
+that thread — otherwise a later message that happens to equal an option value
+would be misread as a selection. The example keeps a small per-thread registry
+(`pendingSelections` in `capabilities.go`) and records the offered values when
+it posts the elicitation. An unmatched free-text reply consumes the pending
+state for good (Linear dismisses the elicitation UI), but a matched choice
+whose acknowledgement fails to post is re-registered — under `DispatchDeferred`
+a handler error is only observed, never redelivered, so the user's retry must
+still be interpreted as an answer:
+
+<!-- source: examples/linear-agent-hello-world/main.go -->
+```go
+		if sel, ok := pending.take(ev.Thread.ID()); ok {
+			if handled, err := handleSelection(ctx, ev, sel); handled {
+				if err != nil {
+					pending.set(ev.Thread.ID(), sel)
+				}
+				return err
+			}
+		}
+```
+
+A confirmed stop also abandons any pending selection (`newFollowUpHandler` in
+the example): a stopped session will not answer its elicitation, so a later
+message must not be misread as a choice.
+
+### Ask The User To Link An Account (Auth Elicitation)
+
+An `auth`-signal elicitation makes Linear render an ephemeral "Link account"
+button pointing at your auth flow. `signalMetadata.url` is your account
+linking URL; the optional `userId` restricts the prompt to one Linear user:
+
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
+```go
+func requireAccountLink(ctx context.Context, la linearAgentAccess, threadID chat.ThreadID, authURL, linearUserID string) error {
+	_, err := la.PostElicitation(ctx, threadID, linear.ElicitationInput{
+		Body:   "Please link your account to continue.",
+		Signal: "auth",
+		SignalMetadata: linear.AuthSignalMetadata{
+			URL:          authURL,
+			UserID:       linearUserID, // optional: restricts the prompt to one user
+			ProviderName: "Example CI",
+		},
+	})
+	return err
+}
+```
+
+The follow-up is the part that differs from `select`: **Linear sends no
+webhook when the user completes the auth flow.** Your own auth callback is
+the trigger. Store the session's `ThreadID` (for example, keyed by the OAuth
+`state` parameter) before posting the elicitation, then resume from the
+callback — a `thought` both resumes the session and dismisses the ephemeral
+auth UI:
+
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
+```go
+func resumeAfterAccountLink(ctx context.Context, bot *chat.Chat, la linearAgentAccess, threadID chat.ThreadID) error {
+	if _, err := la.PostThought(ctx, threadID, "Account linked — resuming."); err != nil {
+		return err
+	}
+	thread, err := bot.Thread(ctx, threadID)
+	if err != nil {
+		return err
+	}
+	_, err = thread.Post(ctx, chat.Markdown("All set — the account is linked and the task is done."))
+	return err
+}
+```
+
+If the user replies in the session instead of completing the link, the reply
+arrives as a normal follow-up prompt — handle it like any other message.
+
+### Publish Progress Links With externalUrls
+
+Surface a pull request or dashboard on the session as work progresses.
+`AddExternalURLs` appends without replacing existing links (`ExternalURLs`
+replaces the whole list); Linear also treats the update as session activity:
+
+<!-- source: examples/linear-agent-hello-world/capabilities.go -->
+```go
+func publishPullRequest(ctx context.Context, la linearAgentAccess, threadID chat.ThreadID, prURL string) error {
+	return la.UpdateSession(ctx, threadID, linear.AgentSessionUpdateInput{
+		AddExternalURLs: []linear.ExternalURL{{URL: prURL, Label: "Pull request"}},
+	})
+}
+```
 
 ## Generic Issue Comments
 
@@ -162,8 +410,7 @@ comment threads — they only make sense inside agent sessions.
 ## Known Gaps
 
 The Linear adapter is experimental. The Linear agent API surface it wraps is
-itself in developer preview upstream, and some operations (proactive session
-creation, repository suggestions, issue workflow automation) currently
-require the `GraphQL` escape hatch rather than typed helpers. The tracked
-list lives in
+itself in developer preview upstream, and some operations (for example issue
+workflow automation) still require the `GraphQL` escape hatch rather than
+typed helpers. The tracked list lives in
 [`docs/linear-agent-capabilities.md`](../linear-agent-capabilities.md).

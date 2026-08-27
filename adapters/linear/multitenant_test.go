@@ -100,6 +100,11 @@ type linearMTServer struct {
 	// historyAuth records the bearer token of each AgentSessionHistory read, so
 	// history tests can prove per-tenant token resolution (see history_test.go).
 	historyAuth []string
+	// sessionCreateAuth / suggestAuth record the bearer token of each
+	// AgentSessionCreateOn* mutation and IssueRepositorySuggestions query, so
+	// proactive-capability tests can prove per-tenant token resolution.
+	sessionCreateAuth []string
+	suggestAuth       []string
 }
 
 func newLinearMTServer(t *testing.T) *linearMTServer {
@@ -133,6 +138,20 @@ func newLinearMTServer(t *testing.T) *linearMTServer {
 				id := fmt.Sprintf("ACT%d", len(api.activityAuth))
 				api.mu.Unlock()
 				writeJSON(t, w, map[string]any{"data": map[string]any{"agentActivityCreate": map[string]any{"success": true, "agentActivity": map[string]any{"id": id}}}})
+				return
+			}
+			if strings.Contains(req.Query, "AgentSessionCreateOn") {
+				api.mu.Lock()
+				api.sessionCreateAuth = append(api.sessionCreateAuth, auth)
+				api.mu.Unlock()
+				writeJSON(t, w, map[string]any{"data": map[string]any{"agentSessionCreateOnIssue": map[string]any{"success": true, "agentSession": map[string]any{"id": "SMT1", "issue": map[string]any{"id": "ISSUEMT"}, "comment": nil}}}})
+				return
+			}
+			if strings.Contains(req.Query, "IssueRepositorySuggestions") {
+				api.mu.Lock()
+				api.suggestAuth = append(api.suggestAuth, auth)
+				api.mu.Unlock()
+				writeJSON(t, w, map[string]any{"data": map[string]any{"issueRepositorySuggestions": map[string]any{"suggestions": []map[string]any{{"hostname": "github.com", "repositoryFullName": "acme/backend", "confidence": 0.5}}}}})
 				return
 			}
 			if strings.Contains(req.Query, "AgentSessionHistory") {
