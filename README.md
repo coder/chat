@@ -518,7 +518,7 @@ chat.RuntimeOptions{
 }
 ```
 
-The runtime implements four of the upstream-aligned strategies (ADR 0012):
+The runtime implements all five upstream-aligned strategies (ADR 0012):
 
 - `ConcurrencyDrop` (default): a lock conflict is acknowledged and dropped.
 - `ConcurrencyQueue`: the newest follow-up waits for the in-flight handler;
@@ -529,11 +529,15 @@ The runtime implements four of the upstream-aligned strategies (ADR 0012):
   sharing a state are serialized by the thread lock, not coalesced.
 - `ConcurrencyConcurrent`: no thread lock at all; every event dispatches in its
   own execution, bounded by `MaxConcurrent`.
+- `ConcurrencyBurst`: routed events for a scope collect for a `BurstWindow`,
+  then dispatch as one batch under a single lock hold, each member in join
+  order with its own `DetachTimeout` budget. Requires deferred dispatch.
+  Like queue supersession and debounce coalescing, batching is per runtime
+  instance.
 
-The remaining ADR 0012 surface — the `burst` strategy and the
-force/steerability (`onLockConflict`) preemption hook — is staged behind the
-deferred-dispatch admission and fenced-coordination design work; the names
-stay reserved.
+The one remaining ADR 0012 concept — the force/steerability
+(`onLockConflict`) preemption hook — is rejected for v0.x per ADR 0015; the
+names stay reserved behind that ADR's formal-design bar.
 
 `LockScope` chooses what the lock guards: per thread (default) or per channel
 (`LockScopeChannel`) for platforms whose model needs channel-wide ordering.
