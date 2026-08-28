@@ -37,10 +37,10 @@ design deliberately diverges from Vercel Chat SDK.
 | [0009](adr/0009-message-history.md) | Message history stays application-owned; optional storage-free `HistoryReader` | Accepted |
 | [0010](adr/0010-observability.md) | Optional `Observer` seam; no OpenTelemetry in core | Accepted |
 | [0011](adr/0011-resumable-streaming.md) | Resumable streaming deferred from core, not foreclosed | Proposed |
-| [0012](adr/0012-concurrency-strategy.md) | Concurrency strategy expansion (`drop`/`queue`/`debounce`/`concurrent` + lock scope implemented; `burst` and force/steerability staged) | Accepted (staged) |
+| [0012](adr/0012-concurrency-strategy.md) | Concurrency strategy expansion (`drop`/`queue`/`debounce`/`concurrent`/`burst` + lock scope implemented; force/steerability names reserved) | Accepted |
 | [0013](adr/0013-linear-generic-comments.md) | Linear generic issue/comment participation | Accepted |
 | [0014](adr/0014-nats-state-adapter.md) | NATS JetStream state adapter | Accepted |
-| [0015](adr/0015-runtime-coordination.md) | Deferred-dispatch admission bound; cross-instance coalescing rejected for now | Proposed |
+| [0015](adr/0015-runtime-coordination.md) | Deferred-dispatch admission bound; cross-instance coalescing rejected for now | Accepted |
 
 ## The Short Version
 
