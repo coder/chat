@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -169,12 +170,7 @@ func TestAdmissionRejectsAtMaxDetachedWithoutDedupeMark(t *testing.T) {
 		return status == http.StatusOK
 	}, "capacity did not free after handler completion")
 	eventually(t, 5*time.Second, func() bool {
-		for _, id := range handlers.handledIDs() {
-			if id == "event-2" {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(handlers.handledIDs(), "event-2")
 	}, "redelivered rejected event was not handled (dedupe-marked before rejection?)")
 }
 
@@ -611,12 +607,7 @@ func TestAdmissionCountsParkedQueueWaiters(t *testing.T) {
 
 	handlers.release()
 	eventually(t, 5*time.Second, func() bool {
-		for _, id := range handlers.handledIDs() {
-			if id == "event-2" {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(handlers.handledIDs(), "event-2")
 	}, "queued waiter did not run after the in-flight handler finished")
 }
 
@@ -659,12 +650,7 @@ func TestAdmissionCountsConcurrentSlotWaiters(t *testing.T) {
 
 // hasOutcome reports whether the observer recorded the terminal outcome.
 func hasOutcome(observer *recordingObserver, want chat.DispatchOutcome) bool {
-	for _, outcome := range observer.terminalOutcomes() {
-		if outcome == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(observer.terminalOutcomes(), want)
 }
 
 // assertAdmissionRejectedAttrs verifies the admission_rejected observation

@@ -830,13 +830,11 @@ func TestBurstDispatchRacingShutdownRejectedOrDrained(t *testing.T) {
 	statuses := make([]int, deliveries)
 	bodies := make([]string, deliveries)
 	var wg sync.WaitGroup
-	for i := 0; i < deliveries; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range deliveries {
+		wg.Go(func() {
 			id := "race-event-" + string(rune('a'+i))
 			statuses[i], bodies[i] = postEventBody(t, bot, "fake", mentionEvent(id, "fake:v1:thread-race"))
-		}(i)
+		})
 	}
 	time.Sleep(10 * time.Millisecond)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

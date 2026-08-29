@@ -246,8 +246,7 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 		}
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes))
 		if err != nil {
-			var maxBytesErr *http.MaxBytesError
-			if errors.As(err, &maxBytesErr) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				http.Error(w, "linear webhook too large", http.StatusRequestEntityTooLarge)
 				return
 			}
@@ -926,10 +925,11 @@ func encodeThreadID(payload threadPayload) (chat.ThreadID, error) {
 
 func decodeThreadID(id chat.ThreadID) (threadPayload, error) {
 	const prefix = "linear:v1:"
-	if !strings.HasPrefix(string(id), prefix) {
+	rest, ok := strings.CutPrefix(string(id), prefix)
+	if !ok {
 		return threadPayload{}, fmt.Errorf("linear: malformed thread id %q", id)
 	}
-	body, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(string(id), prefix))
+	body, err := base64.RawURLEncoding.DecodeString(rest)
 	if err != nil {
 		return threadPayload{}, fmt.Errorf("linear: decode thread id: %w", err)
 	}
@@ -1179,7 +1179,7 @@ func verifyGrantedScopes(requested []string, granted string) error {
 
 func parseGrantedScopes(value string) map[string]struct{} {
 	out := map[string]struct{}{}
-	for _, scope := range strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r' }) {
+	for scope := range strings.FieldsFuncSeq(value, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r' }) {
 		scope = strings.TrimSpace(scope)
 		if scope != "" {
 			out[scope] = struct{}{}

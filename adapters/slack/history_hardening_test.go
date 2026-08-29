@@ -123,8 +123,7 @@ func TestSlackReadHistoryRateLimitObservedAndErrors(t *testing.T) {
 
 	id := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "111.000")
 	msgs, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Limit: 5})
-	var limited *slack.RateLimited
-	if !errors.As(err, &limited) {
+	if _, ok := errors.AsType[*slack.RateLimited](err); !ok {
 		t.Fatalf("err = %v, want *slack.RateLimited on a throttled read", err)
 	}
 	if msgs != nil {

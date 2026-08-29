@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -684,10 +685,8 @@ func containsToken(v any) bool {
 			}
 		}
 	case []any:
-		for _, val := range t {
-			if containsToken(val) {
-				return true
-			}
+		if slices.ContainsFunc(t, containsToken) {
+			return true
 		}
 	}
 	return false

@@ -116,14 +116,14 @@ func TestHistoryReaderCapabilityDetection(t *testing.T) {
 func TestHistoryHasNoCoreSurface(t *testing.T) {
 	t.Parallel()
 
-	chatType := reflect.TypeOf(&chat.Chat{})
+	chatType := reflect.TypeFor[*chat.Chat]()
 	for _, name := range []string{"ReadHistory", "History"} {
 		if _, ok := chatType.MethodByName(name); ok {
 			t.Fatalf("*chat.Chat must not expose %s; history is Adapter-Access only", name)
 		}
 	}
 
-	threadType := reflect.TypeOf(&chat.Thread{})
+	threadType := reflect.TypeFor[*chat.Thread]()
 	for _, name := range []string{"ReadHistory", "History"} {
 		if _, ok := threadType.MethodByName(name); ok {
 			t.Fatalf("*chat.Thread must not expose %s; history is Adapter-Access only", name)

@@ -222,8 +222,7 @@ func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes))
 		if err != nil {
-			var maxBytesErr *http.MaxBytesError
-			if errors.As(err, &maxBytesErr) {
+			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 				http.Error(w, "slack payload too large", http.StatusRequestEntityTooLarge)
 				return
 			}
@@ -731,7 +730,7 @@ type threadPayload struct {
 	Team    string `json:"team"`
 	Channel string `json:"channel"`
 	Root    string `json:"root,omitempty"`
-	Direct  bool   `json:"direct,omitempty"`
+	Direct  bool   `json:"direct,omitzero"`
 }
 
 func encodeThreadID(payload threadPayload) (chat.ThreadID, error) {
@@ -753,10 +752,11 @@ func encodeThreadID(payload threadPayload) (chat.ThreadID, error) {
 
 func decodeThreadID(id chat.ThreadID) (threadPayload, error) {
 	const prefix = "slack:v1:"
-	if !strings.HasPrefix(string(id), prefix) {
+	rest, ok := strings.CutPrefix(string(id), prefix)
+	if !ok {
 		return threadPayload{}, fmt.Errorf("slack: malformed thread id %q", id)
 	}
-	body, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(string(id), prefix))
+	body, err := base64.RawURLEncoding.DecodeString(rest)
 	if err != nil {
 		return threadPayload{}, fmt.Errorf("slack: decode thread id: %w", err)
 	}

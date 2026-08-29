@@ -604,14 +604,12 @@ func TestQueueStrategyDispatchesMostRecentSupersededFollowUp(t *testing.T) {
 	// recent dispatches, the older two are superseded.
 	var wg sync.WaitGroup
 	for _, id := range []string{"q1", "q2", "q3"} {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
+		wg.Go(func() {
 			res := postEventResultFor(bot, "fake", mentionEvent(id, "fake:v1:thread-1"))
 			if res.err != nil || res.status != http.StatusOK {
 				t.Errorf("follow-up %s status=%d err=%v", id, res.status, res.err)
 			}
-		}(id)
+		})
 		// Stagger so the supersession order is deterministic (q3 is newest).
 		time.Sleep(10 * time.Millisecond)
 	}

@@ -41,20 +41,15 @@ func CloneRequest(req *http.Request, body []byte) *http.Request {
 }
 
 // BackoffDelay computes the next backoff: exponential from base (doubling per
-// attempt) capped at max, overridden by retryAfter when the platform signals a
-// longer wait, then clamped to max.
-func BackoffDelay(base, max time.Duration, attempt int, retryAfter time.Duration) time.Duration {
+// attempt) capped at maxDelay, overridden by retryAfter when the platform
+// signals a longer wait, then clamped to maxDelay.
+func BackoffDelay(base, maxDelay time.Duration, attempt int, retryAfter time.Duration) time.Duration {
 	delay := base << (attempt - 1)
-	if delay <= 0 || delay > max {
-		delay = max
+	if delay <= 0 || delay > maxDelay {
+		// Shift overflow (or wrap to non-positive) also lands on the cap.
+		delay = maxDelay
 	}
-	if retryAfter > delay {
-		delay = retryAfter
-	}
-	if delay > max {
-		delay = max
-	}
-	return delay
+	return min(max(delay, retryAfter), maxDelay)
 }
 
 // SleepCtx sleeps for d but returns the context error if the context ends first,

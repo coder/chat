@@ -19,7 +19,7 @@ import (
 // reached only through Adapter Access, never on the dispatch path (ADR 0009).
 type dispatchingHistoryAdapter struct {
 	name        string
-	historyHits int32
+	historyHits atomic.Int32
 }
 
 func (a *dispatchingHistoryAdapter) Name() string                   { return a.name }
@@ -54,7 +54,7 @@ func (a *dispatchingHistoryAdapter) BotActor() chat.Actor {
 }
 
 func (a *dispatchingHistoryAdapter) ReadHistory(context.Context, chat.ThreadID, chat.HistoryQuery) ([]chat.Message, error) {
-	atomic.AddInt32(&a.historyHits, 1)
+	a.historyHits.Add(1)
 	return nil, nil
 }
 
@@ -73,9 +73,9 @@ func TestHistoryReaderNotInvokedDuringDispatch(t *testing.T) {
 		t.Fatalf("new runtime: %v", err)
 	}
 
-	var handled int32
+	var handled atomic.Int32
 	bot.OnNewMention(func(context.Context, *chat.MessageEvent) error {
-		atomic.AddInt32(&handled, 1)
+		handled.Add(1)
 		return nil
 	})
 
@@ -107,10 +107,10 @@ func TestHistoryReaderNotInvokedDuringDispatch(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dispatch status = %d, body = %s", rec.Code, rec.Body.String())
 	}
-	if got := atomic.LoadInt32(&handled); got != 1 {
+	if got := handled.Load(); got != 1 {
 		t.Fatalf("handler invocations = %d, want 1 (event must route)", got)
 	}
-	if got := atomic.LoadInt32(&adapter.historyHits); got != 0 {
+	if got := adapter.historyHits.Load(); got != 0 {
 		t.Fatalf("ReadHistory invoked %d times during dispatch, want 0", got)
 	}
 }

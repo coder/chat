@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -57,12 +58,7 @@ func (s *fakeInstallStore) callCount() int {
 func (s *fakeInstallStore) lookedUp(tenant string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, c := range s.calls {
-		if c == "slack:"+tenant {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.calls, "slack:"+tenant)
 }
 
 func TestSlackConstructionModeSelection(t *testing.T) {
@@ -400,15 +396,13 @@ func TestSlackMultiTenantConcurrentTenantsDoNotCross(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for _, team := range []string{"T1", "T2"} {
-		wg.Add(1)
-		go func(team string) {
-			defer wg.Done()
+		wg.Go(func() {
 			rec := serveSignedSlackWebhook(t, handler, now,
 				slackEventBody(team, "Ev"+team, "U"+team, "<@UBOT"+team[1:]+"> hi"), "", "")
 			if rec.Code != http.StatusOK {
 				t.Errorf("team %s status = %d", team, rec.Code)
 			}
-		}(team)
+		})
 	}
 	wg.Wait()
 

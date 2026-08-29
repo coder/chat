@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 
 	"github.com/coder/chat"
 )
@@ -119,8 +120,7 @@ func (a *Adapter) readAgentSessionHistory(ctx context.Context, thread threadPayl
 	nodes := resp.Data.AgentSession.Activities.Nodes
 	messages := make([]chat.Message, 0, len(nodes))
 	// Linear returns the page createdAt-ascending; reverse for newest-first.
-	for i := len(nodes) - 1; i >= 0; i-- {
-		node := nodes[i]
+	for _, node := range slices.Backward(nodes) {
 		messages = append(messages, chat.Message{
 			ID:     node.ID,
 			Text:   node.Content.Body,
@@ -164,8 +164,8 @@ func (a *Adapter) readCommentThreadHistory(ctx context.Context, thread threadPay
 	children := resp.Data.Thread.Children.Nodes
 	messages := make([]chat.Message, 0, len(children)+1)
 	// Linear returns the page createdAt-ascending; reverse for newest-first.
-	for i := len(children) - 1; i >= 0; i-- {
-		messages = append(messages, historyCommentMessage(thread.Organization, children[i]))
+	for _, c := range slices.Backward(children) {
+		messages = append(messages, historyCommentMessage(thread.Organization, c))
 	}
 	// No older replies remain, so the root comment closes the oldest page.
 	if !resp.Data.Thread.Children.PageInfo.HasPreviousPage {

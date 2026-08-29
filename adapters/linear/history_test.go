@@ -623,8 +623,7 @@ func TestLinearReadHistoryRateLimitObservedAndErrors(t *testing.T) {
 
 	id := linear.EncodeAgentSessionThreadIDForTest("ORG1", "ISSUE1", "S1")
 	msgs, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{})
-	var limited *linear.RateLimited
-	if !errors.As(err, &limited) {
+	if _, ok := errors.AsType[*linear.RateLimited](err); !ok {
 		t.Fatalf("err = %v, want *linear.RateLimited on a throttled read", err)
 	}
 	if msgs != nil {
