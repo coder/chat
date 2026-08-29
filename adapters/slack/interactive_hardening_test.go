@@ -57,7 +57,7 @@ func TestSlackCommandDedupedByEventIdentity(t *testing.T) {
 	}
 
 	form := signedCommandForm()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		rec := serveSignedSlackForm(t, handler, now, form)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("delivery %d status = %d", i, rec.Code)
@@ -100,7 +100,7 @@ func TestSlackInteractionDedupedByEventIdentity(t *testing.T) {
 		"response_url":"https://hooks.slack.com/actions/T1/999",
 		"actions":[{"action_id":"approve","block_id":"b1","value":"yes","type":"button"}]
 	}`
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		rec := serveSignedSlackInteractivity(t, handler, now, payload)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("delivery %d status = %d", i, rec.Code)
@@ -154,7 +154,7 @@ func TestSlackRepeatInteractionsAreDistinctEvents(t *testing.T) {
 	for _, actionTS := range []string{"1700000001.000100", "1700000002.000200", "1700000003.000300"} {
 		payload := activation(actionTS)
 		// Deliver each activation twice: the original and a redelivery.
-		for delivery := 0; delivery < 2; delivery++ {
+		for delivery := range 2 {
 			rec := serveSignedSlackInteractivity(t, handler, now, payload)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("activation %s delivery %d status = %d", actionTS, delivery, rec.Code)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -50,12 +51,7 @@ func (o *recordingObserver) eventNames() []chat.ObservationName {
 }
 
 func (o *recordingObserver) hasEvent(name chat.ObservationName) bool {
-	for _, got := range o.eventNames() {
-		if got == name {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(o.eventNames(), name)
 }
 
 func (o *recordingObserver) terminalOutcomes() []chat.DispatchOutcome {

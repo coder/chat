@@ -159,14 +159,12 @@ func TestQueueSupersededEventSurfacesSupersededByObservation(t *testing.T) {
 	// "older" queues first, then "newer" supersedes it.
 	var wg sync.WaitGroup
 	for _, id := range []string{"older", "newer"} {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
+		wg.Go(func() {
 			res := postEventResultFor(bot, "fake", mentionEvent(id, "fake:v1:thread-1"))
 			if res.err != nil || res.status != http.StatusOK {
 				t.Errorf("follow-up %s status=%d err=%v", id, res.status, res.err)
 			}
-		}(id)
+		})
 		time.Sleep(15 * time.Millisecond)
 	}
 

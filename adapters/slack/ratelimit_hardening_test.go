@@ -258,8 +258,7 @@ func TestSlackPostNeverSleepsPastContextDeadline(t *testing.T) {
 
 	select {
 	case err := <-done:
-		var limited *slack.RateLimited
-		if !errors.As(err, &limited) {
+		if _, ok := errors.AsType[*slack.RateLimited](err); !ok {
 			t.Fatalf("err = %v, want *slack.RateLimited (deadline-bounded, not slept off)", err)
 		}
 	case <-time.After(5 * time.Second):
@@ -306,8 +305,7 @@ func TestSlackPostDoesNotRetryNonThrottlingError(t *testing.T) {
 	if postErr == nil {
 		t.Fatal("expected an error from a 401 auth failure")
 	}
-	var limited *slack.RateLimited
-	if errors.As(postErr, &limited) {
+	if _, ok := errors.AsType[*slack.RateLimited](postErr); ok {
 		t.Fatal("a non-throttling 401 must not surface as RateLimited")
 	}
 	mu.Lock()
@@ -337,8 +335,7 @@ func TestSlackDefaultPolicyCeilingUnderAckWindow(t *testing.T) {
 	_, err := adapter.PostMessage(context.Background(), ref, chat.Text("hi"))
 	elapsed := time.Since(start)
 
-	var limited *slack.RateLimited
-	if !errors.As(err, &limited) {
+	if _, ok := errors.AsType[*slack.RateLimited](err); !ok {
 		t.Fatalf("err = %v, want *slack.RateLimited", err)
 	}
 	if elapsed >= 3*time.Second {

@@ -52,13 +52,13 @@ func TestCommandAndInteractionDedupedByEventIdentity(t *testing.T) {
 	})
 
 	cmd := commandEvent("cmd-dup", "fake:v1:thread-cmd")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if status := postEvent(t, bot, "fake", cmd); status != http.StatusOK {
 			t.Fatalf("command delivery %d status = %d", i, status)
 		}
 	}
 	intr := interactionEvent("int-dup", "fake:v1:thread-int")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if status := postEvent(t, bot, "fake", intr); status != http.StatusOK {
 			t.Fatalf("interaction delivery %d status = %d", i, status)
 		}

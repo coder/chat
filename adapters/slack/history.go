@@ -112,9 +112,9 @@ func (a *Adapter) ReadHistory(ctx context.Context, id chat.ThreadID, q chat.Hist
 type conversationsReadPayload struct {
 	Channel   string `json:"channel"`
 	TS        string `json:"ts,omitempty"`
-	Limit     int    `json:"limit,omitempty"`
+	Limit     int    `json:"limit,omitzero"`
 	Latest    string `json:"latest,omitempty"`
-	Inclusive bool   `json:"inclusive,omitempty"`
+	Inclusive bool   `json:"inclusive,omitzero"`
 }
 
 type conversationsHistoryResponse struct {

@@ -220,7 +220,7 @@ func (c *Chat) dispatchBurstBatch(scope string, batch []preludeWork) {
 	// finalRelease is the last member's admission release, deferred past the
 	// lock cleanup below.
 	var finalRelease func()
-	for i := 0; i < len(batch); i++ {
+	for i := range batch {
 		work := batch[i]
 		if batchCtx.Err() != nil {
 			// Lease loss or Runtime Shutdown: members that never started are

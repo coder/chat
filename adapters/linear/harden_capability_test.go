@@ -205,8 +205,7 @@ func TestRateLimitDeadlineReturnsTypedRateLimited(t *testing.T) {
 
 	select {
 	case err := <-done:
-		var rl *linear.RateLimited
-		if !errors.As(err, &rl) {
+		if _, ok := errors.AsType[*linear.RateLimited](err); !ok {
 			t.Fatalf("err = %v, want *linear.RateLimited (deadline-bounded, not slept off)", err)
 		}
 		if elapsed := time.Since(start); elapsed > time.Second {

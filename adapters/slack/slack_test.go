@@ -470,7 +470,7 @@ func TestPostingTextMarkdownEphemeralAndExplicitFallback(t *testing.T) {
 		t.Fatalf("fallback sent = %#v", sent)
 	}
 
-	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", Text: "plain reply", Mrkdwn: boolPtr(false)})
+	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", Text: "plain reply", Mrkdwn: new(false)})
 	api.assertPost(t, 1, slackPost{Channel: "C1", ThreadTS: "111.000", MarkdownText: "**portable**"})
 	api.assertPost(t, 2, slackPost{Channel: "D-fallback", MarkdownText: "**private fallback**"})
 }
@@ -738,10 +738,6 @@ func (s *slackAPIServer) authForPost(t *testing.T, index int) string {
 		t.Fatalf("missing post auth %d in %#v", index, s.postAuth)
 	}
 	return s.postAuth[index]
-}
-
-func boolPtr(value bool) *bool {
-	return &value
 }
 
 func decodeJSON(t *testing.T, body io.Reader, dest any) {
