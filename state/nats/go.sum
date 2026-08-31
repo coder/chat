@@ -1,7 +1,7 @@
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op h1:p2zFsAzvhIpFya8AIOHIbWf7NGvO34QpLGclyf7nXj8=
 github.com/antithesishq/antithesis-sdk-go v0.7.2-default-no-op/go.mod h1:FQyySiasQQM8735Ddel3MRojmy4dA1IqCeyJ5jmPMbI=
-github.com/coder/chat v0.1.0 h1:Bem3pLCD9AaquED3A7BWg5L542b7l9t4gO2XX9F/jWA=
-github.com/coder/chat v0.1.0/go.mod h1:rlQcWBYADOecYbEPfZBCiE+VEc75nnPmQU5ftRuHdkQ=
+github.com/coder/chat v0.2.0 h1:YXjitnNh9EphzYEa+8z5HMVEvVhj2b9ZFRhBHMgW+Gw=
+github.com/coder/chat v0.2.0/go.mod h1:rlQcWBYADOecYbEPfZBCiE+VEc75nnPmQU5ftRuHdkQ=
 github.com/google/go-tpm v0.9.8 h1:slArAR9Ft+1ybZu0lBwpSmpwhRXaa85hWtMinMyRAWo=
 github.com/google/go-tpm v0.9.8/go.mod h1:h9jEsEECg7gtLis0upRBQU+GhYVH6jMjrFxI8u6bVUY=
 github.com/klauspost/compress v1.19.2 h1:hMRETovs/pu/dVWN7zIT1PGG8t509MwT6bO7XSi26R8=
