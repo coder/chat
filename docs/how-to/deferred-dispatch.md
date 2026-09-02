@@ -16,13 +16,14 @@ retry or time out.
    runtime-managed detached work context, concurrently with the webhook
    response — the acknowledgement no longer waits on your handler (though the
    tail may begin before the 2xx is actually written). The runtime renews the
-   thread lock lease in the background while the handler runs. If the state
-   backend fails to extend the lease (an error or a lost lease), renewal
-   stops and is logged/observed, but the handler keeps running **without
-   exclusivity** — after the original `ThreadLockTTL` expires, another event
-   on the same thread can acquire the lock and run concurrently. Long
-   handlers should therefore be idempotent or tolerate overlap under state
-   backend failures.
+   thread lock lease in the background while the handler runs. If the lease
+   is lost — the state backend fails to extend it, it expired, or another
+   runtime instance released it — the handler's context is cancelled with
+   `chat.ErrPreempted` as its cause (`context.Cause(ctx)`) rather than
+   running on without exclusivity. Cancellation is cooperative: a handler
+   that ignores its context keeps running, so use the `ctx` you are given
+   for every call and treat `ErrPreempted` as "stop, someone else may now
+   own this thread".
 
 ## Enable It
 
@@ -80,8 +81,10 @@ bot, err := chat.New(ctx,
   cap is rejected with `chat.ErrAdmissionRejected` **before** the ack and
   **before** dedupe marking; the adapter maps that to a retry-inducing 503 for
   platform-redelivered shapes (Slack Events API callbacks, Linear webhooks) and
-  a truthful busy signal for direct invocations (Slack slash commands and
-  interactivity). The optional `MaxDetachedPerTenant` additionally caps one
+  a truthful busy signal for direct invocations Slack does not redeliver: a
+  slash command gets a 200 with a visible "at capacity" message, a
+  `block_actions` click gets a 503 that Slack surfaces as a warning on the
+  component. The optional `MaxDetachedPerTenant` additionally caps one
   installation's share through the same rejection path. Sizing guidance lives
   on the `MaxDetached` GoDoc.
 

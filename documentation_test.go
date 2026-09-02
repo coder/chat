@@ -2,32 +2,60 @@ package chat_test
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
 )
 
+// TestDocumentationCoversIntentionalVercelDifferences pins each documented
+// Vercel Chat SDK divergence to its Diátaxis home: the README landing page
+// states the relationship, docs/reference.md carries the runtime semantics,
+// and docs/explanation.md carries the intentional gaps.
 func TestDocumentationCoversIntentionalVercelDifferences(t *testing.T) {
 	t.Parallel()
 
-	readme, err := os.ReadFile("README.md")
-	if err != nil {
-		t.Fatalf("read README.md: %v", err)
+	cases := []struct {
+		path    string
+		phrases []string
+	}{
+		{
+			path: "README.md",
+			phrases: []string{
+				"not a TypeScript API port",
+			},
+		},
+		{
+			path: "docs/reference.md",
+			phrases: []string{
+				"Handlers are single-slot per hook",
+				"Message history is application-owned",
+				"Thread Application State",
+				"HistoryReader",
+			},
+		},
+		{
+			path: "docs/explanation.md",
+			phrases: []string{
+				"not a TypeScript API port",
+				"no dedicated `OnDirectMessage` hook",
+				"no public proactive `OpenDM`",
+				"no thread application state APIs",
+				"no full Vercel Chat SDK feature parity",
+			},
+		},
 	}
-	readmeText := string(readme)
-	for _, phrase := range []string{
-		"not a TypeScript API port",
-		"Handlers are single-slot per hook",
-		"no dedicated `OnDirectMessage` hook",
-		"no public proactive `OpenDM`",
-		"no thread application state APIs",
-		"no full Vercel Chat SDK feature parity",
-		"Message history is application-owned",
-		"Thread Application State",
-		"HistoryReader",
-	} {
-		if !strings.Contains(readmeText, phrase) {
-			t.Fatalf("README.md does not mention %q", phrase)
+	for _, tc := range cases {
+		source, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatalf("read %s: %v", tc.path, err)
+		}
+		text := string(source)
+		for _, phrase := range tc.phrases {
+			if !strings.Contains(text, phrase) {
+				t.Fatalf("%s does not mention %q", tc.path, phrase)
+			}
 		}
 	}
 
@@ -99,7 +127,7 @@ func TestDocumentationCoversMessageHistoryCapability(t *testing.T) {
 		phrases []string
 	}{
 		{
-			path: "README.md",
+			path: "docs/reference.md",
 			phrases: []string{
 				"HistoryReader",
 				"Optional Capability",
@@ -182,6 +210,51 @@ func TestLinearHowToSnippetsAreExtractedFromBuildableSource(t *testing.T) {
 		}
 		if !strings.Contains(normalizedSource, normalizedSnippet) {
 			t.Fatalf("doc snippet drifted from %s:\n%s", path, snippet)
+		}
+	}
+}
+
+// TestREADMEMarkedSnippetsBuild keeps the README's hello-world honest: every
+// fenced Go block annotated with a `<!-- build -->` marker must be a complete
+// program that compiles against the current module.
+//
+// Deliberately not parallel: the `go build` subprocess runs before the parallel
+// batch so its CPU burst cannot skew timing-sensitive dispatch tests.
+func TestREADMEMarkedSnippetsBuild(t *testing.T) {
+	readme, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatalf("read README.md: %v", err)
+	}
+	pattern := regexp.MustCompile("(?s)<!-- build -->\\s*```go\\n(.*?)```")
+	matches := pattern.FindAllStringSubmatch(string(readme), -1)
+	if len(matches) == 0 {
+		t.Fatal("README.md has no build-marked Go snippets")
+	}
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("locate go tool: %v", err)
+	}
+	for i, match := range matches {
+		snippet := match[1]
+		if !strings.HasPrefix(snippet, "package main\n") {
+			t.Fatalf("README snippet %d is not a main package", i+1)
+		}
+		// The package must live inside the root module so imports of
+		// github.com/coder/chat resolve; the leading underscore keeps a stray
+		// directory out of every `./...` pattern.
+		dir, err := os.MkdirTemp(".", "_readme_snippet_")
+		if err != nil {
+			t.Fatalf("create snippet dir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.RemoveAll(dir) })
+		if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(snippet), 0o600); err != nil {
+			t.Fatalf("write snippet: %v", err)
+		}
+		// Inherit GOFLAGS (for example -race) so the build shares this test
+		// run's cache instead of recompiling every dependency.
+		cmd := exec.Command(goTool, "build", "-o", os.DevNull, "./"+dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("README snippet %d does not build: %v\n%s", i+1, err, out)
 		}
 	}
 }
