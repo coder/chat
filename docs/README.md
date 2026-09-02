@@ -30,8 +30,10 @@ Task-oriented guides for people already running a bot.
 
 ## Reference
 
-- [API and package reference](reference.md) — pkg.go.dev pointers, module
-  layout, and per-adapter capability status.
+- [Reference](reference.md) — module layout and pkg.go.dev pointers, the
+  runtime's semantics by concept (construction, webhooks, routing, dispatch,
+  state, concurrency, messages, history, actors, adapter access),
+  per-adapter capability status, the examples, and the testing contract.
 - [Linear agent capability gaps](linear-agent-capabilities.md) — tracked list
   of Linear agent APIs the adapter does not yet wrap.
 
@@ -39,7 +41,9 @@ Task-oriented guides for people already running a bot.
 
 - [Architecture and design decisions](explanation.md) — an index over
   [`CONTEXT.md`](../CONTEXT.md) (the ubiquitous language and architecture
-  document) and the [ADRs](adr/) that record every significant decision.
+  document) and the [ADRs](adr/) that record every significant decision,
+  plus the design goals, the Vercel Chat SDK concept map, the non-goals, and
+  the intentional gaps.
 
 ## Non-User Documentation
 
