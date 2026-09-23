@@ -1,20 +1,16 @@
 # How To Run Linear Agent Sessions
 
-The Linear adapter (experimental) turns Linear agent sessions into normal
-Chat SDK Go threads: when a user mentions or delegates to your Linear app, a
-session event arrives as a `MessageEvent`, and `Thread.Post` sends an agent
-activity response. Beyond that portable surface, the full agent activity
-vocabulary — thoughts, responses, actions, elicitations, and errors, plus
-session updates carrying plans and external URLs — is exposed
-through typed adapter access (see [ADR 0001](../adr/0001-linear-app-actor-slice.md),
-[ADR 0008](../adr/0008-linear-full-adapter.md), and
-[ADR 0013](../adr/0013-linear-generic-comments.md)).
+When someone mentions your Linear app or delegates an issue to it, Linear
+opens an agent session. The Linear adapter (experimental) turns that session
+into an ordinary thread: the session event arrives as a `MessageEvent`, and
+`Thread.Post` answers with an agent response. Thoughts, actions,
+elicitations, errors, plans, and external links go through typed adapter
+access ([ADR 0008](../adr/0008-linear-full-adapter.md)).
 
-Start from the runnable example:
-[`examples/linear-agent-hello-world`](../../examples/linear-agent-hello-world/README.md)
-walks through the Linear OAuth app setup (app-actor client credentials,
-webhook configuration, public HTTPS URL), lists the expected behavior, and
-notes common setup problems.
+Start from the runnable example,
+[`examples/linear-agent-hello-world`](../../examples/linear-agent-hello-world/README.md).
+Its README covers the Linear OAuth app setup, the webhook configuration, and
+common setup problems.
 
 ## Construct The Adapter
 
@@ -35,10 +31,9 @@ self-authored activities are filtered before routing.
 
 ## Handle Sessions Like Any Thread
 
-New and prompted agent sessions route through the normal hooks. Be aware that
-`Thread.Post` on an agent session thread creates an agent activity
-**response** — a terminal, session-completing "here is my answer" activity —
-so only post it when the answer is genuinely final:
+New sessions and follow-up prompts route through the normal hooks. On a
+session thread, `Thread.Post` creates a **response** activity, which tells
+Linear the session is complete. Post it only when the answer is final:
 
 ```go
 bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
@@ -51,26 +46,28 @@ bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 })
 ```
 
-For sessions that need visible progress before the final answer, start with a
-thought instead (next sections).
+To show progress before the final answer, post a thought first (next
+sections).
 
 ## Mind The Timing Contract
 
-Linear expects a first activity within roughly 10 seconds of a session event
-and further activity within roughly 30 minutes. Post a quick **thought**
-(`PostThought`) fast — not a response: a `response` activity is a completion
-signal that ends the session, so reserve `Thread.Post` for the final answer.
-Use [deferred dispatch](deferred-dispatch.md) for the real work — your
-handler moves to a detached work context launched at ack time, so the webhook
-acknowledgement no longer waits on it.
+Linear expects a first activity within about 10 seconds of a session event,
+and more activity within about 30 minutes. So:
+
+1. Post a quick **thought** (`PostThought`) right away. Not a response: a
+   response ends the session.
+2. Enable [deferred dispatch](deferred-dispatch.md) so the real work runs
+   after the webhook is acknowledged.
+3. Post the final answer with `Thread.Post`.
 
 ## Use The Full Activity Surface
 
 Everything beyond a plain response goes through typed adapter access. Each
-call can fail (validation, auth, rate limiting) — check every error before
-issuing the next activity.
+call can fail (validation, auth, rate limiting), so check every error before
+posting the next activity.
 
-Nonterminal activities keep the session alive and show progress:
+Thoughts, actions, and session updates keep the session open and show
+progress:
 
 ```go
 la, ok := chat.AdapterAs[*linear.Adapter](bot, "linear")
@@ -103,9 +100,8 @@ if err := la.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
 }
 ```
 
-A session ends with exactly **one** completion signal — a response
-(`Thread.Post`), an elicitation, or an error. Pick one branch; do not emit
-two completions in the same turn:
+Each turn ends with exactly **one** completion: a response (`Thread.Post`),
+an elicitation, or an error. Pick one; never post two in the same turn:
 
 ```go
 if needsInput {
@@ -143,32 +139,30 @@ func confirmStop(ctx context.Context, ev *chat.MessageEvent) (bool, error) {
 }
 ```
 
-Call it first in every message handler and return when it reports stopped.
-This check only runs when the stop event reaches your handler, and events on
-one thread are serialized by the thread lock — a stop arriving while a
-handler is still running cannot preempt it (`ConcurrencyDrop` discards it on
-conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
-returns). The runtime has no preemption: the ADR 0012 force/steerability hook
-that would allow it is rejected for v0.x by
-[ADR 0015](../adr/0015-runtime-coordination.md), so **Linear's Stop control
-cannot cancel in-flight work through this adapter**. What
-you can do: structure long
-sessions as short handler turns (each turn checks `StopRequested` on the
-event that started it before doing more work — `confirmStop` above is exactly
-that turn-boundary check), or receive the stop signal out-of-band through
-your own channel (for example, your own Linear webhook endpoint or admin API
-that sets a cancellation flag your handlers poll — the flag must be set by
-something outside the runtime's serialized dispatch).
+Call it first in every message handler and return when it reports a stop.
+
+**Stop cannot interrupt a running handler.** The stop prompt is an ordinary
+event on the session's thread, so the thread lock serializes it behind the
+handler that is already running. `ConcurrencyDrop` discards it;
+`ConcurrencyQueue` delivers it only after the running handler returns. The
+runtime has no preemption hook
+([ADR 0015](../adr/0015-runtime-coordination.md) rejects one for v0.x).
+Two patterns work:
+
+- **Short turns.** Split long work into short handler turns, and start each
+  turn with a stop check like `confirmStop`.
+- **An out-of-band flag.** Receive the stop somewhere outside the runtime's
+  serialized dispatch — for example your own Linear webhook endpoint or an
+  admin API — and set a cancellation flag that your handlers poll.
 
 ## Worked Capability Loops
 
-The rest of this page walks the full interaction loops. Every code block is
-extracted from the buildable, tested example
-([`examples/linear-agent-hello-world/capabilities.go`](../../examples/linear-agent-hello-world/capabilities.go));
-a documentation test keeps the snippets and the source in sync. The
-`linearAgentAccess` parameter is the example's small interface over
-`*linear.Adapter` — obtained via `chat.AdapterAs` as shown above — so the
-handlers stay testable against a fake.
+The rest of this page walks through complete interaction loops. Every code
+block comes from the tested example
+([`examples/linear-agent-hello-world/capabilities.go`](../../examples/linear-agent-hello-world/capabilities.go)),
+and a documentation test keeps them in sync. `linearAgentAccess` is the
+example's small interface over `*linear.Adapter` (obtained with
+`chat.AdapterAs`, as above), so the helpers can be tested against a fake.
 
 ### Start A Session Proactively
 
@@ -400,20 +394,22 @@ func publishPullRequest(ctx context.Context, la linearAgentAccess, threadID chat
 
 ## Generic Issue Comments
 
-The adapter also participates in plain Linear issue comments (outside agent
-sessions): a comment that @-mentions your app arrives on a comment-backed
-thread, and `Thread.Post` replies in that comment thread. Normal routing
-precedence applies: the mention routes to `OnNewMention` only while the
-thread is unsubscribed — in a thread you have subscribed, every comment
-(mention or not) routes to `OnSubscribedMessage`, so do not put
-mention-specific handling exclusively in `OnNewMention`.
-Agent-activity methods (`PostThought`, `UpdateSession`, ...) are rejected on
-comment threads — they only make sense inside agent sessions.
+The adapter also takes part in plain issue comments, outside agent sessions
+([ADR 0013](../adr/0013-linear-generic-comments.md)). A comment that
+@-mentions your app arrives on a comment thread, and `Thread.Post` replies
+in that comment thread. Enable the **Comment** webhook category to receive
+them.
+
+Normal routing applies: a mention goes to `OnNewMention` only while the
+thread is unsubscribed. Once you subscribe, every comment in the thread,
+mention or not, goes to `OnSubscribedMessage`, so do not put mention-only
+logic solely in `OnNewMention`. Agent-activity methods (`PostThought`,
+`UpdateSession`, ...) fail on comment threads; they only work inside agent
+sessions.
 
 ## Known Gaps
 
-The Linear adapter is experimental. The Linear agent API surface it wraps is
-itself in developer preview upstream, and some operations (for example issue
-workflow automation) still require the `GraphQL` escape hatch rather than
-typed helpers. The tracked list lives in
-[`docs/linear-agent-capabilities.md`](../linear-agent-capabilities.md).
+The Linear adapter is experimental because Linear's agent API is itself in
+developer preview. Some operations, such as moving an issue through its
+workflow states, still need the `GraphQL` escape hatch instead of a typed
+helper. The [capability list](../linear-agent-capabilities.md) tracks them.

@@ -1,21 +1,19 @@
 # How To Install Into Multiple Workspaces (Multi-Tenant)
 
-By default an adapter is single-install: one Slack workspace or one Linear
-organization, with credentials passed directly in the adapter options.
-Multi-tenant mode is opt-in and lets one deployment serve many installs by
-resolving per-tenant credentials at webhook time (see
-[ADR 0006](../adr/0006-multi-tenant-install.md)).
+By default an adapter serves one Slack workspace or one Linear organization,
+with credentials passed in its options. Multi-tenant mode lets one deployment
+serve many: the adapter looks up each tenant's credentials when a webhook
+arrives ([ADR 0006](../adr/0006-multi-tenant-install.md)).
 
-The boundary is deliberate:
+The split of work is deliberate:
 
-- **The runtime resolves credentials.** You provide a
-  `chat.InstallStore` and the adapter calls it with the platform tenant
-  (Slack team ID, Linear organization ID) extracted from each webhook.
-  Verification timing differs per adapter — see the caution below.
-- **You own the OAuth web flow.** The authorize redirect, callback route,
-  token exchange, and install database are ordinary application HTTP routes
-  and storage — the runtime does not mount them. App-user account linking and
-  login flows stay app-owned too.
+- **The adapter looks up credentials.** You implement a `chat.InstallStore`;
+  the adapter calls it with the tenant from each webhook (the Slack team ID
+  or the Linear organization ID).
+- **You own the OAuth flow.** The install redirect, the callback route, the
+  token exchange, and the install database are ordinary routes and storage in
+  your application; the runtime does not mount them. Account linking and
+  login flows for your users are yours too.
 
 ## Implement An InstallStore
 
@@ -25,10 +23,10 @@ type InstallStore interface {
 }
 ```
 
-Return `chat.ErrInstallNotFound` for tenants you do not know: the adapter
-acknowledges the event and ignores it (an uninstalled workspace is not an
-error). Any other error is treated as a transport failure and surfaces as a
-5xx so the platform retries.
+Return `chat.ErrInstallNotFound` for a tenant you do not know. The adapter
+acknowledges and ignores that tenant's events, because an uninstalled
+workspace is not an error. Any other error becomes a 5xx, so the platform
+retries.
 
 ```go
 type installStore struct{ db *sql.DB }
@@ -58,9 +56,11 @@ The `Credential` field is adapter-specific:
   (either client credentials for token exchange or a pre-exchanged access
   token)
 
-In multi-tenant mode the adapter does not discover the app's identity per
-install, so treat the per-install bot identity as **required** on both
-adapters:
+### Store The Bot User ID
+
+In multi-tenant mode the adapter cannot discover the bot's own identity per
+install, so store it on every install record. Without it, the bot cannot
+recognize its own messages:
 
 - Slack: without `SlackInstall.BotUserID` (or `Install.BotActorID`),
   self-message filtering has no identity to match — if you subscribe to
@@ -93,18 +93,24 @@ linearAdapter, err := linear.New(ctx, linear.Options{
 })
 ```
 
-For Slack, the signing secret is app-level and shared; signature verification
-happens before any store lookup, so the tenant your store sees came from a
-verified request. For Linear, the webhook secret is itself per-install, so
-the adapter must parse the organization ID from the **unverified** body and
-call `Lookup` first to fetch the secret it verifies with. Treat the Linear
-tenant argument as untrusted routing input: keep `Lookup` a cheap indexed
-read, do not let unknown tenants trigger expensive work, and rely on
-`ErrInstallNotFound` (not errors) for tenants you do not know.
+### Treat Linear Tenants As Untrusted
+
+The two adapters verify requests at different times:
+
+- **Slack** has one signing secret for the whole app. The adapter verifies
+  the signature before it calls your store, so the tenant your store sees
+  came from a verified request.
+- **Linear** has a webhook secret per install. The adapter must read the
+  organization ID from the **unverified** body and call `Lookup` to get the
+  secret it verifies with.
+
+So treat the Linear tenant argument as untrusted input. Keep `Lookup` a
+cheap indexed read, do not let unknown tenants trigger expensive work, and
+return `ErrInstallNotFound`, not an error, for tenants you do not know.
 
 ## Wire Up Your OAuth Flow
 
-Sketch of the app-owned part for Slack:
+For Slack, the part you build looks like this:
 
 1. Mount `/slack/install` — redirect to Slack's OAuth authorize URL with your
    client ID and scopes.
@@ -113,16 +119,16 @@ Sketch of the app-owned part for Slack:
    install database.
 3. Your `InstallStore.Lookup` reads that row.
 
-Uninstalls: delete the row; subsequent events from that tenant resolve to
-`ErrInstallNotFound` and are acknowledged and ignored.
+To handle an uninstall, delete the row. Later events from that tenant
+resolve to `ErrInstallNotFound` and are acknowledged and ignored.
 
 ## What Stays Tenant-Correct Automatically
 
-Thread IDs, actors, and dedupe keys all carry the platform tenant, so two
-workspaces never collide in runtime state. Thread handle reconstruction
-(`bot.Thread(ctx, threadID)`) decodes and validates the stored ID without
-touching the install store; the credential lookup for the stored tenant
-happens when the reconstructed handle actually posts. Proactive posts work
-across installs without extra plumbing — but a successful `bot.Thread` call
-is not proof the tenant is still installed; an uninstalled tenant surfaces as
-an error from the post.
+Thread IDs, actors, and dedupe keys all include the tenant, so two
+workspaces never collide in runtime state.
+
+Proactive posts work across installs with no extra code. `bot.Thread(ctx,
+threadID)` decodes and validates a stored thread ID without calling your
+install store; the credential lookup happens when the handle posts. So a
+successful `bot.Thread` call does not prove the tenant is still installed.
+An uninstalled tenant shows up as an error from the post.
