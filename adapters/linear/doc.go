@@ -1,7 +1,8 @@
 // Package linear provides a Linear app-actor adapter for Chat SDK Go.
 //
 // The adapter participates as a Linear app-owned actor on App-Actor Client
-// Credentials (a Single-Install Adapter). It supports two Linear interaction
+// Credentials (a Single-Install Adapter by default; see Multi-tenant installs
+// below for serving many organizations). It supports two Linear interaction
 // models, both reached through the small chat.Adapter interface and the opaque,
 // versioned Thread ID:
 //

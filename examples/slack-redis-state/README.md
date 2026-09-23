@@ -42,12 +42,9 @@ In **Event Subscriptions**:
    https://YOUR_PUBLIC_HOST/webhooks/slack
    ```
 
-3. Subscribe to these **Bot User Events**:
-
-   ```text
-   app_mention
-   message.im
-   ```
+3. Subscribe to the `app_mention` **Bot User Event**. Also add `message.im`
+   if you want direct messages to reach the bot (it needs the `im:history`
+   scope).
 
 4. Save changes.
 
@@ -74,7 +71,7 @@ Treat both values like passwords.
 
 ## Run Redis
 
-From this example directory:
+From the repository root:
 
 ```sh
 cd examples/slack-redis-state

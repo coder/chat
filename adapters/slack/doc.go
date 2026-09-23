@@ -24,9 +24,12 @@
 //
 // The install credential rides as the adapter-specific slack.SlackInstall payload
 // on chat.Install.Credential (a Platform Escape Hatch for credentials): the
-// per-workspace bot token plus an optional bot user id used for tenant-correct
-// self-filtering. Thread Handle reconstruction (out-of-webhook posting) resolves
-// the same way, keyed by the Platform Tenant decoded from the opaque Thread ID.
+// per-workspace bot token plus the bot user id used for tenant-correct
+// self-filtering. The bot user id is optional in the type but should be treated
+// as required: without it the bot's own posts are not filtered, and a
+// subscribed thread can loop on its own replies. Thread Handle reconstruction
+// (out-of-webhook posting) resolves the same way, keyed by the Platform Tenant
+// decoded from the opaque Thread ID.
 //
 // # Message history (ADR 0009)
 //
@@ -41,15 +44,17 @@
 //
 // # Rate-limit retry (ADR 0005)
 //
-// Outbound posts are hardened against Slack throttling by default. The adapter
-// wraps its Slack Web API call site (chat.postMessage / chat.postEphemeral /
-// conversations.open) with bounded retry on a Slack 429 (honoring the Retry-After
-// header, in seconds) and the ratelimited API error. Retry is bounded three ways:
-// an attempt cap (Options.RetryPolicy.MaxAttempts), a cumulative backoff ceiling
-// (MaxElapsed), and the caller's context deadline. The single load-bearing
-// invariant is that in-line synchronous retry never sleeps past the caller's
-// context deadline, so retry under the default DispatchSync stays inside Slack's
-// 3-second ack window and cannot trigger a platform redelivery storm.
+// Outbound calls are hardened against Slack throttling by default. The adapter
+// wraps every Slack Web API call (including auth.test, chat.postMessage,
+// chat.postEphemeral, conversations.open, views.open, and history reads) and
+// every response_url post with bounded retry on a Slack 429 (honoring the
+// Retry-After header, in seconds) and the ratelimited API error. Retry is
+// bounded three ways: an attempt cap (Options.RetryPolicy.MaxAttempts), a
+// cumulative backoff ceiling (MaxElapsed), and the caller's context deadline.
+// The single load-bearing invariant is that in-line synchronous retry never
+// sleeps past the caller's context deadline, so retry under the default
+// DispatchSync stays inside Slack's 3-second ack window and cannot trigger a
+// platform redelivery storm.
 //
 // The RetryPolicy is per-adapter platform config in Options, never Runtime
 // Options. Its zero value is a conservative default that keeps MaxElapsed under

@@ -33,7 +33,7 @@ hatch rather than typed helpers.
 | Typed activity helpers | Supported | `PostThought`, `PostAction`, `PostElicitation`, `PostError`; `Thread.Post` creates the `response` activity. |
 | Agent-to-human signals | Supported | `auth` and `select` signals with metadata pass through `CreateAgentActivity` / `PostElicitation`. |
 | Human-to-agent stop signal | Supported | `RawMessageFrom(ev.Message)` exposes `Signal` / `StopRequested()`; see the routing caveat below. |
-| Session updates | Supported | `UpdateSession` sets `externalUrls` and replaces the session plan array. |
+| Session updates | Supported | `UpdateSession` replaces `externalUrls` or adjusts them with `AddExternalURLs` / `RemoveExternalURLs`, and replaces the session plan array. |
 | GraphQL escape hatch | Supported | `GraphQL` (single-install) and `GraphQLForTenant` (multi-tenant) reuse adapter auth and token refresh, surface GraphQL errors, and never expose tokens. |
 | Proactive agent session creation | Supported | `CreateSessionOnIssue` / `CreateSessionOnComment` (plus `ForTenant` variants) wrap `agentSessionCreateOnIssue` / `agentSessionCreateOnComment`; the returned `CreatedAgentSession` carries the adapter's opaque `ThreadID` ([#47](https://github.com/coder/chat/issues/47)). |
 | Repository suggestions | Supported | `SuggestRepositories` wraps `issueRepositorySuggestions` with typed candidates and confidence-scored results ([#48](https://github.com/coder/chat/issues/48)). |

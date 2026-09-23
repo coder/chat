@@ -45,8 +45,12 @@ import (
 	chatredis "github.com/coder/chat/state/redis"
 )
 
+redisOptions, err := redis.ParseURL(os.Getenv("REDIS_URL")) // e.g. redis://127.0.0.1:6379/0
+if err != nil {
+	return err
+}
 redisState, err := chatredis.New(ctx, chatredis.Options{
-	Client: redis.NewClient(&redis.Options{Addr: os.Getenv("REDIS_ADDR")}),
+	Client: redis.NewClient(redisOptions),
 	Prefix: "mybot", // see "One namespace per bot application" below
 })
 ```
