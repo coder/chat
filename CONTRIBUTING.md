@@ -6,9 +6,11 @@ to discuss a change before you build it.
 
 ## Set Up
 
-1. Install the toolchain pinned in `mise.toml` (Go 1.26.3 and helpers):
+1. Trust the repository's `mise.toml`, then install the toolchain it pins
+   (Go 1.26.3 and helpers):
 
    ```sh
+   mise trust
    mise install
    ```
 
@@ -30,11 +32,11 @@ to discuss a change before you build it.
 
 ## Build And Test
 
-CI runs these two commands on every pull request, with `GOFLAGS=-race`:
+CI runs these two commands on every pull request:
 
 ```sh
-mise run vet    # go vet in every module
-mise run test   # tests in every module
+mise run vet                    # go vet in every module
+GOFLAGS=-race mise run test     # tests in every module, with the race detector
 ```
 
 Narrower tasks help while you iterate:

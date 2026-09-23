@@ -12,8 +12,9 @@ serializes work per thread, and retries rate-limited API calls.
   errors. It is a library, not a framework.
 - **Scales out.** Replicas share state on Redis, Postgres, or NATS JetStream,
   so they dedupe redeliveries and serialize work per thread.
-- **Handles slow work.** Acknowledge the webhook first, then run LLM calls
-  and other long handlers on a detached context.
+- **Handles slow work.** Opt in to deferred dispatch to acknowledge the
+  webhook first, then run LLM calls and other long handlers on a detached
+  context.
 
 ## Hello, Slack
 
@@ -100,9 +101,10 @@ go get github.com/coder/chat/state/nats
 - **Shared state you already run.** Memory for development; Redis, Postgres,
   or NATS JetStream in production, all tested by one conformance suite —
   [choose a state backend](docs/how-to/choose-a-state-backend.md).
-- **Ack-then-work dispatch.** Handlers run after the webhook is
-  acknowledged, with lock renewal, an admission cap, and five concurrency
-  strategies (drop, queue, debounce, concurrent, burst) —
+- **Ack-then-work dispatch.** Handlers run synchronously by default; opt in
+  to `DispatchDeferred` to run them after the webhook is acknowledged, with
+  lock renewal, an admission cap, and five concurrency strategies (drop,
+  queue, debounce, concurrent, burst) —
   [defer long-running work](docs/how-to/deferred-dispatch.md).
 - **Slash commands and interactive components.** Commands and button clicks
   have their own hooks; Block Kit and modals go through typed adapter access —
