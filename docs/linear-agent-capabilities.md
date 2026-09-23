@@ -59,18 +59,12 @@ the core adapter.
 
 **Status:** Inherent limitation; needs an application-owned pattern.
 
-The `stop` signal arrives as a prompted event on the same thread, so it is
-serialized behind the thread lock like any other event: it cannot preempt a
-handler that is already running (`ConcurrencyDrop` discards it during a
-conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
-returns). There is no pre-lock interception hook, so Linear's Stop control
-cannot drive active cancellation through this adapter today. Workable
-patterns: split sessions into short handler turns that check `StopRequested`
-at each turn boundary, or deliver the stop out-of-band (an application-owned
-webhook/endpoint outside the runtime's serialized dispatch that sets a
-cancellation flag handlers poll). The turn-boundary pattern is worked through
-in [`docs/how-to/linear-agent-sessions.md`](how-to/linear-agent-sessions.md)
-(`confirmStop`); the serialization limitation itself remains.
+The `stop` signal arrives as a prompted event on the same thread, so the
+thread lock serializes it like any other event and it cannot preempt a
+running handler. The
+[Linear agent sessions guide](how-to/linear-agent-sessions.md#use-the-full-activity-surface)
+explains the limitation and the workable patterns (short handler turns that
+check `StopRequested`, or an out-of-band cancellation flag).
 
 ### 3. Best-Practice Webhook Categories
 

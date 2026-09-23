@@ -72,53 +72,9 @@ assignment-created sessions started arriving.
 ## Expose Localhost
 
 Linear requires a public HTTPS endpoint. For local development, expose port
-`8080` with a tunnel such as `ngrok`, `cloudflared`, Tailscale Funnel, or another
-HTTPS forwarding tool, then use that public HTTPS URL as `YOUR_PUBLIC_HOST`.
-
-### Expose Localhost With Tailscale Funnel
-
-Tailscale has two similar commands:
-
-- `tailscale serve` shares a local service only inside your tailnet.
-- `tailscale funnel` shares a local service on the public internet.
-
-Linear needs a public HTTPS URL, so use Funnel rather than Serve.
-
-Start the example on port `8080`:
-
-```sh
-export LINEAR_WEBHOOK_SECRET="..."
-export LINEAR_CLIENT_CREDENTIALS_CLIENT_ID="..."
-export LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET="..."
-export PORT=8080
-
-go run ./examples/linear-agent-hello-world
-```
-
-In another terminal, expose it with Funnel:
-
-```sh
-tailscale funnel --bg --https=443 localhost:8080
-tailscale funnel status
-```
-
-The status output should show a public HTTPS URL similar to:
-
-```text
-https://your-machine.your-tailnet.ts.net
-```
-
-Use that URL in Linear's webhook settings:
-
-```text
-https://your-machine.your-tailnet.ts.net/webhooks/linear
-```
-
-When you are done, turn the public endpoint off:
-
-```sh
-tailscale funnel reset
-```
+`8080` with a tunnel such as Tailscale Funnel, `ngrok`, or `cloudflared` (see
+[Step 5 of the Slack tutorial](../../docs/tutorials/slack-bot.md#step-5-expose-the-bot-to-slack)
+for Funnel commands), then use that public HTTPS URL as `YOUR_PUBLIC_HOST`.
 
 ## Run
 
@@ -169,16 +125,6 @@ Expected behavior:
    ```
 
    A follow-up carrying Linear's stop signal gets a stop confirmation instead.
-
-## Dogfooding Evidence
-
-Before claiming a live Linear dogfood passed, capture screenshots or video of:
-
-- the Linear app actor settings;
-- the webhook configuration with agent session events enabled;
-- the first app mention and created agent session;
-- the ephemeral thought and final response;
-- a follow-up prompt and follow-up thought/response.
 
 ## Notes
 

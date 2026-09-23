@@ -7,67 +7,22 @@ routed through Redis-backed state.
 
 ## Slack App Setup
 
-Create or open a Slack app from the Slack app dashboard:
+Set up a Slack app as in the [tutorial](../../docs/tutorials/slack-bot.md):
+Steps 2–3 create the app and collect credentials, Step 5 exposes your
+machine, and Step 6 subscribes to events. This example also replies to follow-up messages in
+subscribed threads, so add Step 8's `channels:history` scope and
+`message.channels` event too.
 
-https://api.slack.com/apps
-
-In **OAuth & Permissions**, add these **Bot Token Scopes**:
-
-| Scope | Why this example needs it |
+| Setting | Value |
 | --- | --- |
-| `chat:write` | Send replies with `chat.postMessage`. |
-| `app_mentions:read` | Receive `app_mention` events when the bot is mentioned. |
-| `im:history` | Optional for channel-only testing, required if you subscribe to `message.im` so direct messages reach the bot. |
+| Bot token scopes | `chat:write`, `app_mentions:read`, `channels:history` (add `im:history` for direct messages) |
+| Bot events | `app_mention`, `message.channels` (add `message.im` for direct messages) |
+| Request URL | `https://YOUR_PUBLIC_HOST/webhooks/slack` |
+| `SLACK_BOT_TOKEN` | **OAuth & Permissions** → Bot User OAuth Token (`xoxb-…`) |
+| `SLACK_SIGNING_SECRET` | **Basic Information** → App Credentials → Signing Secret |
 
-This example does not use ephemeral DM fallback. If you change it to call
-`PostEphemeral` with `FallbackToDM: true`, also add `im:write` so the adapter can
-open a DM with `conversations.open`.
-
-In **App Home**:
-
-1. Under **Show Tabs**, enable the **Messages Tab**.
-2. Make the Messages tab writable. Depending on Slack's current UI, this appears
-   as disabling read-only mode or enabling **Allow users to send Slash commands
-   and messages from the messages tab**.
-
-If Slack shows **"Sending messages to this app has been turned off"** in the app
-DM, this App Home Messages tab setting is still off or read-only.
-
-In **Event Subscriptions**:
-
-1. Enable events.
-2. Set the request URL to:
-
-   ```text
-   https://YOUR_PUBLIC_HOST/webhooks/slack
-   ```
-
-3. Subscribe to the `app_mention` **Bot User Event**. Also add `message.im`
-   if you want direct messages to reach the bot (it needs the `im:history`
-   scope).
-
-4. Save changes.
-
-After changing scopes, App Home settings, or event subscriptions, reinstall the
-app from **OAuth & Permissions** so Slack applies the new configuration to your
-workspace.
-
-The app must be reachable from Slack. For local development, expose port `8080`
-with a tunnel such as `ngrok`, `cloudflared`, or Tailscale Funnel, then use that
-public HTTPS URL as `YOUR_PUBLIC_HOST`.
-
-## Install And Get Credentials
-
-1. Go to **OAuth & Permissions**.
-2. Click **Install to Workspace** or **Reinstall to Workspace** after changing
-   scopes, App Home settings, or event subscriptions.
-3. Copy **Bot User OAuth Token**. It starts with `xoxb-`; use it as
-   `SLACK_BOT_TOKEN`.
-4. Go to **Basic Information**.
-5. In **App Credentials**, copy **Signing Secret**; use it as
-   `SLACK_SIGNING_SECRET`.
-
-Treat both values like passwords.
+Reinstall the app from **OAuth & Permissions** after changing scopes or
+events.
 
 ## Run Redis
 
@@ -143,14 +98,3 @@ Redis remembered this subscribed thread.
 - Slack request signatures are verified with `SLACK_SIGNING_SECRET`.
 - The bot token is used for `auth.test` during adapter startup and
   `chat.postMessage` when replying.
-
-Relevant Slack docs:
-
-- App dashboard: https://api.slack.com/apps
-- Events API request URLs: https://docs.slack.dev/apis/events-api/
-- `app_mention` event: https://docs.slack.dev/reference/events/app_mention/
-- `message.im` event: https://docs.slack.dev/reference/events/message.im
-- App Home Messages tab: https://docs.slack.dev/surfaces/app-home
-- `chat:write` scope: https://docs.slack.dev/reference/scopes/chat.write
-- `conversations.open` scopes: https://docs.slack.dev/reference/methods/conversations.open/
-- Bot tokens and `xoxb-` tokens: https://docs.slack.dev/authentication/tokens

@@ -60,7 +60,9 @@ Then configure it:
 2. In **App Home**, under **Show Tabs**, enable the **Messages Tab** and allow
    users to send messages from it (Slack labels this "Allow users to send
    Slash commands and messages from the messages tab"). This matters only for
-   direct messages; mentions in channels work without it.
+   direct messages; mentions in channels work without it. If Slack later
+   shows **"Sending messages to this app has been turned off"** in the app's
+   DM, this setting is still off.
 
 3. In **OAuth & Permissions**, click **Install to Workspace** and approve the
    app.
@@ -104,12 +106,16 @@ on the first message. When the bot is up you should see a log line like:
 
 Slack must be able to reach your machine over public HTTPS. In a second
 terminal, expose port 8080 with your tunnel of choice. For example, with
-Tailscale Funnel:
+Tailscale Funnel (not `tailscale serve`, which is visible only inside your
+tailnet; Funnel must be enabled for your tailnet):
 
 ```sh
 tailscale funnel --bg --https=443 localhost:8080
 tailscale funnel status
 ```
+
+Run `tailscale funnel reset` when you are done to turn the public endpoint
+off.
 
 or with ngrok:
 
@@ -209,6 +215,12 @@ Two things to notice:
 - Read the [architecture explanation](../explanation.md) to understand the
   model behind what you just built.
 
-The example's own [README](../../examples/slack-hello-world/README.md) repeats
-the Slack app setup with more detail (including Tailscale Funnel specifics)
-if you need to revisit it later.
+Slack's own documentation for the settings used here:
+
+- App dashboard: <https://api.slack.com/apps>
+- Events API request URLs: <https://docs.slack.dev/apis/events-api/>
+- Events: [`app_mention`](https://docs.slack.dev/reference/events/app_mention/),
+  [`message.channels`](https://docs.slack.dev/reference/events/message.channels),
+  [`message.im`](https://docs.slack.dev/reference/events/message.im)
+- App Home Messages tab: <https://docs.slack.dev/surfaces/app-home>
+- Bot tokens (`xoxb-`): <https://docs.slack.dev/authentication/tokens>
