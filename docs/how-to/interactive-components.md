@@ -117,7 +117,8 @@ mention, post Block Kit content with an `mrkdwn` text element containing
 Under the default `DispatchSync`, the adapter sends Slack its empty 2xx only
 after your handler returns, so a slow handler can miss Slack's 3-second
 budget. Enable [deferred dispatch](deferred-dispatch.md), usually with
-`chat.ConcurrencyQueue`, so the handler runs after the acknowledgement.
+`chat.ConcurrencyQueue`, so the acknowledgement no longer waits for your
+handler.
 
 ## Open A Modal
 

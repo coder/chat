@@ -5,8 +5,8 @@ expects a first agent activity within about 10 seconds. By default the runtime
 runs your handler *before* it acknowledges the webhook, so a handler that
 calls an LLM can easily miss those deadlines.
 
-Deferred dispatch fixes this. The runtime acknowledges the webhook first and
-runs your handler afterwards on a detached context
+Deferred dispatch fixes this. The acknowledgement no longer waits for your
+handler, which runs on a detached context
 ([ADR 0002](../adr/0002-async-dispatch.md)).
 
 ## Enable It
@@ -41,9 +41,9 @@ Dispatch runs in two parts:
 
 1. **Before the acknowledgement**, on the request context: signature
    verification, normalization, dedupe marking, and thread lock acquisition.
-2. **After the acknowledgement**, on a runtime-managed detached context: your
-   handler. It runs concurrently with the webhook response and may start
-   just before the 2xx is written. While it runs, the runtime renews the
+2. **Launched at acknowledgement time**, on a runtime-managed detached
+   context: your handler. It runs concurrently with the webhook response and
+   may start just before the 2xx is written. While it runs, the runtime renews the
    thread lock lease in the background.
 
 If the lease is lost — the state backend fails to extend it, it expires, or

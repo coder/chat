@@ -143,6 +143,6 @@ Expected behavior:
   (`chat.AdapterAs[*linear.Adapter]`) rather than a generic runtime API.
 - Inbound signals (including `stop`) and structured session context are preserved
   on `Message.Raw`; read them with `linear.RawMessageFrom`.
-- This example runs under `chat.DispatchDeferred`, so follow-up work runs
-  after the webhook is acknowledged, while the runtime holds and renews the
-  thread lock.
+- This example runs under `chat.DispatchDeferred`, so the webhook
+  acknowledgement does not wait for follow-up work, and the runtime holds and
+  renews the thread lock while that work runs.

@@ -53,8 +53,8 @@ sections).
 
 Linear expects a first activity within about 10 seconds of a session event,
 and more activity within about 30 minutes. Enable
-[deferred dispatch](deferred-dispatch.md) so the real work runs after the
-webhook is acknowledged. Then, in the handler:
+[deferred dispatch](deferred-dispatch.md) so the webhook acknowledgement no
+longer waits for the real work. Then, in the handler:
 
 1. Post a quick **thought** (`PostThought`) right away. Not a response: a
    response ends the session.
