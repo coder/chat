@@ -94,7 +94,7 @@ thread become common. The concurrency strategy decides what happens to them
 | `ConcurrencyDrop` (default) | It is acknowledged and dropped. |
 | `ConcurrencyQueue` | It waits for the running handler. Only the newest waiting event runs; older waiting events are superseded, and supersession is observable. |
 | `ConcurrencyDebounce` | Each new event replaces the waiting one; only the last event of a `DebounceInterval` quiet period runs. Requires a `DetachTimeout` longer than `DebounceInterval`. |
-| `ConcurrencyConcurrent` | There is no thread lock. Every event runs, up to `MaxConcurrent` at once. |
+| `ConcurrencyConcurrent` | There is no thread lock; events run in parallel, up to `MaxConcurrent` at once. An event waiting for a free slot spends its own `DetachTimeout`; if that runs out first, the event is dropped without running. |
 | `ConcurrencyBurst` | Events collect for a fixed `BurstWindow`, then run as one batch, in join order, under a single lock hold. Nothing accepted is dropped, and each member gets its own `DetachTimeout`. `MaxBurstBatch` optionally closes a full window early; batches run in the order they close. |
 
 Debounce and burst require deferred dispatch. `DebounceInterval`,

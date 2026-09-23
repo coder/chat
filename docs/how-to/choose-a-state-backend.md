@@ -1,8 +1,8 @@
 # How To Choose A State Backend
 
 Every bot needs a `chat.State`. The runtime keeps three things there:
-which threads are subscribed, which events it has already handled (dedupe
-marks), and who holds each thread's lock. That is coordination state, not
+which threads are subscribed, which events it has already accepted (dedupe
+marks, written before any handler runs), and who holds each thread's lock. That is coordination state, not
 product state: keep your application's data in your own database, keyed by
 `ThreadID`.
 
