@@ -1,21 +1,22 @@
 # Linear Agent Capabilities
 
-Status: tracking document for the Linear adapter (`experimental`).
+What the Linear adapter (`experimental`) supports today, and which Linear
+agent APIs it does not wrap yet.
 
-This document compares the Linear adapter against Linear's agent
-documentation:
+The adapter implements the full agent activity surface
+([ADR 0008](adr/0008-linear-full-adapter.md)), generic issue and comment
+participation ([ADR 0013](adr/0013-linear-generic-comments.md)), rate-limit
+retry ([ADR 0005](adr/0005-rate-limit-handling.md)), and multi-tenant
+installs ([ADR 0006](adr/0006-multi-tenant-install.md)). Linear's agent API
+is itself in developer preview and may change. The remaining gaps are
+operations a production agent may need that currently go through the
+`GraphQL` escape hatch instead of a typed helper.
 
-- Developing the Agent Interaction: https://linear.app/developers/agent-interaction
-- Signals: https://linear.app/developers/agent-signals
-- Interaction Best Practices: https://linear.app/developers/agent-best-practices
-- Getting Started: https://linear.app/developers/agents
-
-The adapter implements the full agent activity surface (ADR 0008), generic
-issue/comment participation (ADR 0013), rate-limit retry (ADR 0005), and
-multi-tenant installs (ADR 0006). Linear's Agent API is itself in Developer
-Preview upstream and may change. The remaining gaps below are operations a
-production-quality agent may need that currently require the `GraphQL` escape
-hatch rather than typed helpers.
+Linear's agent documentation:
+[Getting started](https://linear.app/developers/agents),
+[agent interaction](https://linear.app/developers/agent-interaction),
+[signals](https://linear.app/developers/agent-signals), and
+[best practices](https://linear.app/developers/agent-best-practices).
 
 ## Current Support
 
@@ -74,11 +75,9 @@ The adapter does not normalize Inbox Notification or Permission Change
 webhooks. Assignment/delegation enters the runtime through Linear's
 `AgentSessionEvent` `created` webhook.
 
-Setup footgun: if direct mentions create sessions but assignment/delegation
-does not, reinstall the app actor after confirming `app:assignable` is in the
-authorization URL. Linear can keep stale install/app state after scope
-changes; during dogfooding we had to delete and recreate the OAuth app before
-assignment-created sessions started arriving.
+If mentions create sessions but assignment or delegation does not, see the
+fix in the
+[example's app setup](../examples/linear-agent-hello-world/README.md#linear-app-setup).
 
 Upstream Vercel Chat SDK precedent, checked on May 13, 2026: its Linear
 adapter registers handlers for `OAuthApp` revocation, `Comment`,
@@ -88,9 +87,5 @@ model. Reaction webhooks are not normalized here either.
 
 ## Planned Work
 
-Future work is sequenced on the public issue tracker, not in this document;
-this page tracks current capability status only. The former tracked gaps for
-proactive session creation ([#47](https://github.com/coder/chat/issues/47)),
-repository suggestions ([#48](https://github.com/coder/chat/issues/48)), and
-worked UX examples ([#49](https://github.com/coder/chat/issues/49)) shipped as
-typed helpers and documented loops; see the Current Support table above.
+Future work is planned in [GitHub issues](https://github.com/coder/chat/issues),
+not in this document.

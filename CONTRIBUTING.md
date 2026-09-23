@@ -51,6 +51,28 @@ Narrower tasks help while you iterate:
 When you bump a state module's dependencies, also run `go mod tidy` in the
 matching example module; otherwise its `go.sum` goes stale.
 
+### What Tests Must Cover
+
+Tests check external behavior and public contracts, not private
+implementation details. Keep these families covered:
+
+- runtime construction and shutdown
+- handler registration and replacement
+- routing order and no-op missing handlers
+- explicit subscription and unsubscribe
+- direct-message implicit mention routing
+- self-message filtering
+- accepted, ignored, rejected, duplicate, and lock-conflict events
+- state conformance across memory, Redis, Postgres, and NATS
+- token-owned lock lease acquire, release, extend, expiry, and stale release
+- Slack signature verification and URL verification
+- Slack golden payload normalization
+- thread ID construction and validation
+- thread handle reconstruction
+- text, Markdown, sent message, ephemeral, and ephemeral fallback posting
+- typed adapter access
+- documentation coverage (see [Documentation](#documentation))
+
 ## Documentation
 
 Docs follow [Diátaxis](https://diataxis.fr/); the
