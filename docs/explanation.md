@@ -118,7 +118,6 @@ readers who know Vercel Chat SDK, this is the concept-by-concept status map:
 | Observability metrics/tracing | Optional `Observer` seam, no-op default, no OTel dependency in core |
 | Message history persistence | App-owned (Thread Application State); thin live read-through via the `HistoryReader` Optional Capability (Slack, Linear) |
 | AI-message conversion helpers | Not implemented |
-| Multiple production adapters | Slack is the only `supported` adapter; Linear is `experimental` |
 | Middleware | Not implemented |
 
 The behavioral differences that matter when porting handler code — single-slot

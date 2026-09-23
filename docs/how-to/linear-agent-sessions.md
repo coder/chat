@@ -13,7 +13,8 @@ through typed adapter access (see [ADR 0001](../adr/0001-linear-app-actor-slice.
 Start from the runnable example:
 [`examples/linear-agent-hello-world`](../../examples/linear-agent-hello-world/README.md)
 walks through the Linear OAuth app setup (app-actor client credentials,
-webhook configuration, public HTTPS URL) and includes dogfooding notes.
+webhook configuration, public HTTPS URL), lists the expected behavior, and
+notes common setup problems.
 
 ## Construct The Adapter
 

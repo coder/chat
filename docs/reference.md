@@ -397,6 +397,9 @@ public reply. Fallback is explicit:
   operation returns no delivered message.
 - If fallback is requested but impossible, the operation returns an error.
 
+On Slack, DM fallback opens the conversation with `conversations.open`, so the
+app needs the `im:write` bot scope.
+
 Ephemeral delivery is an optional adapter capability expressed through a
 small Go interface (`EphemeralPoster`), not a string capability flag. The
 Slack adapter implements it; on adapters that do not, `PostEphemeral` returns
