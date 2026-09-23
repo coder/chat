@@ -97,7 +97,6 @@ if err := la.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
 		{Title: "Reproduce the bug", Status: "pending"},
 		{Title: "Fix and test", Status: "pending"},
 	},
-	ReplacePlan: true,
 }); err != nil {
 	return err
 }
@@ -148,9 +147,10 @@ This check only runs when the stop event reaches your handler, and events on
 one thread are serialized by the thread lock — a stop arriving while a
 handler is still running cannot preempt it (`ConcurrencyDrop` discards it on
 conflict; `ConcurrencyQueue` delivers it only after the in-flight handler
-returns). The ADR 0012 force/steerability hook that would allow preemption is
-staged behind the deferred-dispatch coordination design work, so **Linear's
-Stop control cannot cancel in-flight work through this adapter today**. What
+returns). The runtime has no preemption: the ADR 0012 force/steerability hook
+that would allow it is rejected for v0.x by
+[ADR 0015](../adr/0015-runtime-coordination.md), so **Linear's Stop control
+cannot cancel in-flight work through this adapter**. What
 you can do: structure long
 sessions as short handler turns (each turn checks `StopRequested` on the
 event that started it before doing more work — `confirmStop` above is exactly

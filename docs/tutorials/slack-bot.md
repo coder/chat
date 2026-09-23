@@ -97,7 +97,7 @@ discover the bot's own identity. If the token is wrong you find out now, not
 on the first message. When the bot is up you should see a log line like:
 
 ```text
-level=INFO msg=listening addr=:8080
+2026/09/23 14:00:00 INFO listening addr=:8080
 ```
 
 ## Step 5: Expose The Bot To Slack
@@ -165,7 +165,7 @@ this, only mentions ever reach it:
 2. In **Event Subscriptions**, add the `message.channels` bot event.
 3. Reinstall the app from **OAuth & Permissions**.
 
-(If you set up `message.im` in Step 2, you can skip this and test the
+(If you subscribed to `message.im` in Step 6, you can skip this and test the
 follow-up flow in a direct message instead.)
 
 Then open `examples/slack-hello-world/main.go` and replace the

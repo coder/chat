@@ -239,10 +239,11 @@ inbound webhook request context before the platform acknowledgement. For
 long-running work, opt in to `DispatchDeferred` (ack-then-work,
 [ADR 0002](adr/0002-async-dispatch.md)): the dedupe and lock prelude runs
 before the acknowledgement, then the handler runs on a detached work context
-with automatic lock lease renewal, bounded by `DetachTimeout`. Under deferred
-dispatch `MaxDetached` bounds admitted-but-incomplete deliveries; a delivery
-arriving at the bound is rejected with `chat.ErrAdmissionRejected` before
-acknowledgement and before dedupe marking ([ADR 0015](adr/0015-runtime-coordination.md)).
+with automatic lock lease renewal, bounded by `DetachTimeout` (which must be
+positive under deferred dispatch). Under deferred dispatch `MaxDetached`
+bounds admitted-but-incomplete deliveries; a delivery arriving at the bound is
+rejected with `chat.ErrAdmissionRejected` before acknowledgement and before
+dedupe marking ([ADR 0015](adr/0015-runtime-coordination.md)).
 The [deferred dispatch guide](how-to/deferred-dispatch.md) covers enabling
 it and writing handlers for the detached context.
 
@@ -325,7 +326,7 @@ The runtime implements all five upstream-aligned concurrency strategies
 - `ConcurrencyDebounce`: each new routed event supersedes the previous
   waiter; only the final event in a `DebounceInterval` quiet period
   dispatches, and superseded events are observable. Requires deferred
-  dispatch.
+  dispatch and a `DetachTimeout` longer than `DebounceInterval`.
 - `ConcurrencyConcurrent`: no thread lock at all; every event dispatches in
   its own execution, bounded by `MaxConcurrent`.
 - `ConcurrencyBurst`: routed events for a scope collect for a `BurstWindow`,

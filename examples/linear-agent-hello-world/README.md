@@ -151,19 +151,24 @@ Expected behavior:
    Thinking...
    ```
 
-5. The app posts the final response:
+5. The app posts a `search-codebase` action and adds a **Draft PR** external
+   link to the session.
+6. The app posts the final response, a bold `hello from Linear app actor`
+   line followed by a note inviting a follow-up prompt.
 
-   ```text
-   hello from Linear app actor
-   ```
+   If the prompt text is exactly `deploy`, the app instead asks a `select`
+   question ("Which environment should I target?", `staging` or `prod`), and
+   your next follow-up is read as the answer.
 
-6. Send a follow-up prompt in the same Linear agent session.
-7. The example routes it to `OnSubscribedMessage`, posts another ephemeral
-   thought, and replies with:
+7. Send a follow-up prompt in the same Linear agent session.
+8. The example routes it to `OnSubscribedMessage`, posts the ephemeral thought
+   `Reading your follow-up...`, and replies with:
 
    ```text
    Follow-up received: YOUR_MESSAGE
    ```
+
+   A follow-up carrying Linear's stop signal gets a stop confirmation instead.
 
 ## Dogfooding Evidence
 
@@ -179,7 +184,8 @@ Before claiming a live Linear dogfood passed, capture screenshots or video of:
 
 - State is in memory, so subscriptions and dedupe data are lost when the process
   exits.
-- Use Redis or Postgres runtime state for production deployments.
+- Use Redis, Postgres, or NATS JetStream runtime state for production
+  deployments.
 - Linear request signatures are verified with `LINEAR_WEBHOOK_SECRET`.
 - Client credentials are exchanged during adapter startup and refreshed lazily
   before Linear API calls.

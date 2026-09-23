@@ -46,8 +46,9 @@ bot, err := chat.New(ctx,
 
 - `Dispatch: chat.DispatchDeferred` turns on ack-then-work. The default is
   `chat.DispatchSync`, which runs the handler before acknowledging.
-- `DetachTimeout` bounds how long a detached handler may run after the webhook
-  request has ended.
+- `DetachTimeout` (required under `DispatchDeferred`; `DefaultRuntimeOptions()`
+  leaves it at zero, so `chat.New` fails until you set it) bounds how long a
+  detached handler may run after the webhook request has ended.
 - `Concurrency: chat.ConcurrencyQueue` is the natural companion: while a
   detached handler holds the thread lock, follow-up events on the same thread
   wait instead of being dropped, and only the most recent superseded follow-up

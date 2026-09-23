@@ -5,8 +5,8 @@ mentioned in a channel, or messaged directly if you enable the DM event, it
 replies with portable Markdown: `**hello** _world_`.
 
 This example requires `CHAT_DEMO_IN_MEMORY_STATE=1` because state is lost on
-restart. Use `examples/slack-redis-state` or `examples/slack-postgres-state` for
-durable Slack apps.
+restart. Use `examples/slack-redis-state`, `examples/slack-postgres-state`, or
+`examples/slack-nats-state` for durable Slack apps.
 
 ## Slack App Setup
 
@@ -45,12 +45,9 @@ In **Event Subscriptions**:
    https://YOUR_PUBLIC_HOST/webhooks/slack
    ```
 
-3. Subscribe to these **Bot User Events**:
-
-   ```text
-   app_mention
-   message.im
-   ```
+3. Subscribe to the `app_mention` **Bot User Event**. Also add `message.im`
+   if you want direct messages to reach the bot (it needs the `im:history`
+   scope).
 
 4. Save changes.
 
