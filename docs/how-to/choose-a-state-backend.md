@@ -15,11 +15,12 @@ product state: keep your application's data in your own database, keyed by
 | Postgres | `github.com/coder/chat/state/postgres` | You already run Postgres. |
 | NATS JetStream | `github.com/coder/chat/state/nats` | You already run NATS with JetStream. |
 
-The three durable backends are interchangeable: they implement the same
-token-owned lock lease and dedupe contract and pass the same conformance
-suite, so any of them lets you run several bot replicas safely. Pick the one
-you already operate. Redis and Postgres are tested against real servers via
-Testcontainers; NATS is tested against an embedded JetStream server.
+The three durable backends are equivalent for the runtime: they implement
+the same token-owned lock lease and dedupe contract and pass the same
+conformance suite, so any of them lets you run several bot replicas safely.
+Pick the one you already operate. Redis and Postgres are tested against
+real servers via Testcontainers; NATS is tested against an embedded
+JetStream server.
 
 Redis, Postgres, and NATS are separate Go modules, so an application that
 uses only the core module does not pull their dependencies.

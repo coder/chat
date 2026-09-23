@@ -52,7 +52,7 @@ diverges and documents the divergence.
 ## Vercel Chat SDK Alignment
 
 Chat SDK Go follows Vercel Chat SDK's conversation semantics where they fit
-Go, built outward from a production-grade Slack adapter. It is
+Go, built outward from a production-shaped Slack slice. It is
 not a TypeScript API port and does not promise full feature parity. If you
 know Vercel Chat SDK, this table maps each concept to its status here:
 

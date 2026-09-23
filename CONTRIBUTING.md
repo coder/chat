@@ -71,7 +71,9 @@ implementation details. Keep these families covered:
 - thread handle reconstruction
 - text, Markdown, sent message, ephemeral, and ephemeral fallback posting
 - typed adapter access
-- documentation coverage (see [Documentation](#documentation))
+- documentation coverage of intentional Vercel Chat SDK differences in the
+  README, reference, explanation, and GoDoc (see
+  [Documentation](#documentation))
 
 ## Documentation
 

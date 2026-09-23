@@ -88,4 +88,8 @@ model. Reaction webhooks are not normalized here either.
 ## Planned Work
 
 Future work is planned in [GitHub issues](https://github.com/coder/chat/issues),
-not in this document.
+not in this document. The former gaps for proactive sessions
+([#47](https://github.com/coder/chat/issues/47)), repository suggestions
+([#48](https://github.com/coder/chat/issues/48)), and worked UX examples
+([#49](https://github.com/coder/chat/issues/49)) have shipped; see the table
+above.

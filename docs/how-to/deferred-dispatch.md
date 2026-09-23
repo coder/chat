@@ -95,10 +95,12 @@ thread become common. The concurrency strategy decides what happens to them
 | `ConcurrencyQueue` | It waits for the running handler. Only the newest waiting event runs; older waiting events are superseded, and supersession is observable. |
 | `ConcurrencyDebounce` | Each new event replaces the waiting one; only the last event of a `DebounceInterval` quiet period runs. Requires a `DetachTimeout` longer than `DebounceInterval`. |
 | `ConcurrencyConcurrent` | There is no thread lock. Every event runs, up to `MaxConcurrent` at once. |
-| `ConcurrencyBurst` | Events collect for a fixed `BurstWindow`, then run as one batch, in arrival order, under a single lock hold. Nothing accepted is dropped, and each member gets its own `DetachTimeout`. `MaxBurstBatch` optionally closes a full window early. |
+| `ConcurrencyBurst` | Events collect for a fixed `BurstWindow`, then run as one batch, in join order, under a single lock hold. Nothing accepted is dropped, and each member gets its own `DetachTimeout`. `MaxBurstBatch` optionally closes a full window early; batches run in the order they close. |
 
-Debounce and burst require deferred dispatch. The `chat.ConcurrencyBurst`
-GoDoc has the full burst lifecycle.
+Debounce and burst require deferred dispatch. `DebounceInterval`,
+`MaxConcurrent`, and `BurstWindow` must be positive under their strategy, or
+`chat.New` fails. The `chat.ConcurrencyBurst` GoDoc has the full burst
+lifecycle.
 
 `ConcurrencyQueue` suits most conversational bots: a follow-up sent while
 the bot is still working waits instead of disappearing. Two caveats:

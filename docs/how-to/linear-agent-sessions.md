@@ -52,13 +52,13 @@ sections).
 ## Mind The Timing Contract
 
 Linear expects a first activity within about 10 seconds of a session event,
-and more activity within about 30 minutes. So:
+and more activity within about 30 minutes. Enable
+[deferred dispatch](deferred-dispatch.md) so the real work runs after the
+webhook is acknowledged. Then, in the handler:
 
 1. Post a quick **thought** (`PostThought`) right away. Not a response: a
    response ends the session.
-2. Enable [deferred dispatch](deferred-dispatch.md) so the real work runs
-   after the webhook is acknowledged.
-3. Post the final answer with `Thread.Post`.
+2. Do the work, then post the final answer with `Thread.Post`.
 
 ## Use The Full Activity Surface
 
@@ -100,8 +100,9 @@ if err := la.UpdateSession(ctx, ev.Thread.ID(), linear.AgentSessionUpdateInput{
 }
 ```
 
-Each turn ends with exactly **one** completion: a response (`Thread.Post`),
-an elicitation, or an error. Pick one; never post two in the same turn:
+A session completes with exactly **one** completion signal: a response
+(`Thread.Post`), an elicitation, or an error. Pick one; never post two in
+the same turn:
 
 ```go
 if needsInput {

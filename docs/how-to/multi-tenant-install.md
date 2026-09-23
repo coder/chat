@@ -60,7 +60,7 @@ The `Credential` field is adapter-specific:
 
 In multi-tenant mode the adapter cannot discover the bot's own identity per
 install, so store it on every install record. Without it, the bot cannot
-recognize its own messages:
+recognize its own messages or, on Linear, mentions of itself:
 
 - Slack: without `SlackInstall.BotUserID` (or `Install.BotActorID`),
   self-message filtering has no identity to match — if you subscribe to
