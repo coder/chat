@@ -103,8 +103,9 @@ go get github.com/coder/chat/state/nats
   [choose a state backend](docs/how-to/choose-a-state-backend.md).
 - **Ack-then-work dispatch.** Handlers run synchronously by default; opt in
   to `DispatchDeferred` to run them after the webhook is acknowledged, with
-  lock renewal, an admission cap, and five concurrency strategies (drop,
-  queue, debounce, concurrent, burst) —
+  lock renewal and an admission cap. Five concurrency strategies (drop,
+  queue, debounce, concurrent, burst) decide what happens when events
+  overlap on one thread; debounce and burst require deferred dispatch —
   [defer long-running work](docs/how-to/deferred-dispatch.md).
 - **Slash commands and interactive components.** Commands and button clicks
   have their own hooks; Block Kit and modals go through typed adapter access —
