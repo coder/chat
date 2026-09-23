@@ -58,8 +58,9 @@ Then configure it:
    | `im:history` | Only needed if you also want direct messages to reach the bot. |
 
 2. In **App Home**, under **Show Tabs**, enable the **Messages Tab** and allow
-   users to send messages from it (Slack labels this "Allow users to send
-   Slash commands and messages from the messages tab"). This matters only for
+   users to send messages from it (depending on Slack's current UI, this is
+   labeled "Allow users to send Slash commands and messages from the messages
+   tab" or appears as turning off read-only mode). This matters only for
    direct messages; mentions in channels work without it. If Slack later
    shows **"Sending messages to this app has been turned off"** in the app's
    DM, this setting is still off.
@@ -224,3 +225,6 @@ Slack's own documentation for the settings used here:
   [`message.im`](https://docs.slack.dev/reference/events/message.im)
 - App Home Messages tab: <https://docs.slack.dev/surfaces/app-home>
 - Bot tokens (`xoxb-`): <https://docs.slack.dev/authentication/tokens>
+- Scopes: [`chat:write`](https://docs.slack.dev/reference/scopes/chat.write);
+  [`conversations.open`](https://docs.slack.dev/reference/methods/conversations.open/)
+  lists the scopes DM fallback needs
