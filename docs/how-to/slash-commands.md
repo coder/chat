@@ -1,8 +1,8 @@
 # How To Handle Slash Commands
 
 Slash commands such as `/deploy` go to their own hook, `OnCommand`, not to
-the message hooks. They still get the same dedupe, thread locking, and
-tenant scoping as messages ([ADR 0003](../adr/0003-slash-commands.md)).
+the message hooks. They still get the same dedupe, concurrency strategy,
+and tenant scoping as messages ([ADR 0003](../adr/0003-slash-commands.md)).
 Slack is the only adapter with slash commands.
 
 ## Configure Slack
@@ -66,10 +66,11 @@ Fields on `ev.Command`:
 - A command does not subscribe its thread.
 - `OnCommand` holds one handler. Registering again atomically replaces it.
   With no handler set, commands are acknowledged and ignored.
-- A channel command locks the channel-rooted thread, which is separate from
-  every message thread in that channel. Do not expect a channel command to
-  wait for message handlers, or the reverse. In a direct message, commands
-  and messages share one thread and one lock.
+- With the default `LockScopeThread`, a channel command locks the
+  channel-rooted thread, which is separate from every message thread in that
+  channel. Do not expect a channel command to wait for message handlers, or
+  the reverse. In a direct message, commands and messages share one thread
+  and one lock. (`ConcurrencyConcurrent` takes no lock at all.)
 
 ## Long-Running Commands
 

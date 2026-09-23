@@ -1,7 +1,8 @@
 # How To Handle Interactive Components
 
 Button clicks and menu selections go to their own hook, `OnInteraction`.
-Like messages, they are deduped and serialized per thread
+Like messages, they are deduped and follow the runtime's concurrency
+strategy, which by default runs one handler per thread at a time
 ([ADR 0004](../adr/0004-interactive-components.md)). This guide covers Slack
 buttons and menus on messages: Block Kit content posted to a channel,
 thread, or direct message.
