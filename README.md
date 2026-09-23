@@ -4,18 +4,16 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/coder/chat.svg)](https://pkg.go.dev/github.com/coder/chat)
 [![Latest release](https://img.shields.io/github/v/release/coder/chat)](https://github.com/coder/chat/releases/latest)
 
-Chat SDK Go is a Go runtime for building chat bots and agents on Slack and
-Linear. You write handlers against a normalized event model — a mention
-arrives, you reply in its thread, you subscribe to keep the conversation
-going — and the runtime takes care of the platform plumbing: webhook
-verification, event normalization, thread-scoped replies, event dedupe and
-per-thread locking in shared state (Redis, Postgres, or NATS JetStream in
-production; memory for development) so horizontally scaled replicas dedupe
-redeliveries and serialize work per thread, deferred ack-then-work dispatch
-with admission bounds for slow handlers such as LLM calls, multi-tenant
-installs, and platform rate-limit retries. The API is small, explicit Go —
-`context.Context`, `net/http`, small interfaces, returned errors — rather
-than a framework.
+Build Slack and Linear bots in Go. You write handlers for mentions and
+thread replies; the runtime verifies webhooks, dedupes redeliveries,
+serializes work per thread, and retries rate-limited API calls.
+
+- **Plain Go.** `context.Context`, `net/http`, small interfaces, and returned
+  errors. It is a library, not a framework.
+- **Scales out.** Replicas share state on Redis, Postgres, or NATS JetStream,
+  so they dedupe redeliveries and serialize work per thread.
+- **Handles slow work.** Acknowledge the webhook first, then run LLM calls
+  and other long handlers on a detached context.
 
 ## Hello, Slack
 
@@ -94,111 +92,93 @@ go get github.com/coder/chat/state/postgres
 go get github.com/coder/chat/state/nats
 ```
 
-## Features
+## What You Get
 
-- **Thread-scoped conversations.** `OnNewMention` and `OnSubscribedMessage`
-  route by thread; subscriptions are explicit and survive restarts on a
-  durable backend. Start with the [tutorial](docs/tutorials/slack-bot.md).
-- **Coordination state you already run.** Subscriptions, dedupe marks, and
-  token-owned lock leases on memory, Redis, Postgres, or NATS JetStream,
-  behind one contract and one conformance suite —
+- **Thread-scoped conversations.** `OnNewMention` starts a conversation;
+  `Thread.Subscribe` keeps the bot in it, and `OnSubscribedMessage` receives
+  the follow-ups — [tutorial](docs/tutorials/slack-bot.md).
+- **Shared state you already run.** Memory for development; Redis, Postgres,
+  or NATS JetStream in production, all tested by one conformance suite —
   [choose a state backend](docs/how-to/choose-a-state-backend.md).
-- **Ack-then-work dispatch.** Acknowledge the webhook first, run the handler
-  on a detached context with automatic lock renewal, bound in-flight work
-  with an admission cap, and pick from five concurrency strategies (drop,
-  queue, debounce, concurrent, burst) —
+- **Ack-then-work dispatch.** Handlers run after the webhook is
+  acknowledged, with lock renewal, an admission cap, and five concurrency
+  strategies (drop, queue, debounce, concurrent, burst) —
   [defer long-running work](docs/how-to/deferred-dispatch.md).
 - **Slash commands and interactive components.** Commands and button clicks
-  are first-class events with their own hooks; Block Kit content and modals
-  go through typed adapter access —
+  have their own hooks; Block Kit and modals go through typed adapter access —
   [slash commands](docs/how-to/slash-commands.md),
   [interactive components](docs/how-to/interactive-components.md).
-- **Multi-tenant installs.** Serve many workspaces or organizations from one
-  deployment with an application-implemented `InstallStore`; OAuth flows
-  stay yours — [multi-tenant installs](docs/how-to/multi-tenant-install.md).
-- **Linear agent sessions.** Thoughts, responses, actions, elicitations,
-  plans, and generic issue comments —
-  [run Linear agent sessions](docs/how-to/linear-agent-sessions.md).
-- **Rate limits handled in the adapter.** Slack and Linear API calls retry
-  with `Retry-After` and bounded backoff and surface a typed `RateLimited`
-  error when they give up —
-  [adapter capability status](docs/reference.md#adapter-capability-status).
-- **Observability without a dependency.** Structured `slog` logging plus an
-  optional `Observer` seam for counters and per-dispatch spans; no
-  OpenTelemetry in the core import graph —
+- **Multi-tenant installs.** Serve many Slack workspaces or Linear
+  organizations from one deployment; you own the OAuth flow —
+  [multi-tenant installs](docs/how-to/multi-tenant-install.md).
+- **Linear agent sessions.** Thoughts, actions, elicitations, plans,
+  responses, and plain issue comments —
+  [Linear agent sessions](docs/how-to/linear-agent-sessions.md).
+- **Rate-limit retries.** Adapters honor `Retry-After` with bounded backoff
+  and return a typed `RateLimited` error when they give up —
+  [capability status](docs/reference.md#adapter-capability-status).
+- **Observability without extra dependencies.** `slog` logging plus an
+  optional `Observer` for metrics and spans —
   [observability](docs/reference.md#observability).
-- **Message history read-through.** `HistoryReader` fetches recent platform
-  messages for a thread on demand; what you persist is up to you —
+- **Message history on demand.** `HistoryReader` fetches recent platform
+  messages for a thread; what you store is up to you —
   [message history](docs/reference.md#message-history).
 
 ## Adapters
 
-Adapters are either `supported` — production-grade, with hardening test
-suites, rate-limit handling, multi-tenant installs, and documentation — or
-`experimental` — implemented and tested, but the platform surface, the
-adapter API, or both may still change.
+`supported` adapters are production-grade: hardening tests, rate-limit
+handling, multi-tenant installs, and docs. `experimental` adapters work and
+are tested, but their API may still change.
 
 | Adapter | Tier | Notes |
 | --- | --- | --- |
-| Slack (`adapters/slack`) | `supported` | Hardening tests for rate-limit retry ([ADR 0005](docs/adr/0005-rate-limit-handling.md)), multi-tenant installs ([ADR 0006](docs/adr/0006-multi-tenant-install.md)), history read-through ([ADR 0009](docs/adr/0009-message-history.md)), and interactivity. No live end-to-end Slack test runs in CI. |
-| Linear (`adapters/linear`) | `experimental` | Fully implemented and hardened (agent sessions, generic comments, rate-limit retry, multi-tenant, history read-through), but the upstream Linear agent API is itself in developer preview and [capability gaps remain](docs/linear-agent-capabilities.md). |
-| Microsoft Teams | spike | [ADR 0007](docs/adr/0007-teams-adapter.md) is a proposal gated on a live-tenant spike (draft [PR #4](https://github.com/coder/chat/pull/4), tracked in [#6](https://github.com/coder/chat/issues/6)). Not usable yet. |
+| Slack (`adapters/slack`) | `supported` | Hardening tests cover rate-limit retry, multi-tenant installs, history read-through, and interactivity. No live end-to-end Slack test runs in CI. |
+| Linear (`adapters/linear`) | `experimental` | Fully implemented and hardened, but Linear's agent API is itself in developer preview; see the [capability gaps](docs/linear-agent-capabilities.md). |
+| Microsoft Teams | spike | Not usable yet. [ADR 0007](docs/adr/0007-teams-adapter.md) is waiting on a live-tenant spike ([#6](https://github.com/coder/chat/issues/6)). |
 
 ## Documentation
 
-Documentation follows [Diátaxis](https://diataxis.fr/); the
-[docs index](docs/README.md) maps it all.
+The [docs index](docs/README.md) lists everything. Good starting points:
 
-- **Tutorial**: [your first Slack bot](docs/tutorials/slack-bot.md) — zero to
-  a running bot in under 30 minutes.
-- **How-to guides**: [state backends](docs/how-to/choose-a-state-backend.md),
-  [deferred dispatch](docs/how-to/deferred-dispatch.md),
-  [slash commands](docs/how-to/slash-commands.md),
-  [interactive components](docs/how-to/interactive-components.md),
-  [multi-tenant installs](docs/how-to/multi-tenant-install.md), and
-  [Linear agent sessions](docs/how-to/linear-agent-sessions.md).
-- **Reference**: [runtime semantics and API reference](docs/reference.md) —
-  construction, webhooks, routing, dispatch, state, concurrency, messages,
-  history, adapter access, per-adapter capability status, and the testing
-  contract, plus [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat) for
-  the GoDoc.
-- **Explanation**: [architecture and design decisions](docs/explanation.md)
-  — an index over [`CONTEXT.md`](CONTEXT.md) and the [ADRs](docs/adr/), with
-  the design goals, the Vercel Chat SDK comparison, and the non-goals.
+- **New here?** [Your first Slack bot](docs/tutorials/slack-bot.md), zero to
+  running in under 30 minutes.
+- **Doing a task?** The [how-to guides](docs/README.md#how-to-guides) cover
+  state backends, deferred dispatch, commands, interactivity, multi-tenant
+  installs, and Linear.
+- **Looking something up?** The [reference](docs/reference.md) and the GoDoc
+  (`go doc github.com/coder/chat`).
+- **Want the why?** [Architecture and design decisions](docs/explanation.md).
 
-## Relationship To Vercel Chat SDK
+## Scope
 
 Chat SDK Go follows [Vercel Chat SDK](https://chat-sdk.dev/)'s conversation
-model — adapters, normalized events, threads, subscriptions, thread-scoped
-replies — where it maps cleanly to Go. It is not a TypeScript API port:
-hooks are single-slot, construction is fail-fast, subscriptions are explicit,
-and message history is application-owned. The concept-by-concept status map
-is in [docs/explanation.md](docs/explanation.md#vercel-chat-sdk-alignment).
+model — adapters, normalized events, threads, subscriptions — where it fits
+Go. It is not a TypeScript API port: hooks hold one handler each,
+construction fails fast, subscriptions are explicit, and message history
+belongs to your application. See the
+[concept map](docs/explanation.md#vercel-chat-sdk-alignment).
 
-## Non-Goals
+These are left out on purpose, each by a recorded decision
+([full list](docs/explanation.md#non-goals)):
 
-Each of these is a recorded decision, not a missing feature. The full list
-with the ADR behind each is in
-[docs/explanation.md](docs/explanation.md#non-goals); the scope exclusions
-are in [intentional gaps](docs/explanation.md#intentional-gaps).
-
-- **Streaming token transport in the core** — deferred, not foreclosed
-  ([ADR 0011](docs/adr/0011-resumable-streaming.md)); long generation is
-  ack-then-work posting one finished message.
-- **LLM orchestration** — prompts, model calls, and generation pipelines live
-  in your handlers.
-- **A cross-platform card DSL** — platform-native payloads ship opaquely via
+- **Token streaming in the core.** Deferred, not ruled out
+  ([ADR 0011](docs/adr/0011-resumable-streaming.md)); long generation posts
+  one finished message.
+- **LLM orchestration.** Prompts and model calls live in your handlers.
+- **A cross-platform card DSL.** Native payloads go through
   `NativeContentPoster`.
-- **Transcript storage, RAG, and embeddings** — message history is
-  application-owned; `chat.State` holds subscriptions, dedupe marks, and
-  locks only.
-- **App-user auth and OAuth web flows** — install storage and account linking
-  stay app-owned.
+- **Transcript storage, RAG, and embeddings.** Runtime state holds only
+  subscriptions, dedupe marks, and locks.
+- **App-user auth and OAuth web flows.** Your application owns these.
 
 ## Status
 
-The current release is [v0.2.0](https://github.com/coder/chat/releases/latest).
-The public Go API may change before 1.0; the
-[release notes](https://github.com/coder/chat/releases) describe what changed
-in each version. Bug reports and feature requests are tracked in
+Chat SDK Go is pre-1.0, and the public API may change before 1.0. See the
+[releases](https://github.com/coder/chat/releases) for what changed.
+Report bugs and request features in
 [GitHub issues](https://github.com/coder/chat/issues).
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and propose
+changes.

@@ -47,5 +47,7 @@ Task-oriented guides for people already running a bot.
 
 ## Non-User Documentation
 
+- [`CONTRIBUTING.md`](../CONTRIBUTING.md) — how to build, test, and propose
+  changes to this repository.
 - [`docs/agents/`](agents/) — instructions for coding agents working on this
   repository, not for SDK users.
