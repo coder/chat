@@ -410,7 +410,7 @@ sessions.
 
 ## Known Gaps
 
-The Linear adapter is experimental because Linear's agent API is itself in
+The Linear adapter is experimental, and Linear's agent API is itself in
 developer preview. Some operations, such as moving an issue through its
 workflow states, still need the `GraphQL` escape hatch instead of a typed
 helper. The [capability list](../linear-agent-capabilities.md) tracks them.

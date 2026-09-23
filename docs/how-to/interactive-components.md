@@ -158,8 +158,8 @@ err := slackAdapter.RespondURL(ctx, ev.Interaction.Raw, chat.Text("Working on it
 ## Limits
 
 - **Clicks inside modals are not handled.** `block_actions` raised inside a
-  modal view have no channel or message to anchor a thread, so the adapter
-  rejects them before routing.
+  modal view have no channel or message to anchor a thread. They are not
+  normalized yet; the adapter rejects them before routing.
 - **Modal submissions are not delivered.** Slack expects the answer to a
   `view_submission` in the webhook's HTTP response body, which does not fit
   ack-then-work. The adapter acknowledges and drops `view_submission`

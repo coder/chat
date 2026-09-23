@@ -33,7 +33,7 @@ Start from `chat.DefaultRuntimeOptions()` so you keep the required
 | `Dispatch` | `DispatchSync` | `DispatchDeferred` turns on ack-then-work. |
 | `DetachTimeout` | `0` | How long a handler may run after the webhook request ends. Required under deferred dispatch: `chat.New` fails while it is zero. |
 | `Concurrency` | `ConcurrencyDrop` | What happens to an event that arrives while a handler holds the thread lock. See [Pick a concurrency strategy](#pick-a-concurrency-strategy). |
-| `MaxDetached` | `1024` | The cap on deferred work in flight. See [Handle overload](#handle-overload). |
+| `MaxDetached` | `1024` | The cap on deferred work in flight. Must be positive under deferred dispatch. See [Handle overload](#handle-overload). |
 
 ## How It Works
 
@@ -93,8 +93,8 @@ thread become common. The concurrency strategy decides what happens to them
 | --- | --- |
 | `ConcurrencyDrop` (default) | It is acknowledged and dropped. |
 | `ConcurrencyQueue` | It waits for the running handler. Only the newest waiting event runs; older waiting events are superseded, and supersession is observable. |
-| `ConcurrencyDebounce` | Each new event replaces the waiting one; only the last event of a `DebounceInterval` quiet period runs. Requires a `DetachTimeout` longer than `DebounceInterval`. |
-| `ConcurrencyConcurrent` | There is no thread lock; events run in parallel, up to `MaxConcurrent` at once. An event waiting for a free slot spends its own `DetachTimeout`; if that runs out first, the event is dropped without running. |
+| `ConcurrencyDebounce` | Each new event replaces the waiting one. After a `DebounceInterval` quiet period, only the last event goes on to wait for the lock and run. Requires a `DetachTimeout` longer than `DebounceInterval`. |
+| `ConcurrencyConcurrent` | There is no thread lock; events run in parallel, up to `MaxConcurrent` at once. Extra events wait for a free slot. |
 | `ConcurrencyBurst` | Events collect for a fixed `BurstWindow`, then run as one batch, in join order, under a single lock hold. Nothing accepted is dropped, and each member gets its own `DetachTimeout`. `MaxBurstBatch` optionally closes a full window early; batches run in the order they close. |
 
 Debounce and burst require deferred dispatch. `DebounceInterval`,
@@ -102,19 +102,23 @@ Debounce and burst require deferred dispatch. `DebounceInterval`,
 `chat.New` fails. The `chat.ConcurrencyBurst` GoDoc has the full burst
 lifecycle.
 
-`ConcurrencyQueue` suits most conversational bots: a follow-up sent while
-the bot is still working waits instead of disappearing. Two caveats:
+Two caveats apply to the strategies that make events wait:
 
+- **Waiting counts against `DetachTimeout`.** An event's clock starts when
+  it is accepted. Time it spends waiting — in the queue, through the
+  debounce quiet period and the lock wait after it, or for a free concurrent
+  slot — uses up its budget. If the budget runs out, the event is cancelled
+  without running, and because it was already deduped, the platform will
+  not redeliver it. Size `DetachTimeout` for your longest handler *plus* the
+  longest wait before it.
 - **Coalescing happens inside one process.** With several replicas, the
   shared state lock still serializes handlers, but follow-ups that landed on
   different replicas each run in turn. The same holds for debounce and
   burst batching. If a superseded event must never run, route each thread's
   webhooks to one replica or make handlers idempotent.
-- **Queue time counts against `DetachTimeout`.** A queued event's clock
-  starts when it is accepted, before it waits for the lock. If the wait uses
-  up its budget, the event is cancelled without running, and because it was
-  already deduped, the platform will not redeliver it. Size `DetachTimeout`
-  for your longest handler *plus* the queue wait behind it.
+
+`ConcurrencyQueue` suits most conversational bots: a follow-up sent while
+the bot is still working waits instead of disappearing.
 
 ## Handle Overload
 
