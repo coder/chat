@@ -63,6 +63,18 @@ Some docs are checked by `documentation_test.go`:
 - A few key phrases must stay in the README, reference, explanation, and
   package docs. If you reword one, update the test in the same change.
 
+## Validating Adapter Changes Live
+
+CI has no live Slack or Linear tests. Before you claim that a change works
+against a real workspace, capture screenshots or a video of each step. For
+the Linear example, that means:
+
+- the Linear app actor settings;
+- the webhook configuration with agent session events enabled;
+- the first app mention and the agent session it creates;
+- the ephemeral thought and the final response;
+- a follow-up prompt and its thought and response.
+
 ## Design Changes
 
 [`CONTEXT.md`](CONTEXT.md) defines the project's vocabulary; use its terms in
