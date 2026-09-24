@@ -7,7 +7,7 @@ to discuss a change before you build it.
 ## Set Up
 
 1. Trust the repository's `mise.toml`, then install the toolchain it pins
-   (Go 1.26.3 and helpers):
+   (Go 1.27.1 and helpers):
 
    ```sh
    mise trust
@@ -38,6 +38,9 @@ CI runs these two commands on every pull request:
 mise run vet                    # go vet in every module
 GOFLAGS=-race mise run test     # tests in every module, with the race detector
 ```
+
+CI runs them twice: once with the Go that `mise.toml` pins, and once with the
+minimum Go from `go.mod` (`GOTOOLCHAIN=go1.26.3`).
 
 Narrower tasks help while you iterate:
 
