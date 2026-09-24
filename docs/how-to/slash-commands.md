@@ -1,10 +1,9 @@
 # How To Handle Slash Commands
 
-A slash command is a Command Event, not a message: it rides the same dispatch
-spine (dedupe, thread lock, tenant scoping) but routes to its own single-slot
-hook, `OnCommand`, regardless of thread subscription state (see
-[ADR 0003](../adr/0003-slash-commands.md)). This slice covers Slack slash
-commands.
+Slash commands such as `/deploy` go to their own hook, `OnCommand`, not to
+the message hooks. They still get the same dedupe, concurrency strategy,
+and tenant scoping as messages ([ADR 0003](../adr/0003-slash-commands.md)).
+Slack is the only adapter with slash commands.
 
 ## Configure Slack
 
@@ -16,10 +15,10 @@ already mounted:
 https://YOUR_PUBLIC_HOST/webhooks/slack
 ```
 
-The Slack adapter acknowledges the command with an empty 2xx; under the
-default synchronous dispatch mode that happens after your handler returns
-(see [Long-Running Commands](#long-running-commands) for staying inside
-Slack's 3-second budget).
+The Slack adapter acknowledges each command with an empty 2xx. Under the
+default synchronous dispatch, that happens after your handler returns; see
+[Long-running commands](#long-running-commands) to stay inside Slack's
+3-second budget.
 
 ## Register The Handler
 
@@ -44,14 +43,13 @@ bot.OnCommand(func(ctx context.Context, ev *chat.CommandEvent) error {
 })
 ```
 
-Why not `ev.Thread.Post`? A slash command in a channel carries no message
-timestamp, so its thread is rooted at the channel itself — there is no thread
-to post into, and a regular threaded post to that synthetic root fails.
-`RespondURL` is the channel-command response path (Slack renders it in place,
-ephemeral by default). In a direct-message conversation with the bot,
-`ev.Thread.Post` works normally.
+Why not `ev.Thread.Post`? A command typed in a channel has no parent message,
+so its thread is rooted at the channel itself, and a threaded post to that
+root fails. `RespondURL` answers the command in place instead. The adapter
+sends that response as ephemeral, so only the person who ran the command
+sees it. In a direct message with the bot, `ev.Thread.Post` works normally.
 
-What you get on `ev.Command`:
+Fields on `ev.Command`:
 
 - `Name` — the command, including the slash (`/deploy`).
 - `Text` — the raw argument text after the command name.
@@ -61,35 +59,35 @@ What you get on `ev.Command`:
   `trigger_id` for native responses (see the
   [interactive components guide](interactive-components.md)).
 
-## Routing Rules Worth Knowing
+## Routing Rules
 
-- Command-ness wins: a command typed in a subscribed thread routes to
-  `OnCommand`, never to `OnSubscribedMessage`.
-- A command does not auto-subscribe its thread.
-- `OnCommand` is single-slot like the message hooks: registering again
-  atomically replaces the handler, and an unset handler is a no-op that still
-  acknowledges the platform.
-- Commands are deduped by event identity and take a thread lock on the
-  command's own thread scope. In a channel that scope is the synthetic
-  channel-rooted thread, which is distinct from every message thread's scope —
-  so do not rely on a channel command serializing with message handlers.
-  Direct-message commands share the DM conversation's thread scope.
+- A command always goes to `OnCommand`, even in a subscribed thread. It
+  never reaches `OnSubscribedMessage`.
+- A command does not subscribe its thread.
+- `OnCommand` holds one handler. Registering again atomically replaces it.
+  With no handler set, commands are acknowledged and ignored.
+- With the default `LockScopeThread`, a channel command locks the
+  channel-rooted thread, which is separate from every message thread in that
+  channel. Do not expect a channel command to wait for message handlers, or
+  the reverse. In a direct message, commands and messages share one thread
+  and one lock. (`ConcurrencyConcurrent` takes no lock at all.)
 
 ## Long-Running Commands
 
-Under the default `DispatchSync` mode your handler runs before the platform
-acknowledgement, so slow command work risks Slack's 3-second timeout. Enable
+Under the default `DispatchSync`, your handler runs before Slack gets its
+acknowledgement, so slow work risks Slack's 3-second timeout. Enable
 [deferred dispatch](deferred-dispatch.md) so the acknowledgement no longer
-waits on your handler, and consider `chat.ConcurrencyQueue` so mid-work
-commands and clicks queue instead of dropping. Slack keeps a command's `response_url`
-valid for 30 minutes, so a deferred handler can finish its work and respond
-through `RespondURL` afterwards.
+waits on your handler. Slack keeps a command's `response_url` valid for 30
+minutes, so a deferred handler can finish its work and then call
+`RespondURL`.
 
-One coalescing caveat: because every channel command shares the synthetic
-channel-rooted scope, the queue keeps only the single most recent pending
-command per channel — while one command runs, *independent* commands from
-other users (or other command names) in the same channel supersede each
-other, and all but the newest are acknowledged without invoking `OnCommand`.
-If your bot expects concurrent channel commands, keep command handlers fast
-(ack the command, hand real work to your own queue keyed by `response_url`)
-rather than holding the thread lock through long work.
+Consider `chat.ConcurrencyQueue` too, so commands and clicks that arrive
+mid-work wait instead of being dropped. One caveat: every command in a
+channel shares the channel-rooted thread, and the queue keeps only the newest
+waiting event per thread. While one command runs, later commands in that
+channel — from other users, or for other command names — replace each other,
+and all but the newest are acknowledged without reaching `OnCommand`.
+
+If your bot must handle several channel commands at once, keep the handler
+fast: acknowledge the command, hand the real work to your own queue keyed by
+`response_url`, and return.

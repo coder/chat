@@ -1,8 +1,8 @@
 # Chat SDK Go Documentation
 
-User-facing documentation is organized along [Diátaxis](https://diataxis.fr/):
-learning-oriented tutorials, task-oriented how-to guides, information-oriented
-reference, and understanding-oriented explanation.
+The docs follow [Diátaxis](https://diataxis.fr/): a tutorial to learn,
+how-to guides to get a task done, reference to look things up, and
+explanation to understand the design.
 
 ## Tutorials
 
@@ -13,7 +13,7 @@ Start here if you are new to the SDK.
 
 ## How-To Guides
 
-Task-oriented guides for people already running a bot.
+For people who already have a bot running.
 
 - [Choose a state backend](how-to/choose-a-state-backend.md) — memory, Redis,
   Postgres, or NATS JetStream.
@@ -30,22 +30,21 @@ Task-oriented guides for people already running a bot.
 
 ## Reference
 
-- [Reference](reference.md) — module layout and pkg.go.dev pointers, the
-  runtime's semantics by concept (construction, webhooks, routing, dispatch,
-  state, concurrency, messages, history, actors, adapter access),
-  per-adapter capability status, the examples, and the testing contract.
-- [Linear agent capability gaps](linear-agent-capabilities.md) — tracked list
-  of Linear agent APIs the adapter does not yet wrap.
+- [Reference](reference.md) — modules and packages, how the runtime behaves
+  (routing, dispatch, state, concurrency, messages, history), what each
+  adapter supports, and the runnable examples. The API itself is in the
+  [GoDoc](https://pkg.go.dev/github.com/coder/chat).
+- [Linear agent capabilities](linear-agent-capabilities.md) — what the Linear
+  adapter supports today and what it does not wrap yet.
 
 ## Explanation
 
-- [Architecture and design decisions](explanation.md) — an index over
-  [`CONTEXT.md`](../CONTEXT.md) (the ubiquitous language and architecture
-  document) and the [ADRs](adr/) that record every significant decision,
-  plus the design goals, the Vercel Chat SDK concept map, the non-goals, and
-  the intentional gaps.
+- [Architecture and design decisions](explanation.md) — the model in brief,
+  design goals, the Vercel Chat SDK concept map, non-goals, and intentional
+  gaps, with an index of the [ADRs](adr/) and
+  [`CONTEXT.md`](../CONTEXT.md), the project's vocabulary.
 
-## Non-User Documentation
+## For Contributors
 
 - [`CONTRIBUTING.md`](../CONTRIBUTING.md) — how to build, test, and propose
   changes to this repository.

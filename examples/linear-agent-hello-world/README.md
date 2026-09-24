@@ -1,31 +1,34 @@
 # Linear Agent Hello World Example
 
-This example runs a tiny Linear app-actor bot with in-memory runtime state. When
-someone mentions the installed Linear app in an issue, or delegates an issue to
-the app, Linear creates an agent session and sends an `AgentSessionEvent`
-webhook. The example subscribes the session thread, posts an ephemeral thought,
-posts a native tool-call action, publishes an external link via a session
-update, optionally asks the user a `select` question, posts a final response,
-and then routes follow-up prompts to `OnSubscribedMessage`. A follow-up carrying
-a human-to-agent `stop` signal halts cleanly. It runs under deferred dispatch
-(Ack-Then-Work) so follow-up work can outlive the inbound webhook request.
+A small Linear agent with in-memory state. Mention the installed Linear app
+in an issue, or delegate an issue to it, and Linear opens an agent session.
+The example then:
 
-The example also demonstrates generic issue comments (ADR 0013): if you enable
-the Linear `Comment` webhook scope, a comment that mentions the app actor routes
-to `OnNewMention` and `Thread.Post` replies with an ordinary issue comment
-rather than an agent activity.
+1. subscribes the session thread;
+2. posts an ephemeral thought, a tool-call action, and an external link;
+3. posts a final response, or, if the prompt is exactly `deploy`, asks a
+   `select` question instead;
+4. answers follow-up prompts through `OnSubscribedMessage`, and stops
+   cleanly when the user presses **Stop**.
 
-[`capabilities.go`](capabilities.go) holds the worked capability loops behind
-[docs/how-to/linear-agent-sessions.md](../../docs/how-to/linear-agent-sessions.md):
-proactive session creation (`CreateSessionOnIssue`), repository suggestions
-paired with a `select` elicitation (`SuggestRepositories`), auth elicitation
-with the resume-after-linking follow-up, select-answer handling, `externalUrls`
-updates, and stop confirmation. Each helper is exercised by
-[`capabilities_test.go`](capabilities_test.go); the stop and select-answer
-helpers are wired into the running bot's `OnSubscribedMessage` handler.
+It runs under deferred dispatch, so work can outlive the inbound webhook
+request. It is an app-actor agent
+([ADR 0008](../../docs/adr/0008-linear-full-adapter.md)), not a bot that uses
+a personal API key.
 
-This is a Linear app-actor example (ADR 0008, ADR 0013), not a personal API key
-user bot.
+If you enable Linear's `Comment` webhook category, it also replies to plain
+issue comments that mention the app
+([ADR 0013](../../docs/adr/0013-linear-generic-comments.md)): the comment
+routes to `OnNewMention`, and `Thread.Post` replies with an ordinary issue
+comment instead of an agent activity.
+
+[`capabilities.go`](capabilities.go) holds the worked loops behind the
+[Linear agent sessions guide](../../docs/how-to/linear-agent-sessions.md):
+proactive sessions (`CreateSessionOnIssue`), repository suggestions paired
+with a `select` question (`SuggestRepositories`), auth elicitation and the
+resume after linking, select-answer handling, `externalUrls` updates, and
+stop confirmation. [`capabilities_test.go`](capabilities_test.go) tests each
+helper; the stop and select-answer helpers are wired into the running bot.
 
 ## Linear App Setup
 
@@ -140,5 +143,6 @@ Expected behavior:
   (`chat.AdapterAs[*linear.Adapter]`) rather than a generic runtime API.
 - Inbound signals (including `stop`) and structured session context are preserved
   on `Message.Raw`; read them with `linear.RawMessageFrom`.
-- This example runs under `chat.DispatchDeferred` so follow-up work runs on the
-  Detached Work Context with the Thread Lock held and lease-refreshed.
+- This example runs under `chat.DispatchDeferred`, so the webhook
+  acknowledgement does not wait for follow-up work, and the runtime holds and
+  renews the thread lock while that work runs.

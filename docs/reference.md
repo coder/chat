@@ -1,11 +1,10 @@
 # Reference
 
-The API reference is the GoDoc: every package carries package-level
-documentation (`doc.go`), and the intentional differences from Vercel Chat
-SDK are documented on the symbols they affect. This page covers what GoDoc
-does not: the module layout, the runtime's semantics organized by concept,
-per-adapter capability status, the runnable examples, and the testing
-contract.
+The API reference is the GoDoc. Every package has package-level
+documentation, and each intentional difference from Vercel Chat SDK is
+documented on the symbol it affects. This page covers what GoDoc does not:
+the module layout, the runtime's behavior by concept, what each adapter
+supports, and the runnable examples.
 
 ## Modules And Packages
 
@@ -191,9 +190,10 @@ until `Thread.Unsubscribe`.
 
 ### Command And Interaction Events
 
-A slash command and a button click are events, not messages. They ride the
-same dispatch spine (dedupe by event identity, thread lock, self-filtering,
-lock-conflict acknowledge-and-drop) but route to their own single-slot hooks:
+A slash command and a button click are events, not messages. They go
+through the same dispatch steps as messages (dedupe by event identity,
+thread lock, self-filtering, acknowledge-and-drop on lock conflict) but route
+to their own single-slot hooks:
 
 - `OnCommand(func(ctx, *chat.CommandEvent) error)` for Command Events (Slack
   slash commands). Command-ness takes precedence over subscription state: a
@@ -614,44 +614,3 @@ cd examples/slack-redis-state
 docker compose up -d redis   # or: pitchfork start redis
 go run .
 ```
-
-## Testing Contract
-
-Tests verify external behavior and public contracts, not private
-implementation details. Required test families:
-
-- runtime construction and shutdown
-- handler registration and replacement
-- routing order and no-op missing handlers
-- explicit subscription and unsubscribe
-- direct-message implicit mention routing
-- self-message filtering
-- accepted, ignored, rejected, duplicate, and lock-conflict events
-- state conformance across memory, Redis, Postgres, and NATS
-- token-owned lock lease acquire, release, extend, expiry, and stale release
-- Slack signature verification and URL verification
-- Slack golden payload normalization
-- thread ID construction and validation
-- thread handle reconstruction
-- text, markdown, sent message, ephemeral, and ephemeral fallback posting
-- typed adapter access
-- documentation coverage for intentional Vercel differences (README, this
-  reference, the explanation page, and GoDoc)
-
-Local test commands:
-
-```sh
-mise run test
-mise run test:root
-mise run test:adapters
-mise run test:examples
-mise run test:nats
-mise run test:postgres
-mise run test:redis
-```
-
-`mise run test` is a composite task that runs the root module tests,
-`test:adapters`, and `test:examples`. The adapter-focused task also exercises
-the NATS, Redis, and Postgres state modules. The Redis and Postgres state
-tests use Testcontainers for real backend coverage and skip when Docker is
-unavailable; the NATS tests run against an embedded JetStream server.

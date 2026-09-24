@@ -1,21 +1,32 @@
 # How To Choose A State Backend
 
-Runtime state is required: the runtime stores subscribed-thread membership,
-event dedupe marks, and thread lock leases in a `chat.State`. It is
-coordination state, not product state — keep your application's own data in
-your own database keyed by `ThreadID`.
+Every bot needs a `chat.State`. The runtime keeps three things there:
+which threads are subscribed, which events it has already accepted (dedupe
+marks, written before any handler runs), and who holds each thread's lock. That is coordination state, not
+product state: keep your application's data in your own database, keyed by
+`ThreadID`.
 
-Four implementations ship today:
+## Pick One
 
-| Backend | Module | Use for |
+| Backend | Module | Use it when |
 | --- | --- | --- |
-| Memory | `github.com/coder/chat/state/memory` (in the core module) | Tests and local demos. Lost on restart. |
-| Redis | `github.com/coder/chat/state/redis` | Production, horizontally scaled deployments. |
-| Postgres | `github.com/coder/chat/state/postgres` | Production, when Postgres is already your coordination store. |
-| NATS JetStream | `github.com/coder/chat/state/nats` | Production, when you already run NATS with JetStream. |
+| Memory | `github.com/coder/chat/state/memory` (core module) | You are writing tests or following the tutorial. State is lost on restart. |
+| Redis | `github.com/coder/chat/state/redis` | You already run Redis. |
+| Postgres | `github.com/coder/chat/state/postgres` | You already run Postgres. |
+| NATS JetStream | `github.com/coder/chat/state/nats` | You already run NATS with JetStream. |
 
-Redis, Postgres, and NATS live in separate Go modules so applications that only
-need core, Slack, or memory state do not pull their dependencies.
+The three durable backends are equivalent for the runtime: they implement
+the same token-owned lock lease and dedupe contract and pass the same
+conformance suite, so any of them lets you run several bot replicas safely.
+Pick the one you already operate. Redis and Postgres are tested against
+real servers via Testcontainers; NATS is tested against an embedded
+JetStream server.
+
+Redis, Postgres, and NATS are separate Go modules, so an application that
+uses only the core module does not pull their dependencies.
+
+Whichever you pick, give each bot application its own namespace; see
+[One namespace per bot application](#one-namespace-per-bot-application).
 
 ## Memory
 
@@ -121,25 +132,13 @@ runnable example is
 
 ## One Namespace Per Bot Application
 
-The `Prefix`/`Namespace` options default to `chat`. If two *independent* bot
-applications share one Redis, Postgres, or NATS service with the default,
-their subscription, dedupe, and lock records collide — thread IDs carry
-platform tenant/channel identity but no application identity, so app A
-subscribing a thread can route that thread's follow-ups into app B's
-`OnSubscribedMessage`, and one app's locks can suppress the other's events.
-Give every bot application its own stable namespace, shared only by that
-app's replicas (replicas must share the namespace — that is what makes
-dedupe and locking work across them).
+The Redis `Prefix`, Postgres `Namespace`, and NATS `Prefix` options default to
+`chat`. Set them.
 
-## How To Decide
-
-- Writing tests or following the tutorial: use memory.
-- Already running Redis: use Redis. Same for Postgres and NATS — the backends
-  are contract-equivalent, so pick the one you already operate.
-- Running more than one bot replica: any of the durable backends works; all
-  three implement the same token-owned lock lease and dedupe contract, which is
-  what makes horizontal scaling safe.
-
-All backends are exercised by the same conformance suite; Redis and Postgres
-integration tests run against real backends via Testcontainers, and NATS tests
-run against an embedded JetStream server.
+- **Replicas of one bot share a namespace.** That is what lets them dedupe
+  and lock across each other.
+- **Independent bots need different namespaces.** Thread IDs identify the
+  platform tenant and channel but not your application. If two bots share a
+  backend and a namespace, bot A subscribing a thread can route that
+  thread's follow-ups into bot B's `OnSubscribedMessage`, and one bot's locks
+  can suppress the other's events.

@@ -106,23 +106,24 @@ on the first message. When the bot is up you should see a log line like:
 ## Step 5: Expose The Bot To Slack
 
 Slack must be able to reach your machine over public HTTPS. In a second
-terminal, expose port 8080 with your tunnel of choice. For example, with
-Tailscale Funnel (not `tailscale serve`, which is visible only inside your
-tailnet; Funnel must be enabled for your tailnet):
+terminal, expose port 8080 with your tunnel of choice.
+
+With ngrok:
+
+```sh
+ngrok http 8080
+```
+
+With Tailscale Funnel (Funnel must be enabled for your tailnet; `tailscale
+serve` does not work, because it is visible only inside your tailnet):
 
 ```sh
 tailscale funnel --bg --https=443 localhost:8080
 tailscale funnel status
 ```
 
-Run `tailscale funnel reset` when you are done to turn the public endpoint
-off.
-
-or with ngrok:
-
-```sh
-ngrok http 8080
-```
+When you finish the tutorial, run `tailscale funnel reset` to turn the
+public endpoint off.
 
 Either way you end up with a public HTTPS URL such as
 `https://your-host.example.com`. Keep the tunnel running.

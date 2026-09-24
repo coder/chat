@@ -1,35 +1,15 @@
 # How To Defer Long-Running Work (Ack-Then-Work)
 
-Chat platforms expect webhooks to be acknowledged quickly — Slack retries
-after 3 seconds, Linear expects agent activity within ~10 seconds. If your
-handler calls an LLM or does anything slow, the default synchronous dispatch
-mode will run it *before* acknowledging the webhook, and the platform will
-retry or time out.
+Slack retries a webhook that is not acknowledged within 3 seconds. Linear
+expects a first agent activity within about 10 seconds. By default the runtime
+runs your handler *before* it acknowledges the webhook, so a handler that
+calls an LLM can easily miss those deadlines.
 
-`DispatchDeferred` splits dispatch in two (see
-[ADR 0002](../adr/0002-async-dispatch.md)):
-
-1. **Prelude, before ack**: signature verification, normalization, dedupe
-   marking, and thread lock acquisition run synchronously on the request
-   context.
-2. **Detached tail, launched at ack time**: your handler runs on a
-   runtime-managed detached work context, concurrently with the webhook
-   response — the acknowledgement no longer waits on your handler (though the
-   tail may begin before the 2xx is actually written). The runtime renews the
-   thread lock lease in the background while the handler runs. If the lease
-   is lost — the state backend fails to extend it, it expired, or another
-   runtime instance released it — the handler's context is cancelled with
-   `chat.ErrPreempted` as its cause (`context.Cause(ctx)`) rather than
-   running on without exclusivity. Cancellation is cooperative: a handler
-   that ignores its context keeps running, so use the `ctx` you are given
-   for every call and treat `ErrPreempted` as "stop, someone else may now
-   own this thread".
+Deferred dispatch fixes this. The acknowledgement no longer waits for your
+handler, which runs on a detached context
+([ADR 0002](../adr/0002-async-dispatch.md)).
 
 ## Enable It
-
-`WithRuntimeOptions` replaces the whole options struct (it does not merge), so
-start from `chat.DefaultRuntimeOptions()` to keep the required `DedupeTTL` and
-`ThreadLockTTL` defaults:
 
 ```go
 opts := chat.DefaultRuntimeOptions()
@@ -44,56 +24,39 @@ bot, err := chat.New(ctx,
 )
 ```
 
-- `Dispatch: chat.DispatchDeferred` turns on ack-then-work. The default is
-  `chat.DispatchSync`, which runs the handler before acknowledging.
-- `DetachTimeout` (required under `DispatchDeferred`; `DefaultRuntimeOptions()`
-  leaves it at zero, so `chat.New` fails until you set it) bounds how long a
-  detached handler may run after the webhook request has ended.
-- `Concurrency: chat.ConcurrencyQueue` is the natural companion: while a
-  detached handler holds the thread lock, follow-up events on the same thread
-  wait instead of being dropped, and only the most recent superseded follow-up
-  runs. The default `chat.ConcurrencyDrop` acknowledges and drops conflicting
-  events instead. Two caveats:
-  - Coalescing is **per process**: with multiple bot replicas, the shared
-    state lock still serializes handlers, but follow-ups that landed on
-    different replicas each run in turn. If superseded events must never
-    execute twice, route each thread's webhooks to one replica or make
-    handlers idempotent.
-  - A queued follow-up's `DetachTimeout` clock starts when it is accepted,
-    **before** it waits for the lock. Time spent queued behind a long handler
-    consumes the follow-up's own budget; if the wait exhausts it, the
-    follow-up is cancelled without running (it was already deduped, so it
-    will not be redelivered). Size `DetachTimeout` to cover your longest
-    handler *plus* the queue wait behind it.
-- `Concurrency: chat.ConcurrencyBurst` batches instead of coalescing: events
-  for a thread collect during a fixed `BurstWindow`, then run as one batch in
-  join order under a single lock hold, each member with its own
-  `DetachTimeout` budget — no accepted event is dropped. `MaxBurstBatch`
-  optionally seals a full window early; batches dispatch in seal order.
-  Batching is per process, like queue coalescing. See the
-  `chat.ConcurrencyBurst` GoDoc for the full lifecycle contract.
-- `MaxDetached` (required under `DispatchDeferred`; `DefaultRuntimeOptions()`
-  sets 1024) is the admission bound from
-  [ADR 0015](../adr/0015-runtime-coordination.md): it caps
-  admitted-but-incomplete deferred deliveries — running handlers, queued and
-  debounced waiters, concurrent slot-waiters, parked burst batch members — so
-  an event flood cannot grow
-  goroutines and retained payloads without limit. A delivery arriving at the
-  cap is rejected with `chat.ErrAdmissionRejected` **before** the ack and
-  **before** dedupe marking; the adapter maps that to a retry-inducing 503 for
-  platform-redelivered shapes (Slack Events API callbacks, Linear webhooks) and
-  a truthful busy signal for direct invocations Slack does not redeliver: a
-  slash command gets a 200 with a visible "at capacity" message, a
-  `block_actions` click gets a 503 that Slack surfaces as a warning on the
-  component. The optional `MaxDetachedPerTenant` additionally caps one
-  installation's share through the same rejection path. Sizing guidance lives
-  on the `MaxDetached` GoDoc.
+`WithRuntimeOptions` replaces the whole options struct; it does not merge.
+Start from `chat.DefaultRuntimeOptions()` so you keep the required
+`DedupeTTL` and `ThreadLockTTL` defaults.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `Dispatch` | `DispatchSync` | `DispatchDeferred` turns on ack-then-work. |
+| `DetachTimeout` | `0` | How long a handler may run after the webhook request ends. Required under deferred dispatch: `chat.New` fails while it is zero. |
+| `Concurrency` | `ConcurrencyDrop` | What happens to an event that arrives while a handler holds the thread lock. See [Pick a concurrency strategy](#pick-a-concurrency-strategy). |
+| `MaxDetached` | `1024` | The cap on deferred work in flight. Must be positive under deferred dispatch. See [Handle overload](#handle-overload). |
+
+## How It Works
+
+Dispatch runs in two parts:
+
+1. **Before the acknowledgement**, on the request context: signature
+   verification, normalization, dedupe marking, and thread lock acquisition.
+2. **Launched at acknowledgement time**, on a runtime-managed detached
+   context: your handler. It runs concurrently with the webhook response and
+   may start just before the 2xx is written. While it runs, the runtime renews the
+   thread lock lease in the background.
+
+If the lease is lost — the state backend fails to extend it, it expires, or
+another runtime instance releases it — the runtime cancels the handler's
+context with `chat.ErrPreempted` as the cause (`context.Cause(ctx)`). The
+handler no longer has the thread to itself, so treat `ErrPreempted` as "stop,
+someone else may own this thread now". Cancellation is cooperative: a handler
+that ignores its context keeps running.
 
 ## Write Handlers For The Detached Context
 
-Your handler code does not change shape — it still receives a
-`context.Context` — but under `DispatchDeferred` that context is the detached
-work context, not the HTTP request context:
+Handlers keep the same signature. Under deferred dispatch the `ctx` they
+receive is the detached context, not the HTTP request context:
 
 ```go
 bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
@@ -108,24 +71,86 @@ bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 })
 ```
 
-Rules that keep this safe:
+Follow three rules:
 
-- Use the `ctx` you are given for every call. It carries the detach timeout
-  and is how the runtime signals cancellation.
-- Handler errors after ack are recorded and observed, not retried by the
-  platform. If your work must not be lost, make it idempotent and consider
-  your own queue.
-- `Shutdown(ctx)` cancels the detached work contexts first, then waits
-  (bounded by the context you pass it) for handlers to observe cancellation
-  and return. In-flight generation is aborted, not completed — deferred
-  dispatch is not a durable queue, so work that must survive a rolling deploy
-  belongs in application-owned persistence.
+- **Use the `ctx` you are given for every call.** It carries the
+  `DetachTimeout` deadline and the runtime's cancellation signal.
+- **Expect no platform retry.** An error returned after the acknowledgement
+  is logged and observed, but the platform never redelivers the event. If the
+  work must not be lost, make it idempotent and put it on your own queue.
+- **Expect shutdown to abort work.** `Shutdown(ctx)` cancels the detached
+  contexts first, then waits (bounded by the context you pass it) for
+  handlers to return. Deferred dispatch is not a durable queue; work that
+  must survive a rolling deploy belongs in your own persistence.
+
+## Pick A Concurrency Strategy
+
+Deferred handlers hold the thread lock longer, so events that overlap on one
+thread become common. The concurrency strategy decides what happens to them
+([ADR 0012](../adr/0012-concurrency-strategy.md)):
+
+| Strategy | What happens to an overlapping event |
+| --- | --- |
+| `ConcurrencyDrop` (default) | It is acknowledged and dropped. |
+| `ConcurrencyQueue` | It waits for the running handler. Only the newest waiting event runs; older waiting events are superseded, and supersession is observable. |
+| `ConcurrencyDebounce` | Each new event replaces the waiting one. After a `DebounceInterval` quiet period, only the last event goes on to wait for the lock and run. Requires a `DetachTimeout` longer than `DebounceInterval`. |
+| `ConcurrencyConcurrent` | There is no thread lock; events run in parallel, up to `MaxConcurrent` at once. Extra events wait for a free slot. |
+| `ConcurrencyBurst` | Events collect for a fixed `BurstWindow`, then run as one batch, in join order, under a single lock hold. Nothing accepted is dropped, and each member gets its own `DetachTimeout`. `MaxBurstBatch` optionally closes a full window early; batches run in the order they close. |
+
+Debounce and burst require deferred dispatch. `DebounceInterval`,
+`MaxConcurrent`, and `BurstWindow` must be positive under their strategy, or
+`chat.New` fails. The `chat.ConcurrencyBurst` GoDoc has the full burst
+lifecycle.
+
+Two caveats apply to the strategies that make events wait:
+
+- **Waiting counts against `DetachTimeout`.** An event's clock starts when
+  it is accepted. Time it spends waiting — in the queue, through the
+  debounce quiet period and the lock wait after it, or for a free concurrent
+  slot — uses up its budget. If the budget runs out, the event is cancelled
+  without running, and because it was already deduped, the platform will
+  not redeliver it. Size `DetachTimeout` for your longest handler *plus* the
+  longest wait before it.
+- **Coalescing happens inside one process.** With several replicas, the
+  shared state lock still serializes handlers, but follow-ups that landed on
+  different replicas each run in turn. The same holds for debounce and
+  burst batching. If a superseded event must never run, route each thread's
+  webhooks to one replica or make handlers idempotent.
+
+`ConcurrencyQueue` suits most conversational bots: a follow-up sent while
+the bot is still working waits instead of disappearing.
+
+## Handle Overload
+
+`MaxDetached` caps admitted-but-incomplete deferred deliveries: running
+handlers plus events waiting under the queue, debounce, concurrent, and
+burst strategies ([ADR 0015](../adr/0015-runtime-coordination.md)). It stops
+an event flood from growing goroutines and retained payloads without limit.
+Sizing guidance lives on the `MaxDetached` GoDoc.
+
+A delivery that arrives at the cap is rejected with
+`chat.ErrAdmissionRejected` before the acknowledgement and before dedupe
+marking, so a later redelivery is not mistaken for a duplicate. The adapter
+answers the platform:
+
+| Delivery | Response |
+| --- | --- |
+| Slack Events API callback, Linear webhook | 503, so the platform retries. |
+| Slack slash command | 200 with a visible "at capacity" message. |
+| Slack `block_actions` click | 503, which Slack shows as a warning on the component. |
+
+Slack does not redeliver slash commands or clicks, so those get an honest
+busy signal instead of a retry.
+
+`MaxDetachedPerTenant` optionally caps one installation's share through the
+same rejection path.
 
 ## When Not To Use It
 
-Stay with `DispatchSync` when handlers are fast (a quick reply, a state
-lookup) — synchronous dispatch keeps the failure story simpler because a
-handler error still happens before the platform ack. Streaming token
-transports are a non-goal of the core runtime; deferred dispatch plus one
-finished message is the supported long-generation pattern (see
-[ADR 0011](../adr/0011-resumable-streaming.md)).
+Keep `DispatchSync` when handlers are fast, such as a quick reply or a state
+lookup. The failure story is simpler: a handler error happens before the
+platform acknowledgement.
+
+Token streaming is not part of the core runtime. For long generation, use
+deferred dispatch and post one finished message
+([ADR 0011](../adr/0011-resumable-streaming.md)).
