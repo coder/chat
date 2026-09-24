@@ -185,3 +185,7 @@ Report bugs and request features in
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for how to build, test, and propose
 changes.
+
+## License
+
+Chat SDK Go is released under the [MIT License](LICENSE).
