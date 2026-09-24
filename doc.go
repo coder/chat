@@ -95,11 +95,14 @@
 // before dedupe marking, so the platform's retry is not mistaken for a
 // duplicate.
 //
-// [RuntimeOptions].Concurrency decides what happens to an event that arrives
-// while a handler holds its lock scope, which is one thread by default or the
-// whole channel with [LockScopeChannel]: [ConcurrencyDrop] (the default),
-// [ConcurrencyQueue], [ConcurrencyDebounce], [ConcurrencyConcurrent], or
-// [ConcurrencyBurst]. Debounce and burst require deferred dispatch.
+// [RuntimeOptions].Concurrency decides how overlapping events are handled.
+// [ConcurrencyDrop] (the default), [ConcurrencyQueue], [ConcurrencyDebounce],
+// and [ConcurrencyBurst] serialize handlers per lock scope, which is one
+// thread by default or the whole channel with [LockScopeChannel]; debounce
+// and burst require deferred dispatch. [ConcurrencyConcurrent] takes no lock
+// and ignores the lock scope: [RuntimeOptions].MaxConcurrent, which must be
+// positive, caps simultaneous handlers per instance, and an event that finds
+// every slot busy waits for one and is ignored if its context ends first.
 //
 // [WithRuntimeOptions] replaces the whole options struct, so start from
 // [DefaultRuntimeOptions] and change only the fields you need.
