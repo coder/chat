@@ -92,7 +92,6 @@ func ExampleChat_OnNewMention() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bot.Shutdown(ctx)
 
 	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 		_, err := ev.Thread.Post(ctx, chat.Text("Hello, "+ev.Message.Author.Name+"!"))
@@ -111,6 +110,9 @@ func ExampleChat_OnNewMention() {
 
 	send("thread=general&user=alice&text=hi&mention")
 	send("thread=random&user=bob&text=lunch")
+	if err := bot.Shutdown(ctx); err != nil {
+		log.Fatal(err)
+	}
 	// Output:
 	// [general] bot: Hello, alice!
 }
@@ -126,7 +128,6 @@ func ExampleThread_Subscribe() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bot.Shutdown(ctx)
 
 	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 		if err := ev.Thread.Subscribe(ctx); err != nil {
@@ -161,6 +162,9 @@ func ExampleThread_Subscribe() {
 	send("thread=general&user=alice&text=deploy+status")
 	send("thread=general&user=alice&text=bye")
 	send("thread=general&user=alice&text=anyone+there") // ignored: no longer subscribed
+	if err := bot.Shutdown(ctx); err != nil {
+		log.Fatal(err)
+	}
 	// Output:
 	// [general] bot: Listening. Say "bye" to stop.
 	// [general] bot: You said: deploy status
@@ -186,7 +190,6 @@ func ExampleRuntimeOptions_deferredDispatch() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bot.Shutdown(ctx)
 
 	release := make(chan struct{})
 	done := make(chan struct{})
@@ -219,6 +222,9 @@ func ExampleRuntimeOptions_deferredDispatch() {
 
 	close(release)
 	<-done
+	if err := bot.Shutdown(ctx); err != nil {
+		log.Fatal(err)
+	}
 	// Output:
 	// first delivery: 200
 	// second delivery: 503
@@ -236,7 +242,6 @@ func ExampleAdapterAs() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer bot.Shutdown(ctx)
 
 	_, ok := chat.AdapterAs[chat.EphemeralPoster](bot, "demo")
 	fmt.Println("ephemeral messages supported:", ok)
@@ -251,8 +256,12 @@ func ExampleAdapterAs() {
 		if err != nil {
 			return err
 		}
-		last := history[len(history)-1]
-		_, err = ev.Thread.Post(ctx, chat.Text(fmt.Sprintf("%d earlier messages; the last is from %s.", len(history), last.Author.Name)))
+		reply := "No earlier messages."
+		if len(history) > 0 {
+			last := history[len(history)-1]
+			reply = fmt.Sprintf("%d earlier messages; the last is from %s.", len(history), last.Author.Name)
+		}
+		_, err = ev.Thread.Post(ctx, chat.Text(reply))
 		return err
 	})
 
@@ -267,6 +276,9 @@ func ExampleAdapterAs() {
 	}
 
 	send("thread=general&user=alice&text=catch+me+up&mention")
+	if err := bot.Shutdown(ctx); err != nil {
+		log.Fatal(err)
+	}
 	// Output:
 	// ephemeral messages supported: false
 	// [general] bot: 2 earlier messages; the last is from bob.

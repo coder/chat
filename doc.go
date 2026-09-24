@@ -45,7 +45,11 @@
 //	if err != nil {
 //		return err
 //	}
-//	defer bot.Shutdown(context.Background())
+//	defer func() {
+//		if err := bot.Shutdown(context.Background()); err != nil {
+//			slog.Error("chat shutdown failed", "error", err)
+//		}
+//	}()
 //
 //	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 //		_, err := ev.Thread.Post(ctx, chat.Text("hello"))
@@ -72,9 +76,10 @@
 //     context and acknowledges after it returns. Use it for fast handlers.
 //   - [DispatchDeferred] (ack-then-work) runs dedupe before the
 //     acknowledgement, then runs the handler on a detached context bounded by
-//     [RuntimeOptions].DetachTimeout, which must be positive. The runtime
-//     renews the thread lock while the handler runs; if the lease is lost, it
-//     cancels the handler's context with [ErrPreempted] as the cause.
+//     [RuntimeOptions].DetachTimeout, which must be positive. Under every
+//     strategy except [ConcurrencyConcurrent], which takes no lock, the
+//     runtime renews the thread lock while the handler runs; if the lease is
+//     lost, it cancels the handler's context with [ErrPreempted] as the cause.
 //
 // In both modes an accepted event is acknowledged even when its handler
 // returns an error; the error is logged and observed, not retried.
@@ -120,9 +125,11 @@
 //
 // # Observability
 //
-// The runtime logs through [log/slog] ([WithLogger]). [WithObserver] adds
-// counters and a per-dispatch span with a terminal [DispatchOutcome] without
-// adding dependencies to the core.
+// The runtime logs through [log/slog] ([WithLogger]). [WithObserver] installs
+// your [Observer], which receives counter-style observation events and opens a
+// [DispatchSpan] for each dispatch that ends with a terminal [DispatchOutcome].
+// The default observer records nothing, and the core imports no telemetry
+// libraries.
 //
 // # Further Reading
 //
