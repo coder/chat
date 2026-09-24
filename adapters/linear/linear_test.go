@@ -74,7 +74,7 @@ func TestWebhookVerificationAndIgnoredEvents(t *testing.T) {
 		t.Fatalf("webhook: %v", err)
 	}
 
-	body := []byte(fmt.Sprintf(`{"type":"Other","webhookTimestamp":%d}`, now.UnixMilli()))
+	body := fmt.Appendf(nil, `{"type":"Other","webhookTimestamp":%d}`, now.UnixMilli())
 	req := httptest.NewRequest(http.MethodPost, "/linear", bytes.NewReader(body))
 	signLinearRequest(req, "whsec", body)
 	rec := httptest.NewRecorder()
@@ -91,7 +91,7 @@ func TestWebhookVerificationAndIgnoredEvents(t *testing.T) {
 		t.Fatalf("bad signature status = %d", badRec.Code)
 	}
 
-	old := []byte(fmt.Sprintf(`{"type":"Other","webhookTimestamp":%d}`, now.Add(-2*time.Minute).UnixMilli()))
+	old := fmt.Appendf(nil, `{"type":"Other","webhookTimestamp":%d}`, now.Add(-2*time.Minute).UnixMilli())
 	oldReq := httptest.NewRequest(http.MethodPost, "/linear", bytes.NewReader(old))
 	signLinearRequest(oldReq, "whsec", old)
 	oldRec := httptest.NewRecorder()
@@ -109,7 +109,7 @@ func TestWebhookVerificationAndIgnoredEvents(t *testing.T) {
 		t.Fatalf("malformed status = %d", malformedRec.Code)
 	}
 
-	unbuildable := []byte(fmt.Sprintf(`{"type":"AgentSessionEvent","action":"created","organizationId":"ORG1","webhookTimestamp":%d,"agentSession":{"id":"S1","appUserId":"APP1"}}`, now.UnixMilli()))
+	unbuildable := fmt.Appendf(nil, `{"type":"AgentSessionEvent","action":"created","organizationId":"ORG1","webhookTimestamp":%d,"agentSession":{"id":"S1","appUserId":"APP1"}}`, now.UnixMilli())
 	unbuildableReq := httptest.NewRequest(http.MethodPost, "/linear", bytes.NewReader(unbuildable))
 	signLinearRequest(unbuildableReq, "whsec", unbuildable)
 	unbuildableRec := httptest.NewRecorder()

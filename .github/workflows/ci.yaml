@@ -14,8 +14,16 @@ concurrency:
 
 jobs:
   test:
+    name: test (${{ matrix.go }})
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # pinned: the toolchain from mise.toml.
+        # minimum: the `go` version in go.mod, which is the oldest Go that
+        # consumers of this library may build with.
+        go: [pinned, minimum]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -23,14 +31,33 @@ jobs:
       - name: Install mise-pinned toolchain
         uses: jdx/mise-action@c2a87611a18de5b3828c5652fe268e992400cb5c # v4.3.0
 
+      - name: Select Go version
+        env:
+          MATRIX_GO: ${{ matrix.go }}
+        run: |
+          if [ "$MATRIX_GO" = minimum ]; then
+            want="$(go mod edit -json | jq -r .Go)"
+            echo "GOTOOLCHAIN=go${want}" >> "$GITHUB_ENV"
+          else
+            want="$(mise current go)"
+          fi
+          test -n "$want" && test "$want" != null
+          echo "WANT_GO=go${want}" >> "$GITHUB_ENV"
+
       - name: Cache Go modules
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/go/pkg/mod
             ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ hashFiles('**/go.sum', 'go.work.sum') }}
-          restore-keys: go-${{ runner.os }}-
+          key: go-${{ runner.os }}-${{ matrix.go }}-${{ hashFiles('**/go.sum', 'go.work.sum') }}
+          restore-keys: go-${{ runner.os }}-${{ matrix.go }}-
+
+      - name: Verify Go version
+        run: |
+          got="$(go env GOVERSION)"
+          echo "go env GOVERSION: ${got} (want ${WANT_GO})"
+          test "$got" = "$WANT_GO"
 
       - name: Vet
         run: mise run vet

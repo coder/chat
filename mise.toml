@@ -1,5 +1,5 @@
 [tools]
-go = "1.26.3"
+go = "1.27.1"
 "npm:clawpatch" = "0.3.0"
 pitchfork = "2.11.0"
 
