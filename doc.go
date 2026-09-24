@@ -27,9 +27,11 @@
 //     and ignored.
 //
 // Between the adapter and the handler, the runtime dedupes redeliveries by
-// event ID, ignores events from the bot itself, and holds a per-thread lock so
-// that handlers for one thread do not overlap (unless you opt out with
-// [ConcurrencyConcurrent]).
+// event ID, ignores events from the bot itself, and serializes handlers for
+// one thread with a lock lease (unless you opt out with
+// [ConcurrencyConcurrent]). The lease lasts [RuntimeOptions].ThreadLockTTL.
+// Only deferred dispatch renews it, so under the default synchronous dispatch
+// keep handlers well inside that TTL.
 //
 // # Construction
 //
@@ -93,8 +95,9 @@
 // before dedupe marking, so the platform's retry is not mistaken for a
 // duplicate.
 //
-// [RuntimeOptions].Concurrency decides what happens to an event that overlaps
-// a running handler on the same thread: [ConcurrencyDrop] (the default),
+// [RuntimeOptions].Concurrency decides what happens to an event that arrives
+// while a handler holds its lock scope, which is one thread by default or the
+// whole channel with [LockScopeChannel]: [ConcurrencyDrop] (the default),
 // [ConcurrencyQueue], [ConcurrencyDebounce], [ConcurrencyConcurrent], or
 // [ConcurrencyBurst]. Debounce and burst require deferred dispatch.
 //

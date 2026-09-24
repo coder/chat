@@ -256,12 +256,8 @@ func ExampleAdapterAs() {
 		if err != nil {
 			return err
 		}
-		reply := "No earlier messages."
-		if len(history) > 0 {
-			last := history[len(history)-1]
-			reply = fmt.Sprintf("%d earlier messages; the last is from %s.", len(history), last.Author.Name)
-		}
-		_, err = ev.Thread.Post(ctx, chat.Text(reply))
+		// Ordering and pagination are adapter-owned; see the adapter's GoDoc.
+		_, err = ev.Thread.Post(ctx, chat.Text(fmt.Sprintf("I read %d earlier messages.", len(history))))
 		return err
 	})
 
@@ -281,5 +277,5 @@ func ExampleAdapterAs() {
 	}
 	// Output:
 	// ephemeral messages supported: false
-	// [general] bot: 2 earlier messages; the last is from bob.
+	// [general] bot: I read 2 earlier messages.
 }
