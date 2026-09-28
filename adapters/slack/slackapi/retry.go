@@ -19,7 +19,10 @@ import (
 // Retry-After header, and never sleeps past the caller's context deadline so
 // in-line synchronous retry cannot outlive the platform ack window (Slack's
 // 3-second budget). The zero value applies a conservative default; MaxAttempts: 1
-// disables retry for callers that want raw single-shot behavior.
+// disables retry for callers that want raw single-shot behavior. A Retry-After
+// longer than MaxDelay is capped at MaxDelay, so the retry comes earlier than
+// Slack asked. Callers that must honor long Retry-After values should raise
+// MaxDelay and MaxElapsed.
 type RetryPolicy struct {
 	// MaxAttempts is the total number of attempts including the first. Zero applies
 	// a conservative default; 1 disables retry.
@@ -29,14 +32,16 @@ type RetryPolicy struct {
 	// BaseDelay is the first backoff delay when Slack sends no Retry-After; it
 	// doubles each attempt up to MaxDelay.
 	BaseDelay time.Duration
-	// MaxDelay caps a single backoff delay.
+	// MaxDelay caps a single backoff delay, including a delay that Retry-After
+	// asks for.
 	MaxDelay time.Duration
 }
 
 // Default retry bounds are deliberately conservative so the worst-case backoff
 // (about 200ms + 400ms = 600ms over two retries, capped at MaxElapsed) stays well
-// under Slack's 3-second ack window. A longer Retry-After exhausts to a typed
-// RateLimited rather than sleeping past the deadline.
+// under Slack's 3-second ack window. A longer Retry-After is capped at MaxDelay.
+// When the next delay would pass MaxElapsed or the context deadline, retry stops
+// with a typed RateLimited rather than sleeping past the deadline.
 func (p RetryPolicy) withDefaults() RetryPolicy {
 	out := p
 	if out.MaxAttempts <= 0 {
@@ -55,10 +60,10 @@ func (p RetryPolicy) withDefaults() RetryPolicy {
 }
 
 // RateLimited is returned when bounded retry is exhausted against a Slack rate
-// limit, or when a single Retry-After would exceed the caller's deadline. It
-// carries the adapter name, the last Retry-After, the attempt count, and the raw
-// platform response as a Platform Escape Hatch. It is unwrappable to any
-// underlying transport error.
+// limit, or when the next backoff delay would pass MaxElapsed or the caller's
+// deadline. It carries the adapter name, the last Retry-After, the attempt
+// count, and the raw platform response as a Platform Escape Hatch. Transport
+// errors are not wrapped in RateLimited; they return directly.
 type RateLimited struct {
 	// Adapter is always "slack".
 	Adapter string
@@ -68,7 +73,8 @@ type RateLimited struct {
 	Attempts int
 	// Raw is the last response body as a json.RawMessage.
 	Raw any
-	// Err is an underlying error, if any.
+	// Err is an optional underlying error that Error and Unwrap expose. The
+	// Client never sets it.
 	Err error
 }
 
@@ -137,8 +143,8 @@ func (c *Client) doWithRetry(ctx context.Context, method string, req *http.Reque
 			return 0, nil, rateLimited
 		}
 		// The single load-bearing invariant: never sleep past the caller's context
-		// deadline. A Retry-After that would miss the ack exhausts to a typed
-		// RateLimited instead of blowing the window.
+		// deadline. A delay that would miss the ack returns a typed RateLimited
+		// instead of blowing the window.
 		if deadline, ok := ctx.Deadline(); ok && time.Now().Add(delay).After(deadline) {
 			c.logRetry(method, attempt, retryAfter, "deadline")
 			return 0, nil, rateLimited

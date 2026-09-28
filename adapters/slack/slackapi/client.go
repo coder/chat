@@ -26,7 +26,8 @@ var defaultFileOrigins = []string{"https://files.slack.com", "https://slack.com"
 
 // Options configures a Client.
 type Options struct {
-	// Token is the bot or user token that Call sends as a bearer token.
+	// Token is the bot or user token. Call, the typed methods, and DownloadFile
+	// send it as a bearer token. UploadToURL and PostResponseURL never send it.
 	Token string
 	// BaseURL is the Web API base URL. Empty uses DefaultBaseURL. New removes a
 	// trailing slash.
@@ -104,7 +105,8 @@ func New(opts Options) *Client {
 }
 
 // WithToken returns a copy of c that sends token instead of the token of c. The
-// copy shares the HTTP client, retry policy, observer, and logger of c.
+// copy shares the base URL, file origins, HTTP client, retry policy, observer,
+// and logger of c.
 func (c *Client) WithToken(token string) *Client {
 	clone := *c
 	clone.token = token
