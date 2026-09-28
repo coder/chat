@@ -37,6 +37,11 @@ func TestBlocksMarshalJSON(t *testing.T) {
 				`]}`,
 		},
 		{
+			name:  "ActionsBlockWithoutElements",
+			block: slackapi.ActionsBlock{},
+			want:  `{"type":"actions","elements":[]}`,
+		},
+		{
 			name: "ActionsBlockWithBlockID",
 			block: slackapi.ActionsBlock{
 				Elements: []slackapi.ButtonElement{{Text: "Stop", ActionID: "stop", Style: "danger"}},

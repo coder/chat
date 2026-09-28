@@ -40,7 +40,7 @@ func (b MarkdownBlock) MarshalJSON() ([]byte, error) {
 
 // ActionsBlock is a Block Kit "actions" block that holds buttons.
 type ActionsBlock struct {
-	// Elements are the buttons of the block.
+	// Elements are the buttons of the block. Nil encodes as an empty array.
 	Elements []ButtonElement
 	// BlockID is the optional block_id. It is omitted when empty.
 	BlockID string
@@ -51,13 +51,17 @@ func (ActionsBlock) BlockType() string { return "actions" }
 
 // MarshalJSON encodes b as a Block Kit actions block.
 func (b ActionsBlock) MarshalJSON() ([]byte, error) {
+	elements := b.Elements
+	if elements == nil {
+		elements = []ButtonElement{}
+	}
 	return json.Marshal(struct {
 		Type     string          `json:"type"`
 		Elements []ButtonElement `json:"elements"`
 		BlockID  string          `json:"block_id,omitempty"`
 	}{
 		Type:     b.BlockType(),
-		Elements: b.Elements,
+		Elements: elements,
 		BlockID:  b.BlockID,
 	})
 }

@@ -99,6 +99,36 @@ func TestSplitMarkdown(t *testing.T) {
 			limit: 5,
 			want:  []string{"```go", "ab", "```"},
 		},
+		{
+			name:  "FenceLineWithInfoStringInsideFence",
+			text:  "```\nline one\n```go\nline two\n```",
+			limit: 25,
+			want: []string{
+				"```\nline one\n```go\n```",
+				"```\nline two\n```",
+			},
+		},
+		{
+			name:  "FourBacktickFenceWithThreeBacktickLine",
+			text:  "````\nabc\n```\ndef\n````",
+			limit: 20,
+			want: []string{
+				"````\nabc\n```\n````",
+				"````\ndef\n````",
+			},
+		},
+		{
+			name:  "NoEmptyBlockAfterOpeningFence",
+			text:  "```go\n" + strings.Repeat("x", 100) + "\n```\n",
+			limit: 20,
+			want:  slices.Repeat([]string{"```go\n" + strings.Repeat("x", 10) + "\n```"}, 10),
+		},
+		{
+			name:  "SplitBeforeOpeningFence",
+			text:  "Intro.\n```go\n" + strings.Repeat("x", 30) + "\n```",
+			limit: 20,
+			want:  append([]string{"Intro."}, slices.Repeat([]string{"```go\n" + strings.Repeat("x", 10) + "\n```"}, 3)...),
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -146,6 +176,10 @@ func TestSplitMarkdownProperties(t *testing.T) {
 		"```\n" + strings.Repeat("code line\n\n", 30) + "```\n" + strings.Repeat("text ", 40),
 		strings.Repeat("a paragraph of prose.\n\n```python\nprint(1)\nprint(2)\n```\n\n", 10),
 		"```sh\n" + strings.Repeat("echo 😀 你好\n", 40) + "```",
+		"````md\n" + strings.Repeat("```go\nfmt.Println(1)\n```\n", 10) + "````\n\nafter",
+		"```\n" + strings.Repeat("```go\ninner line\n", 10) + "```",
+		"```go\n" + strings.Repeat("x", 100) + "\n```\n",
+		"Intro.\n```go\n" + strings.Repeat("x", 300) + "\n```",
 	}
 	for i, text := range texts {
 		for limit := 1; limit <= 120; limit++ {
@@ -178,8 +212,9 @@ func TestSplitMarkdownProperties(t *testing.T) {
 					t.Fatalf("content changed\n got: %q\nwant: %q", got, want)
 				}
 				for j, chunk := range chunks {
-					if n := formatsCountFenceLines(chunk); n%2 != 0 {
-						t.Fatalf("chunk %d has %d fence lines, want an even number: %q", j, n, chunk)
+					want := j == len(chunks)-1 && formatsFenceOpenAtEnd(text)
+					if got := formatsFenceOpenAtEnd(chunk); got != want {
+						t.Fatalf("chunk %d ends inside a fenced code block = %t, want %t: %q", j, got, want, chunk)
 					}
 				}
 			})
@@ -208,14 +243,21 @@ func formatsStripFencesAndSpace(texts ...string) string {
 	return b.String()
 }
 
-func formatsCountFenceLines(text string) int {
-	n := 0
+// formatsFenceOpenAtEnd reports whether a fenced code block is open at the end
+// of text. A line of three or more backticks opens a block, and a line of at
+// least as many backticks followed only by whitespace closes it.
+func formatsFenceOpenAtEnd(text string) bool {
+	open := 0
 	for line := range strings.SplitSeq(text, "\n") {
-		if strings.HasPrefix(line, "```") {
-			n++
+		n := len(line) - len(strings.TrimLeft(line, "`"))
+		switch {
+		case open == 0 && n >= 3:
+			open = n
+		case open > 0 && n >= open && strings.TrimSpace(line[n:]) == "":
+			open = 0
 		}
 	}
-	return n
+	return open > 0
 }
 
 func formatsLongestFenceLine(text string) int {
