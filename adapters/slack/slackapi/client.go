@@ -38,12 +38,15 @@ type Options struct {
 	RetryPolicy RetryPolicy
 	// FileOrigins lists the origins (scheme and host) that serve Slack files.
 	// Empty uses https://files.slack.com and https://slack.com. New normalizes
-	// each entry to scheme://host and drops an entry that is not an absolute URL.
+	// each entry to a lowercase scheme://host without the default port of the
+	// scheme, and drops, with a warning to Logger, an entry that is not an
+	// absolute URL.
 	FileOrigins []string
 	// Observer receives an ObsAdapterCall for every attempt and an ObsRateLimit
 	// for every throttled response. Nil is a no-op.
 	Observer chat.Observer
-	// Logger receives a warning for every throttled response. Nil discards it.
+	// Logger receives a warning for every throttled response and for every
+	// dropped FileOrigins entry. Nil discards them.
 	Logger *slog.Logger
 }
 
@@ -68,16 +71,6 @@ func New(opts Options) *Client {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
-	fileOrigins := opts.FileOrigins
-	if len(fileOrigins) == 0 {
-		fileOrigins = defaultFileOrigins
-	}
-	origins := make([]string, 0, len(fileOrigins))
-	for _, raw := range fileOrigins {
-		if origin, ok := normalizeOrigin(raw); ok {
-			origins = append(origins, origin)
-		}
-	}
 	observer := opts.Observer
 	if observer == nil {
 		observer = noopObserver{}
@@ -85,6 +78,19 @@ func New(opts Options) *Client {
 	logger := opts.Logger
 	if logger == nil {
 		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	fileOrigins := opts.FileOrigins
+	if len(fileOrigins) == 0 {
+		fileOrigins = defaultFileOrigins
+	}
+	origins := make([]string, 0, len(fileOrigins))
+	for _, raw := range fileOrigins {
+		origin, ok := normalizeOrigin(raw)
+		if !ok {
+			logger.Warn("slack file origin dropped: not an absolute URL", "adapter", adapterName, "origin", raw)
+			continue
+		}
+		origins = append(origins, origin)
 	}
 	return &Client{
 		token:       opts.Token,
@@ -187,8 +193,8 @@ func (c *Client) send(ctx context.Context, method, target, token, contentType st
 	return status, payload, nil
 }
 
-// normalizeOrigin returns the scheme://host origin of raw, lowercased. It
-// reports false when raw is not an absolute URL with a host.
+// normalizeOrigin returns the origin of raw as originOf does. It reports false
+// when raw is not an absolute URL with a host.
 func normalizeOrigin(raw string) (string, bool) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil || u.Scheme == "" || u.Host == "" {
@@ -197,9 +203,18 @@ func normalizeOrigin(raw string) (string, bool) {
 	return originOf(u), true
 }
 
-// originOf returns the lowercased scheme://host origin of u.
+// originOf returns the lowercased scheme://host origin of u, without the
+// default port of the scheme (443 for https, 80 for http).
 func originOf(u *url.URL) string {
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Host)
+	switch scheme {
+	case "https":
+		host = strings.TrimSuffix(host, ":443")
+	case "http":
+		host = strings.TrimSuffix(host, ":80")
+	}
+	return scheme + "://" + host
 }
 
 type noopObserver struct{}

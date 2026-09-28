@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"slices"
@@ -32,6 +34,26 @@ func filesNewClient(srv *slackapitest.Server, opts slackapi.Options) *slackapi.C
 // filesRedirect returns a Response that redirects to location.
 func filesRedirect(location string) slackapitest.Response {
 	return slackapitest.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {location}}}
+}
+
+// filesLocalhost returns rawURL with the host localhost instead of 127.0.0.1.
+// http.Client removes the Authorization header on a redirect from one of these
+// hosts to the other, like on a redirect from files.slack.com to slack.com.
+func filesLocalhost(t *testing.T, rawURL string) string {
+	t.Helper()
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatalf("parse %q: %v", rawURL, err)
+	}
+	u.Host = "localhost:" + u.Port()
+	return u.String()
+}
+
+// filesTransport is an http.RoundTripper that answers every request with fn.
+type filesTransport func(*http.Request) (*http.Response, error)
+
+func (fn filesTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return fn(req)
 }
 
 func TestGetUploadURLExternal(t *testing.T) {
@@ -147,6 +169,54 @@ func TestUploadToURL(t *testing.T) {
 		}
 		if got := len(srv.FileRequests(target)); got != 0 {
 			t.Fatalf("file requests = %d, want 0", got)
+		}
+	})
+
+	t.Run("redirect to allowed origin", func(t *testing.T) {
+		t.Parallel()
+
+		srv := slackapitest.NewServer(t)
+		target := srv.UploadURL("F1")
+		moved := filesLocalhost(t, target)
+		client := filesNewClient(srv, slackapi.Options{FileOrigins: []string{srv.FileOrigin(), filesLocalhost(t, srv.FileOrigin())}})
+		redirect := srv.HandleFile("/upload/redirect", func(slackapitest.FileRequest) any {
+			return slackapitest.Response{StatusCode: http.StatusTemporaryRedirect, Header: http.Header{"Location": {moved}}}
+		})
+
+		if err := client.UploadToURL(t.Context(), redirect, []byte("content")); err != nil {
+			t.Fatalf("UploadToURL: %v", err)
+		}
+		reqs := srv.FileRequests(target)
+		if len(reqs) != 1 {
+			t.Fatalf("redirect target requests = %d, want 1", len(reqs))
+		}
+		if req := reqs[0]; req.Method != http.MethodPost || string(req.Body) != "content" {
+			t.Fatalf("request = %s %q, want POST %q", req.Method, req.Body, "content")
+		}
+		if got, ok := reqs[0].Header["Authorization"]; ok {
+			t.Fatalf("Authorization = %q, want none", got)
+		}
+	})
+
+	t.Run("redirect to other origin", func(t *testing.T) {
+		t.Parallel()
+
+		srv := slackapitest.NewServer(t)
+		srv.Respond("files/F1", map[string]any{"ok": true})
+		client := filesNewClient(srv, slackapi.Options{})
+		redirect := srv.HandleFile("/upload/redirect", func(slackapitest.FileRequest) any {
+			return slackapitest.Response{StatusCode: http.StatusTemporaryRedirect, Header: http.Header{"Location": {srv.URL() + "/files/F1"}}}
+		})
+
+		err := client.UploadToURL(t.Context(), redirect, []byte("content"))
+		if err == nil || !strings.Contains(err.Error(), "redirect origin") {
+			t.Fatalf("err = %v, want a redirect origin error", err)
+		}
+		if got := len(srv.Calls("files/F1")); got != 0 {
+			t.Fatalf("redirect target calls = %d, want 0", got)
+		}
+		if srv.Client().CheckRedirect != nil {
+			t.Fatal("UploadToURL set CheckRedirect on the shared HTTP client")
 		}
 	})
 
@@ -527,8 +597,9 @@ func TestDownloadFile(t *testing.T) {
 
 		srv := slackapitest.NewServer(t)
 		srv.Respond("files/F1", slackapitest.Response{Header: http.Header{"Content-Type": {"text/plain"}}, Body: []byte("moved")})
-		client := filesNewClient(srv, slackapi.Options{FileOrigins: []string{srv.FileOrigin(), srv.URL()}})
-		target := srv.HandleFile("/redirect", func(slackapitest.FileRequest) any { return filesRedirect(srv.URL() + "/files/F1") })
+		apiURL := filesLocalhost(t, srv.URL())
+		client := filesNewClient(srv, slackapi.Options{FileOrigins: []string{srv.FileOrigin(), apiURL}})
+		target := srv.HandleFile("/redirect", func(slackapitest.FileRequest) any { return filesRedirect(apiURL + "/files/F1") })
 
 		var buf bytes.Buffer
 		n, err := client.DownloadFile(t.Context(), target, &buf, 1024)
@@ -538,8 +609,73 @@ func TestDownloadFile(t *testing.T) {
 		if n != 5 || buf.String() != "moved" {
 			t.Fatalf("n = %d, body = %q, want 5 %q", n, buf.String(), "moved")
 		}
-		if got := len(srv.Calls("files/F1")); got != 1 {
-			t.Fatalf("redirect target calls = %d, want 1", got)
+		calls := srv.Calls("files/F1")
+		if len(calls) != 1 {
+			t.Fatalf("redirect target calls = %d, want 1", len(calls))
+		}
+		if got := calls[0].Header.Get("Authorization"); got != "Bearer xoxb-files" {
+			t.Fatalf("redirect Authorization = %q, want the bearer token", got)
+		}
+	})
+
+	t.Run("redirect to other host", func(t *testing.T) {
+		t.Parallel()
+
+		srv := slackapitest.NewServer(t)
+		client := filesNewClient(srv, slackapi.Options{})
+		moved := srv.ServeFile("/a.txt", "text/plain", []byte("hello"))
+		target := srv.HandleFile("/redirect", func(slackapitest.FileRequest) any { return filesRedirect(filesLocalhost(t, moved)) })
+
+		n, err := client.DownloadFile(t.Context(), target, &bytes.Buffer{}, 1024)
+		if err == nil || !strings.Contains(err.Error(), "redirect origin") || n != 0 {
+			t.Fatalf("n = %d, err = %v, want a redirect origin error", n, err)
+		}
+		if got := len(srv.FileRequests(moved)); got != 0 {
+			t.Fatalf("redirect target requests = %d, want 0", got)
+		}
+	})
+
+	t.Run("default port", func(t *testing.T) {
+		t.Parallel()
+
+		var auth []string
+		transport := filesTransport(func(req *http.Request) (*http.Response, error) {
+			auth = append(auth, req.Header.Get("Authorization"))
+			if req.URL.Host == "files.slack.com:443" {
+				return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {"https://slack.com:443/files-pri/T1-F1/a.txt"}}, Body: http.NoBody, Request: req}, nil
+			}
+			if req.URL.Host == "slack.com:443" {
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/plain"}}, Body: io.NopCloser(strings.NewReader("hello")), Request: req}, nil
+			}
+			return nil, fmt.Errorf("unexpected host %q", req.URL.Host)
+		})
+		client := slackapi.New(slackapi.Options{Token: "xoxb-files", HTTPClient: &http.Client{Transport: transport}})
+
+		var buf bytes.Buffer
+		n, err := client.DownloadFile(t.Context(), "https://files.slack.com:443/files-pri/T1-F1/a.txt", &buf, 1024)
+		if err != nil {
+			t.Fatalf("DownloadFile: %v", err)
+		}
+		if n != 5 || buf.String() != "hello" {
+			t.Fatalf("n = %d, body = %q, want 5 %q", n, buf.String(), "hello")
+		}
+		if want := []string{"Bearer xoxb-files", "Bearer xoxb-files"}; !slices.Equal(auth, want) {
+			t.Fatalf("Authorization per request = %q, want %q", auth, want)
+		}
+	})
+
+	t.Run("empty URL", func(t *testing.T) {
+		t.Parallel()
+
+		srv := slackapitest.NewServer(t)
+		client := filesNewClient(srv, slackapi.Options{})
+
+		n, err := client.DownloadFile(t.Context(), "", &bytes.Buffer{}, 1024)
+		if err == nil || n != 0 {
+			t.Fatalf("n = %d, err = %v, want an error", n, err)
+		}
+		if got, want := err.Error(), "slack: files.download: file URL is empty"; got != want {
+			t.Fatalf("Error() = %q, want %q", got, want)
 		}
 	})
 

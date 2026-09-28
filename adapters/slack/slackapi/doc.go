@@ -35,9 +35,8 @@
 // token, because the upload URL is pre-authorized. DownloadFile GETs a file
 // with the bearer token and a size limit, and wraps ErrFileTooLarge when the
 // file is larger. UploadToURL and DownloadFile accept only URLs whose origin is
-// in Options.FileOrigins, and DownloadFile checks every redirect too, so a URL
-// from an untrusted payload cannot send the token or file content to another
-// host.
+// in Options.FileOrigins, and both check every redirect too, so a URL from an
+// untrusted payload cannot send the token or file content to another host.
 //
 // # Inbound requests
 //

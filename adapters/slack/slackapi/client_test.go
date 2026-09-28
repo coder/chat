@@ -1,9 +1,11 @@
 package slackapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"slices"
 	"strings"
@@ -392,6 +394,11 @@ func TestNewFileOrigins(t *testing.T) {
 			origins: []string{"HTTPS://Files.Example.COM/path?q=1", "https://a.example:8443/", "not a url", "/relative"},
 			want:    []string{"https://files.example.com", "https://a.example:8443"},
 		},
+		{
+			name:    "default port",
+			origins: []string{"https://files.slack.com:443", "HTTP://A.example:80", "https://b.example:80", "http://c.example:443", "https://[::1]:443"},
+			want:    []string{"https://files.slack.com", "http://a.example", "https://b.example:80", "http://c.example:443", "https://[::1]"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -401,6 +408,28 @@ func TestNewFileOrigins(t *testing.T) {
 				t.Fatalf("file origins = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewLogsDroppedFileOrigins(t *testing.T) {
+	t.Parallel()
+
+	var buf bytes.Buffer
+	client := slackapi.New(slackapi.Options{
+		FileOrigins: []string{"https://files.example.com", "not a url", "/relative"},
+		Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
+	})
+	if got, want := client.FileOriginsForTest(), []string{"https://files.example.com"}; !slices.Equal(got, want) {
+		t.Fatalf("file origins = %q, want %q", got, want)
+	}
+	out := buf.String()
+	if got := strings.Count(out, "level=WARN"); got != 2 {
+		t.Fatalf("warnings = %d, want 2:\n%s", got, out)
+	}
+	for _, want := range []string{`origin="not a url"`, "origin=/relative"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("log does not contain %s:\n%s", want, out)
+		}
 	}
 }
 

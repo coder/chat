@@ -121,14 +121,17 @@ func (c *Client) GetUploadURLExternal(ctx context.Context, req GetUploadURLExter
 // files.getUploadURLExternal response. The upload URL is pre-authorized, so the
 // request carries no token. It retries throttling like Call. The origin of
 // uploadURL must be in Options.FileOrigins, else UploadToURL returns an error
-// and sends nothing. A non-2xx status returns *APIError with Method
-// "upload_url".
+// and sends nothing. The origin of every redirect must also be in
+// Options.FileOrigins, else UploadToURL returns an error and does not follow
+// the redirect. A non-2xx status returns *APIError with Method "upload_url".
 func (c *Client) UploadToURL(ctx context.Context, uploadURL string, content []byte) error {
 	const method = "upload_url"
 	if err := c.checkFileURL(method, uploadURL); err != nil {
 		return err
 	}
-	_, _, err := c.send(ctx, method, uploadURL, "", "application/octet-stream", content)
+	upload := *c
+	upload.httpClient = c.fileHTTPClient("")
+	_, _, err := upload.send(ctx, method, uploadURL, "", "application/octet-stream", content)
 	return err
 }
 
@@ -179,7 +182,10 @@ func (c *Client) UploadFile(ctx context.Context, req UploadFileRequest) (*File, 
 // written. It does not retry.
 //
 // The origin of fileURL must be in Options.FileOrigins, and so must the origin
-// of every redirect, else DownloadFile returns an error. A non-2xx status
+// of every redirect, else DownloadFile returns an error. DownloadFile sends the
+// bearer token on every redirect, because each redirect goes to an origin in
+// Options.FileOrigins. An empty fileURL, for example the missing
+// url_private_download of an external file, returns an error. A non-2xx status
 // returns *APIError with Method "files.download". A text/html response is an
 // error, because Slack answers a request with a bad token with an HTML login
 // page and status 200. A body larger than maxBytes returns an error that wraps
@@ -197,14 +203,9 @@ func (c *Client) DownloadFile(ctx context.Context, fileURL string, w io.Writer, 
 	if err != nil {
 		return 0, fmt.Errorf("slack: %s request: %w", method, err)
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-
-	client := *c.httpClient
-	client.CheckRedirect = c.fileRedirectPolicy(client.CheckRedirect)
+	setBearer(req, c.token)
 	c.observer.Event(ctx, chat.ObsAdapterCall, chat.AdapterAttr(adapterName))
-	resp, err := client.Do(req)
+	resp, err := c.fileHTTPClient(c.token).Do(req)
 	if err != nil {
 		return 0, fmt.Errorf("slack: %s request: %w", method, err)
 	}
@@ -231,9 +232,12 @@ func (c *Client) DownloadFile(ctx context.Context, fileURL string, w io.Writer, 
 	return n, nil
 }
 
-// checkFileURL returns an error when the origin of rawURL is not in the file
-// origins of c.
+// checkFileURL returns an error when rawURL is empty or its origin is not in
+// the file origins of c.
 func (c *Client) checkFileURL(method, rawURL string) error {
+	if rawURL == "" {
+		return fmt.Errorf("slack: %s: file URL is empty", method)
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return fmt.Errorf("slack: %s: parse URL: %w", method, err)
@@ -248,14 +252,27 @@ func (c *Client) fileOriginAllowed(u *url.URL) bool {
 	return u.Scheme != "" && u.Host != "" && slices.Contains(c.fileOrigins, originOf(u))
 }
 
+// fileHTTPClient returns a copy of the HTTP client of c with the redirect
+// policy of fileRedirectPolicy for token.
+func (c *Client) fileHTTPClient(token string) *http.Client {
+	client := *c.httpClient
+	client.CheckRedirect = c.fileRedirectPolicy(token, client.CheckRedirect)
+	return &client
+}
+
 // fileRedirectPolicy returns a CheckRedirect function that rejects a redirect
-// to an origin that is not in the file origins of c, then applies next, or the
-// default limit of 10 redirects when next is nil.
-func (c *Client) fileRedirectPolicy(next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
+// to an origin that is not in the file origins of c, sets token as the bearer
+// token of the redirect when token is not empty, then applies next, or the
+// default limit of 10 redirects when next is nil. http.Client removes the
+// Authorization header on a redirect to another host, so the token must be set
+// again for an allowed origin such as https://slack.com after
+// https://files.slack.com.
+func (c *Client) fileRedirectPolicy(token string, next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		if !c.fileOriginAllowed(req.URL) {
 			return fmt.Errorf("redirect origin %q is not in FileOrigins", originOf(req.URL))
 		}
+		setBearer(req, token)
 		if next != nil {
 			return next(req, via)
 		}
@@ -263,5 +280,12 @@ func (c *Client) fileRedirectPolicy(next func(*http.Request, []*http.Request) er
 			return fmt.Errorf("stopped after %d redirects", maxRedirects)
 		}
 		return nil
+	}
+}
+
+// setBearer sets token as the bearer token of req when token is not empty.
+func setBearer(req *http.Request, token string) {
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 }
