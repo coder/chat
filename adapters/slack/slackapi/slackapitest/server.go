@@ -18,15 +18,19 @@ const apiPrefix = "/api/"
 // unknownMethodBody is the response for a method with no Respond or Handle.
 const unknownMethodBody = `{"ok":false,"error":"unknown_method"}`
 
-// Server is a fake Slack Web API on an httptest.Server. It is safe for
-// concurrent use.
+// Server is a fake Slack Web API on an httptest.Server, with a second
+// httptest.Server that serves file uploads and downloads on its own origin. It
+// is safe for concurrent use.
 type Server struct {
-	t   testing.TB
-	srv *httptest.Server
+	t     testing.TB
+	srv   *httptest.Server
+	files *httptest.Server
 
-	mu       sync.Mutex
-	handlers map[string]func(Call) any
-	calls    map[string][]Call
+	mu           sync.Mutex
+	handlers     map[string]func(Call) any
+	calls        map[string][]Call
+	fileHandlers map[string]func(FileRequest) any
+	fileRequests map[string][]FileRequest
 }
 
 // Call is one request that the Server received.
@@ -57,12 +61,16 @@ type Response struct {
 func NewServer(t testing.TB) *Server {
 	t.Helper()
 	s := &Server{
-		t:        t,
-		handlers: map[string]func(Call) any{},
-		calls:    map[string][]Call{},
+		t:            t,
+		handlers:     map[string]func(Call) any{},
+		calls:        map[string][]Call{},
+		fileHandlers: map[string]func(FileRequest) any{},
+		fileRequests: map[string][]FileRequest{},
 	}
 	s.srv = httptest.NewServer(http.HandlerFunc(s.serveHTTP))
 	t.Cleanup(s.srv.Close)
+	s.files = httptest.NewServer(http.HandlerFunc(s.serveFile))
+	t.Cleanup(s.files.Close)
 	return s
 }
 
@@ -133,13 +141,18 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.write(w, method, Response{Body: json.RawMessage(unknownMethodBody)})
 		return
 	}
-	switch resp := fn(call).(type) {
+	s.writeAny(w, method, fn(call))
+}
+
+// writeAny writes resp with the rules of Respond.
+func (s *Server) writeAny(w http.ResponseWriter, name string, resp any) {
+	switch resp := resp.(type) {
 	case Response:
-		s.write(w, method, resp)
+		s.write(w, name, resp)
 	case *Response:
-		s.write(w, method, *resp)
+		s.write(w, name, *resp)
 	default:
-		s.write(w, method, Response{Body: resp})
+		s.write(w, name, Response{Body: resp})
 	}
 }
 
