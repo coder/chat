@@ -618,9 +618,9 @@ token.
 | `BaseURL` | `DefaultBaseURL` (`https://slack.com/api`). A trailing slash is removed. |
 | `HTTPClient` | `http.DefaultClient`. |
 | `RetryPolicy` | 3 attempts, 2s of total backoff, 200ms base delay, 1s maximum delay. `MaxAttempts: 1` disables retry. |
-| `FileOrigins` | `https://files.slack.com` and `https://slack.com`. Entries become lowercase `scheme://host`; an entry that is not an absolute URL is dropped. |
+| `FileOrigins` | `https://files.slack.com` and `https://slack.com`. Entries become lowercase `scheme://host` without the default port of the scheme; an entry that is not an absolute URL is dropped with a warning to `Logger`. |
 | `Observer` | No-op. Receives `ObsAdapterCall` for every attempt and `ObsRateLimit` for every throttled response. |
-| `Logger` | Discards. Receives a warning for every throttled response. |
+| `Logger` | Discards. Receives a warning for every throttled response and every dropped `FileOrigins` entry. |
 
 The client methods and how each one sends its request:
 
@@ -651,7 +651,8 @@ methods, so the client sends them form encoded. Every method except
 ([ADR 0005](adr/0005-rate-limit-handling.md)).
 
 `UploadToURL` and `DownloadFile` accept only URLs whose origin is in
-`Options.FileOrigins`, and `DownloadFile` checks every redirect too.
+`Options.FileOrigins`, and both check every redirect too. `DownloadFile` sends
+the bearer token on every allowed redirect; `UploadToURL` never sends it.
 `DownloadFile` writes at most `maxBytes`, which must be positive. It rejects a
 `text/html` response, because Slack answers a bad token with an HTML login
 page and status 200.
