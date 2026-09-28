@@ -87,7 +87,7 @@ func TestGetUploadURLExternal(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetUploadURLExternal: %v", err)
 			}
-			if want := (slackapi.UploadURL{UploadURL: "https://files.example/u", FileID: "F1"}); *got != want {
+			if want := (slackapi.GetUploadURLExternalResponse{UploadURL: "https://files.example/u", FileID: "F1"}); *got != want {
 				t.Fatalf("response = %+v, want %+v", *got, want)
 			}
 			calls := srv.Calls("files.getUploadURLExternal")
@@ -379,27 +379,27 @@ func TestUploadFile(t *testing.T) {
 		{
 			name:          "get upload URL",
 			getResp:       map[string]any{"ok": false, "error": "invalid_auth"},
-			wantPrefix:    "slack: upload file: get upload URL: ",
+			wantPrefix:    "upload file: get upload URL: slack: files.getUploadURLExternal failed: invalid_auth",
 			wantAPIMethod: "files.getUploadURLExternal",
 		},
 		{
 			name:          "upload content",
 			uploadResp:    slackapitest.Response{StatusCode: http.StatusInternalServerError},
-			wantPrefix:    "slack: upload file: upload content: ",
+			wantPrefix:    "upload file: upload content: slack: upload_url status 500",
 			wantAPIMethod: "upload_url",
 			wantUploads:   1,
 		},
 		{
 			name:          "upload content rate limited",
 			uploadResp:    slackapitest.Response{StatusCode: http.StatusTooManyRequests, Header: http.Header{"Retry-After": {"1"}}},
-			wantPrefix:    "slack: upload file: upload content: ",
+			wantPrefix:    "upload file: upload content: slack: rate limited after 1 attempts",
 			wantRateLimit: true,
 			wantUploads:   1,
 		},
 		{
 			name:          "complete upload",
 			completeResp:  map[string]any{"ok": false, "error": "file_not_found"},
-			wantPrefix:    "slack: upload file: complete upload: ",
+			wantPrefix:    "upload file: complete upload: slack: files.completeUploadExternal failed: file_not_found",
 			wantAPIMethod: "files.completeUploadExternal",
 			wantUploads:   1,
 			wantCompletes: 1,

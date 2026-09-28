@@ -37,8 +37,8 @@ type GetUploadURLExternalRequest struct {
 	SnippetType string
 }
 
-// UploadURL is the response of files.getUploadURLExternal.
-type UploadURL struct {
+// GetUploadURLExternalResponse is the response of files.getUploadURLExternal.
+type GetUploadURLExternalResponse struct {
 	// UploadURL is the URL that receives the file content.
 	UploadURL string `json:"upload_url"`
 	// FileID is the ID of the new file.
@@ -99,19 +99,15 @@ type UploadFileRequest struct {
 
 // GetUploadURLExternal calls files.getUploadURLExternal to get an upload URL
 // and an ID for a new file. It sends a form-encoded body.
-func (c *Client) GetUploadURLExternal(ctx context.Context, req GetUploadURLExternalRequest) (*UploadURL, error) {
+func (c *Client) GetUploadURLExternal(ctx context.Context, req GetUploadURLExternalRequest) (*GetUploadURLExternalResponse, error) {
 	values := url.Values{
 		"filename": {req.Filename},
 		"length":   {strconv.FormatInt(req.Length, 10)},
 	}
-	if req.AltText != "" {
-		values.Set("alt_txt", req.AltText)
-	}
-	if req.SnippetType != "" {
-		values.Set("snippet_type", req.SnippetType)
-	}
-	var resp UploadURL
-	if err := c.call(ctx, "files.getUploadURLExternal", "application/x-www-form-urlencoded", []byte(values.Encode()), &resp); err != nil {
+	setFormString(values, "alt_txt", req.AltText)
+	setFormString(values, "snippet_type", req.SnippetType)
+	var resp GetUploadURLExternalResponse
+	if err := c.callForm(ctx, "files.getUploadURLExternal", values, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil
@@ -147,8 +143,9 @@ func (c *Client) CompleteUploadExternal(ctx context.Context, req CompleteUploadE
 
 // UploadFile uploads req.Content as a new file with GetUploadURLExternal,
 // UploadToURL, and CompleteUploadExternal, and returns the completed file. The
-// error names the step that failed and wraps the error of that step, so
-// *APIError and *RateLimited stay reachable through errors.As.
+// error names the step that failed, for example "upload file: get upload URL:
+// slack: files.getUploadURLExternal failed: invalid_auth", and wraps the error
+// of that step, so *APIError and *RateLimited stay reachable through errors.As.
 func (c *Client) UploadFile(ctx context.Context, req UploadFileRequest) (*File, error) {
 	upload, err := c.GetUploadURLExternal(ctx, GetUploadURLExternalRequest{
 		Filename:    req.Filename,
@@ -157,10 +154,10 @@ func (c *Client) UploadFile(ctx context.Context, req UploadFileRequest) (*File, 
 		SnippetType: req.SnippetType,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("slack: upload file: get upload URL: %w", err)
+		return nil, fmt.Errorf("upload file: get upload URL: %w", err)
 	}
 	if err := c.UploadToURL(ctx, upload.UploadURL, req.Content); err != nil {
-		return nil, fmt.Errorf("slack: upload file: upload content: %w", err)
+		return nil, fmt.Errorf("upload file: upload content: %w", err)
 	}
 	resp, err := c.CompleteUploadExternal(ctx, CompleteUploadExternalRequest{
 		Files:          []FileSummary{{ID: upload.FileID, Title: req.Title}},
@@ -169,7 +166,7 @@ func (c *Client) UploadFile(ctx context.Context, req UploadFileRequest) (*File, 
 		InitialComment: req.InitialComment,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("slack: upload file: complete upload: %w", err)
+		return nil, fmt.Errorf("upload file: complete upload: %w", err)
 	}
 	if len(resp.Files) == 0 {
 		return nil, errors.New("slack: upload file: complete upload: response has no files")
