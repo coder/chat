@@ -47,7 +47,7 @@ func TestLive(t *testing.T) {
 	statusWait := os.Getenv("SLACKAPI_LIVE_STATUS_WAIT") == "1"
 	timeout := time.Minute
 	if statusWait {
-		timeout = 4 * time.Minute
+		timeout = 6 * time.Minute
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), timeout)
 	defer cancel()
