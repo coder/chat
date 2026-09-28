@@ -3,7 +3,7 @@ module github.com/coder/chat/state/nats
 go 1.26.3
 
 require (
-	github.com/coder/chat v0.2.0
+	github.com/coder/chat v0.2.1
 	github.com/nats-io/nats-server/v2 v2.15.0
 	github.com/nats-io/nats.go v1.53.1
 )
