@@ -2,7 +2,6 @@ package slack
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/coder/chat"
 )
@@ -90,9 +89,6 @@ func (a *Adapter) ReadHistory(ctx context.Context, id chat.ThreadID, q chat.Hist
 	var resp conversationsHistoryResponse
 	if err := a.callWithToken(ctx, token, method, req, &resp); err != nil {
 		return nil, err
-	}
-	if !resp.OK {
-		return nil, fmt.Errorf("slack: %s failed: %s", method, resp.Error)
 	}
 
 	messages := make([]chat.Message, 0, len(resp.Messages))
