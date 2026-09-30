@@ -119,7 +119,9 @@ func (c *Client) GetUploadURLExternal(ctx context.Context, req GetUploadURLExter
 // uploadURL must be in Options.FileOrigins, else UploadToURL returns an error
 // and sends nothing. The origin of every redirect must also be in
 // Options.FileOrigins, else UploadToURL returns an error and does not follow
-// the redirect. A non-2xx status returns *APIError with Method "upload_url".
+// the redirect. A 301, 302, or 303 redirect also returns an error, because
+// net/http follows it with a GET that has no content. A non-2xx status returns
+// *APIError with Method "upload_url".
 func (c *Client) UploadToURL(ctx context.Context, uploadURL string, content []byte) error {
 	const method = "upload_url"
 	if err := c.checkFileURL(method, uploadURL); err != nil {
@@ -258,16 +260,19 @@ func (c *Client) fileHTTPClient(token string) *http.Client {
 }
 
 // fileRedirectPolicy returns a CheckRedirect function that rejects a redirect
-// to an origin that is not in the file origins of c, sets token as the bearer
-// token of the redirect when token is not empty, then applies next, or the
-// default limit of 10 redirects when next is nil. http.Client removes the
-// Authorization header on a redirect to another host, so the token must be set
-// again for an allowed origin such as https://slack.com after
-// https://files.slack.com.
+// to an origin that is not in the file origins of c or a redirect that changes
+// the method of the request. It sets token as the bearer token of the redirect
+// when token is not empty, then applies next, or the default limit of 10
+// redirects when next is nil. http.Client removes the Authorization header on
+// a redirect to another host, so the token must be set again for an allowed
+// origin such as https://slack.com after https://files.slack.com.
 func (c *Client) fileRedirectPolicy(token string, next func(*http.Request, []*http.Request) error) func(*http.Request, []*http.Request) error {
 	return func(req *http.Request, via []*http.Request) error {
 		if !c.fileOriginAllowed(req.URL) {
 			return fmt.Errorf("redirect origin %q is not in FileOrigins", originOf(req.URL))
+		}
+		if req.Method != via[0].Method {
+			return fmt.Errorf("redirect changes the method from %s to %s", via[0].Method, req.Method)
 		}
 		setBearer(req, token)
 		if next != nil {

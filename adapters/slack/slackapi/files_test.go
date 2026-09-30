@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -178,6 +179,31 @@ func TestUploadToURL(t *testing.T) {
 		}
 		if got, ok := reqs[0].Header["Authorization"]; ok {
 			t.Fatalf("Authorization = %q, want none", got)
+		}
+	})
+
+	t.Run("redirect that changes the method", func(t *testing.T) {
+		t.Parallel()
+
+		for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther} {
+			t.Run(strconv.Itoa(status), func(t *testing.T) {
+				t.Parallel()
+
+				srv := slackapitest.NewServer(t)
+				client := filesNewClient(srv, slackapi.Options{})
+				target := srv.UploadURL("F1")
+				redirect := srv.HandleFile("/upload/redirect", func(slackapitest.FileRequest) any {
+					return slackapitest.Response{StatusCode: status, Header: http.Header{"Location": {target}}}
+				})
+
+				err := client.UploadToURL(t.Context(), redirect, []byte("content"))
+				if err == nil || !strings.Contains(err.Error(), "changes the method") {
+					t.Fatalf("err = %v, want a method change error", err)
+				}
+				if got := len(srv.FileRequests(target)); got != 0 {
+					t.Fatalf("redirect target requests = %d, want 0", got)
+				}
+			})
 		}
 	})
 

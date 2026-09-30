@@ -653,9 +653,10 @@ methods, so the client sends them form encoded. Every method except
 `UploadToURL` and `DownloadFile` accept only URLs whose origin is in
 `Options.FileOrigins`, and both check every redirect too. `DownloadFile` sends
 the bearer token on every allowed redirect; `UploadToURL` never sends it.
-`DownloadFile` writes at most `maxBytes`, which must be positive. It rejects a
-`text/html` response, because Slack answers a bad token with an HTML login
-page and status 200.
+`UploadToURL` rejects a 301, 302, or 303 redirect, because `net/http` follows
+it with a `GET` that has no content. `DownloadFile` writes at most `maxBytes`,
+which must be positive. It rejects a `text/html` response, because Slack
+answers a bad token with an HTML login page and status 200.
 
 Errors:
 
