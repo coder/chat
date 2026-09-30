@@ -7,6 +7,8 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -88,44 +90,70 @@ func (rt coreRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, rt.err
 }
 
-func TestCallSendsJSONAndDecodes(t *testing.T) {
+func TestCallEncodesPayloadAndDecodes(t *testing.T) {
 	t.Parallel()
 
-	srv := slackapitest.NewServer(t)
-	srv.Respond("chat.postMessage", map[string]any{"ok": true, "channel": "C1", "ts": "111.222"})
-	client := coreNewClient(srv, slackapi.Options{})
+	cases := []struct {
+		name        string
+		payload     any
+		body        string
+		contentType string
+		form        url.Values
+	}{
+		{
+			name: "struct as JSON",
+			payload: struct {
+				Channel string `json:"channel"`
+				Text    string `json:"text"`
+			}{Channel: "C1", Text: "hi"},
+			body:        `{"channel":"C1","text":"hi"}`,
+			contentType: "application/json",
+		},
+		{
+			name:        "url.Values as form",
+			payload:     url.Values{"channel": {"C1"}, "text": {"hi"}},
+			body:        "channel=C1&text=hi",
+			contentType: "application/x-www-form-urlencoded",
+			form:        url.Values{"channel": {"C1"}, "text": {"hi"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	payload := struct {
-		Channel string `json:"channel"`
-		Text    string `json:"text"`
-	}{Channel: "C1", Text: "hi"}
-	var dest struct {
-		Channel string `json:"channel"`
-		TS      string `json:"ts"`
-	}
-	if err := client.Call(t.Context(), "chat.postMessage", payload, &dest); err != nil {
-		t.Fatalf("Call: %v", err)
-	}
-	if dest.Channel != "C1" || dest.TS != "111.222" {
-		t.Fatalf("dest = %+v, want channel C1 and ts 111.222", dest)
-	}
+			srv := slackapitest.NewServer(t)
+			srv.Respond("chat.postMessage", map[string]any{"ok": true, "channel": "C1", "ts": "111.222"})
+			client := coreNewClient(srv, slackapi.Options{})
 
-	calls := srv.Calls("chat.postMessage")
-	if len(calls) != 1 {
-		t.Fatalf("calls = %d, want 1", len(calls))
-	}
-	call := calls[0]
-	if got := string(call.Body); got != `{"channel":"C1","text":"hi"}` {
-		t.Fatalf("body = %s", got)
-	}
-	if got := call.Header.Get("Authorization"); got != "Bearer xoxb-core" {
-		t.Fatalf("Authorization = %q", got)
-	}
-	if got := call.Header.Get("Content-Type"); got != "application/json" {
-		t.Fatalf("Content-Type = %q", got)
-	}
-	if call.Form != nil {
-		t.Fatalf("Form = %v, want nil for a JSON request", call.Form)
+			var dest struct {
+				Channel string `json:"channel"`
+				TS      string `json:"ts"`
+			}
+			if err := client.Call(t.Context(), "chat.postMessage", tc.payload, &dest); err != nil {
+				t.Fatalf("Call: %v", err)
+			}
+			if dest.Channel != "C1" || dest.TS != "111.222" {
+				t.Fatalf("dest = %+v, want channel C1 and ts 111.222", dest)
+			}
+
+			calls := srv.Calls("chat.postMessage")
+			if len(calls) != 1 {
+				t.Fatalf("calls = %d, want 1", len(calls))
+			}
+			call := calls[0]
+			if got := string(call.Body); got != tc.body {
+				t.Fatalf("body = %s, want %s", got, tc.body)
+			}
+			if got := call.Header.Get("Authorization"); got != "Bearer xoxb-core" {
+				t.Fatalf("Authorization = %q", got)
+			}
+			if got := call.Header.Get("Content-Type"); got != tc.contentType {
+				t.Fatalf("Content-Type = %q, want %q", got, tc.contentType)
+			}
+			if !reflect.DeepEqual(call.Form, tc.form) {
+				t.Fatalf("Form = %v, want %v", call.Form, tc.form)
+			}
+		})
 	}
 }
 

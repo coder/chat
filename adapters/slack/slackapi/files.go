@@ -107,7 +107,7 @@ func (c *Client) GetUploadURLExternal(ctx context.Context, req GetUploadURLExter
 	setFormString(values, "alt_txt", req.AltText)
 	setFormString(values, "snippet_type", req.SnippetType)
 	var resp GetUploadURLExternalResponse
-	if err := c.callForm(ctx, "files.getUploadURLExternal", values, &resp); err != nil {
+	if err := c.Call(ctx, "files.getUploadURLExternal", values, &resp); err != nil {
 		return nil, err
 	}
 	return &resp, nil

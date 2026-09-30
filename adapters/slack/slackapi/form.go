@@ -1,17 +1,9 @@
 package slackapi
 
 import (
-	"context"
 	"net/url"
 	"strconv"
 )
-
-// callForm sends values form encoded to the Web API method with the bearer
-// token, retries throttling like Call, checks the ok field, and decodes the
-// response into dest when dest is not nil.
-func (c *Client) callForm(ctx context.Context, method string, values url.Values, dest any) error {
-	return c.call(ctx, method, "application/x-www-form-urlencoded", []byte(values.Encode()), dest)
-}
 
 // setFormString sets key to value when value is not empty.
 func setFormString(values url.Values, key, value string) {

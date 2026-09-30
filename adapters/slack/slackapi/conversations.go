@@ -56,7 +56,7 @@ func (c *Client) ConversationInfo(ctx context.Context, req ConversationInfoReque
 	var resp struct {
 		Channel Conversation `json:"channel"`
 	}
-	if err := c.callForm(ctx, "conversations.info", values, &resp); err != nil {
+	if err := c.Call(ctx, "conversations.info", values, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Channel, nil
@@ -154,7 +154,7 @@ func (c *Client) messagePage(ctx context.Context, method string, values url.Valu
 			NextCursor string `json:"next_cursor"`
 		} `json:"response_metadata"`
 	}
-	if err := c.callForm(ctx, method, values, &resp); err != nil {
+	if err := c.Call(ctx, method, values, &resp); err != nil {
 		return nil, err
 	}
 	return &MessagePage{

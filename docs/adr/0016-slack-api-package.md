@@ -26,7 +26,7 @@ Related decisions, not redefined here: outbound rate-limit retry is ADR 0005; th
 
 2. **The Slack adapter moves onto `slackapi` for the Web API call, retry, and signature check.** There is one implementation of each. The adapter's methods, options, and error text do not change.
 
-3. **JSON by default, form encoding where Slack documents it.** Methods send a JSON POST with the bearer token. Slack documents `users.info`, `conversations.info`, `conversations.history`, `conversations.replies`, and `files.getUploadURLExternal` as GET or form-only methods, so the client sends them as a form-encoded POST with the bearer token. The POST to an upload URL sends raw bytes and no token, as the official Slack Python SDK does, because the upload URL is pre-authorized.
+3. **JSON by default, form encoding where Slack documents it.** Methods send a JSON POST with the bearer token. Slack documents `users.info`, `conversations.info`, `conversations.history`, `conversations.replies`, and `files.getUploadURLExternal` as GET or form-only methods, so the client sends them as a form-encoded POST with the bearer token. `Call` picks the encoding from its payload: a `url.Values` payload is sent as a form and any other payload as JSON, so the escape hatch reaches form-only methods too. The POST to an upload URL sends raw bytes and no token, as the official Slack Python SDK does, because the upload URL is pre-authorized.
 
 4. **File URLs stay on Slack file hosts.** The upload and the download accept only URLs whose origin is in `Options.FileOrigins`, and both check every redirect too. A URL from an untrusted payload cannot send the token or file content to another host.
 

@@ -638,7 +638,7 @@ The client methods and how each one sends its request:
 | `CompleteUploadExternal` | `files.completeUploadExternal` | JSON |
 | `UploadFile` | the three upload steps above, in order | as above |
 | `DownloadFile` | a file URL such as `url_private_download` | GET, no retry |
-| `Call` | any Web API method (the escape hatch) | JSON |
+| `Call` | any Web API method (the escape hatch) | form for a `url.Values` payload, else JSON |
 | `PostResponseURL` | the `response_url` of a command or an interaction | JSON, no token |
 
 Requests are POSTs with the bearer token unless the table says otherwise.

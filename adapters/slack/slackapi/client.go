@@ -114,21 +114,55 @@ func (c *Client) WithToken(token string) *Client {
 }
 
 // Call is the escape hatch for Web API methods with no typed wrapper. It POSTs
-// payload as JSON to BaseURL/method with the bearer token, retries throttling
-// within the RetryPolicy, and returns *RateLimited when retry is exhausted. A nil
-// payload sends an empty JSON object. An ok:false response or a non-2xx status
-// returns *APIError. Otherwise, when dest is not nil, Call decodes the response
-// body into dest.
+// payload to BaseURL/method with the bearer token, retries throttling within
+// the RetryPolicy, and returns *RateLimited when retry is exhausted. A
+// url.Values payload is sent form encoded, which the methods that Slack
+// documents as GET or form-only require. Any other payload is sent as JSON,
+// and a nil payload sends an empty JSON object. An ok:false response or a
+// non-2xx status returns *APIError. Otherwise, when dest is not nil, Call
+// decodes the response body into dest.
 func (c *Client) Call(ctx context.Context, method string, payload, dest any) error {
-	body := []byte("{}")
-	if payload != nil {
-		var err error
-		body, err = json.Marshal(payload)
-		if err != nil {
-			return fmt.Errorf("slack: encode %s request: %w", method, err)
+	contentType, body, err := encodeRequest(payload)
+	if err != nil {
+		return fmt.Errorf("slack: encode %s request: %w", method, err)
+	}
+	status, resp, err := c.send(ctx, method, c.baseURL+"/"+method, c.token, contentType, body)
+	if err != nil {
+		return err
+	}
+	var envelope responseEnvelope
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		return fmt.Errorf("slack: decode %s response: %w", method, err)
+	}
+	if !envelope.OK {
+		return &APIError{
+			Method:     method,
+			StatusCode: status,
+			Code:       envelope.Error,
+			Detail:     envelope.detail(),
+			Raw:        resp,
 		}
 	}
-	return c.call(ctx, method, "application/json", body, dest)
+	if dest == nil {
+		return nil
+	}
+	if err := json.Unmarshal(resp, dest); err != nil {
+		return fmt.Errorf("slack: decode %s response: %w", method, err)
+	}
+	return nil
+}
+
+// encodeRequest returns the content type and body of a Web API request.
+func encodeRequest(payload any) (string, []byte, error) {
+	switch payload := payload.(type) {
+	case nil:
+		return "application/json", []byte("{}"), nil
+	case url.Values:
+		return "application/x-www-form-urlencoded", []byte(payload.Encode()), nil
+	default:
+		body, err := json.Marshal(payload)
+		return "application/json", body, err
+	}
 }
 
 // PostResponseURL posts payload as JSON to the response_url of a slash command
@@ -143,35 +177,6 @@ func (c *Client) PostResponseURL(ctx context.Context, responseURL string, payloa
 	}
 	_, _, err = c.send(ctx, method, responseURL, "", "application/json", body)
 	return err
-}
-
-// call sends body to the Web API method with the given content type, checks the
-// ok field, and decodes the response into dest when dest is not nil.
-func (c *Client) call(ctx context.Context, method, contentType string, body []byte, dest any) error {
-	status, payload, err := c.send(ctx, method, c.baseURL+"/"+method, c.token, contentType, body)
-	if err != nil {
-		return err
-	}
-	var envelope responseEnvelope
-	if err := json.Unmarshal(payload, &envelope); err != nil {
-		return fmt.Errorf("slack: decode %s response: %w", method, err)
-	}
-	if !envelope.OK {
-		return &APIError{
-			Method:     method,
-			StatusCode: status,
-			Code:       envelope.Error,
-			Detail:     envelope.detail(),
-			Raw:        payload,
-		}
-	}
-	if dest == nil {
-		return nil
-	}
-	if err := json.Unmarshal(payload, dest); err != nil {
-		return fmt.Errorf("slack: decode %s response: %w", method, err)
-	}
-	return nil
 }
 
 // send POSTs body to target with retry. It sends token as a bearer token when

@@ -67,7 +67,7 @@ func (c *Client) UserInfo(ctx context.Context, req UserInfoRequest) (*User, erro
 	var resp struct {
 		User User `json:"user"`
 	}
-	if err := c.callForm(ctx, "users.info", values, &resp); err != nil {
+	if err := c.Call(ctx, "users.info", values, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.User, nil

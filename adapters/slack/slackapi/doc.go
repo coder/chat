@@ -20,7 +20,9 @@
 // Web API calls are POSTs with the bearer token and a JSON body. Slack
 // documents users.info, conversations.info, conversations.history,
 // conversations.replies, and files.getUploadURLExternal as GET or form-only
-// methods, so the client sends them with a form-encoded body.
+// methods, so the client sends them with a form-encoded body. Call sends a
+// url.Values payload form encoded and any other payload as JSON, so it reaches
+// form-only methods too.
 //
 // An ok:false response or a non-2xx status returns *APIError. Every method
 // except DownloadFile retries Slack throttling (HTTP 429, or the ratelimited or
