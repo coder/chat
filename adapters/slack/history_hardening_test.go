@@ -206,10 +206,11 @@ func TestSlackReadHistoryDirectCursorAndClamp(t *testing.T) {
 	}
 }
 
-// Golden multi-message payload: ordering is preserved exactly as Slack returns it
-// (newest-first, adapter-owned), the bot's own message normalizes to BotBot with the
-// bot user ID, history Messages are never Mentioned, and every message preserves its
-// verbatim raw JSON via the Platform Escape Hatch.
+// Golden multi-message payload: Slack returns thread replies oldest-first with the
+// root first, and ReadHistory returns them newest-first with the root last, the
+// bot's own message normalizes to BotBot with the bot user ID, history Messages are
+// never Mentioned, and every message preserves its verbatim raw JSON via the
+// Platform Escape Hatch.
 func TestSlackReadHistoryGoldenPayloadNormalization(t *testing.T) {
 	t.Parallel()
 
@@ -217,10 +218,10 @@ func TestSlackReadHistoryGoldenPayloadNormalization(t *testing.T) {
 	api.historyResp = map[string]any{
 		"ok": true,
 		"messages": []any{
-			map[string]any{"type": "message", "user": "UBOT", "text": "I am the bot", "ts": "113.000", "thread_ts": "111.000"},
-			map[string]any{"type": "message", "bot_id": "BOTHER", "subtype": "bot_message", "text": "another bot", "ts": "112.500", "thread_ts": "111.000"},
-			map[string]any{"type": "message", "user": "U2", "text": "<@UBOT> hey", "ts": "112.000", "thread_ts": "111.000", "edited": map[string]any{"user": "U2", "ts": "112.100"}},
 			map[string]any{"type": "message", "user": "U1", "text": "root", "ts": "111.000", "thread_ts": "111.000"},
+			map[string]any{"type": "message", "user": "U2", "text": "<@UBOT> hey", "ts": "112.000", "thread_ts": "111.000", "edited": map[string]any{"user": "U2", "ts": "112.100"}},
+			map[string]any{"type": "message", "bot_id": "BOTHER", "subtype": "bot_message", "text": "another bot", "ts": "112.500", "thread_ts": "111.000"},
+			map[string]any{"type": "message", "user": "UBOT", "text": "I am the bot", "ts": "113.000", "thread_ts": "111.000"},
 		},
 	}
 	bot := newSlackHistoryRuntimeWithObserver(t, api.URL, api.Client(), nil)
@@ -235,11 +236,10 @@ func TestSlackReadHistoryGoldenPayloadNormalization(t *testing.T) {
 		t.Fatalf("messages = %d, want 4", len(msgs))
 	}
 
-	// Ordering is preserved exactly as returned (newest-first here).
 	wantIDs := []string{"113.000", "112.500", "112.000", "111.000"}
 	for i, want := range wantIDs {
 		if msgs[i].ID != want {
-			t.Fatalf("msg[%d].ID = %q, want %q (ordering must be preserved)", i, msgs[i].ID, want)
+			t.Fatalf("msg[%d].ID = %q, want %q (newest-first)", i, msgs[i].ID, want)
 		}
 		// History Messages are never Mentioned: history is not a routing surface.
 		if msgs[i].Mentioned {

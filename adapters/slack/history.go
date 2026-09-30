@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"slices"
 
 	"github.com/coder/chat"
 	"github.com/coder/chat/adapters/slack/slackapi"
@@ -27,11 +28,16 @@ const (
 // summaries, RAG corpora) is Thread Application State, owned by the application in
 // its own storage keyed by Thread ID; this method is a thin live read-through only.
 //
-// Ordering and pagination are adapter-owned (Slack's read APIs are newest-first):
-//   - Messages are returned newest-first, as Slack returns them.
+// Ordering and pagination are adapter-owned:
+//   - Messages are returned newest-first. conversations.history is newest-first;
+//     conversations.replies is oldest-first and puts the thread root at the start
+//     of every page, so ReadHistory reverses the replies and returns the root only
+//     on the page that reaches the start of the thread. That page may carry up to
+//     Limit+1 messages.
 //   - HistoryQuery.Before is a Message.ID (a Slack ts) returned by a prior page; it
 //     pages toward older messages. It maps to Slack's latest=<ts> with
-//     inclusive=false, so the cursor message itself is excluded.
+//     inclusive=false, so the cursor message itself is excluded. A Before cursor
+//     at the thread root returns an empty page without a Slack call.
 //   - HistoryQuery.Limit is clamped to Slack's maximum page size (1000) and defaults
 //     to 100 when Limit <= 0.
 //
@@ -77,27 +83,35 @@ func (a *Adapter) ReadHistory(ctx context.Context, id chat.ThreadID, q chat.Hist
 	// the thread's replies. Inclusive stays false so the Before cursor excludes
 	// itself.
 	api := a.api.WithToken(token)
-	var page *slackapi.MessagePage
+	var page []slackapi.Message
 	if payload.Direct {
-		page, err = api.ConversationHistory(ctx, slackapi.ConversationHistoryRequest{
+		history, err := api.ConversationHistory(ctx, slackapi.ConversationHistoryRequest{
 			Channel: payload.Channel,
 			Latest:  q.Before,
 			Limit:   limit,
 		})
+		if err != nil {
+			return nil, err
+		}
+		page = history.Messages
 	} else {
-		page, err = api.ConversationReplies(ctx, slackapi.ConversationRepliesRequest{
+		if q.Before == payload.Root {
+			return []chat.Message{}, nil
+		}
+		replies, err := api.ConversationReplies(ctx, slackapi.ConversationRepliesRequest{
 			Channel: payload.Channel,
 			TS:      payload.Root,
 			Latest:  q.Before,
 			Limit:   limit,
 		})
-	}
-	if err != nil {
-		return nil, err
+		if err != nil {
+			return nil, err
+		}
+		page = newestFirstReplies(replies, payload.Root)
 	}
 
-	messages := make([]chat.Message, 0, len(page.Messages))
-	for _, msg := range page.Messages {
+	messages := make([]chat.Message, 0, len(page))
+	for _, msg := range page {
 		author := slackEvent{Subtype: msg.Subtype, User: msg.User, BotID: msg.BotID}
 		messages = append(messages, chat.Message{
 			ID:     msg.TS,
@@ -107,4 +121,23 @@ func (a *Adapter) ReadHistory(ctx context.Context, id chat.ThreadID, q chat.Hist
 		})
 	}
 	return messages, nil
+}
+
+// newestFirstReplies returns the messages of a conversations.replies page
+// newest-first. Slack returns the page oldest-first with the thread root at the
+// start of every page, so the root is kept only when no older replies remain.
+func newestFirstReplies(page *slackapi.MessagePage, root string) []slackapi.Message {
+	messages := make([]slackapi.Message, 0, len(page.Messages))
+	var rootMessage *slackapi.Message
+	for _, msg := range slices.Backward(page.Messages) {
+		if msg.TS == root {
+			rootMessage = &msg
+			continue
+		}
+		messages = append(messages, msg)
+	}
+	if rootMessage != nil && !page.HasMore {
+		messages = append(messages, *rootMessage)
+	}
+	return messages
 }

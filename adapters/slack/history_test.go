@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -65,20 +66,20 @@ func TestSlackReadHistoryThreadRepliesNormalization(t *testing.T) {
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %d, want 2", len(msgs))
 	}
-	if msgs[0].ID != "111.000" || msgs[0].Text != "hello" {
+	if msgs[0].ID != "112.000" || msgs[0].Text != "hi back" {
 		t.Fatalf("msg0 = %#v", msgs[0])
 	}
-	if msgs[0].Author.ID != "U1" || msgs[0].Author.BotKind != chat.BotHuman {
-		t.Fatalf("msg0 author = %#v, want human U1", msgs[0].Author)
+	if msgs[0].Author.BotKind != chat.BotBot {
+		t.Fatalf("msg0 author = %#v, want bot", msgs[0].Author)
 	}
-	if msgs[0].Author.Adapter != "slack" || msgs[0].Author.Tenant != "T1" {
-		t.Fatalf("msg0 author scope = %#v", msgs[0].Author)
-	}
-	if msgs[1].ID != "112.000" || msgs[1].Text != "hi back" {
+	if msgs[1].ID != "111.000" || msgs[1].Text != "hello" {
 		t.Fatalf("msg1 = %#v", msgs[1])
 	}
-	if msgs[1].Author.BotKind != chat.BotBot {
-		t.Fatalf("msg1 author = %#v, want bot", msgs[1].Author)
+	if msgs[1].Author.ID != "U1" || msgs[1].Author.BotKind != chat.BotHuman {
+		t.Fatalf("msg1 author = %#v, want human U1", msgs[1].Author)
+	}
+	if msgs[1].Author.Adapter != "slack" || msgs[1].Author.Tenant != "T1" {
+		t.Fatalf("msg1 author scope = %#v", msgs[1].Author)
 	}
 }
 
@@ -197,6 +198,66 @@ func TestSlackReadHistoryBeforeCursor(t *testing.T) {
 	if req.Inclusive {
 		t.Fatalf("inclusive = true, want false")
 	}
+}
+
+// Slack puts the thread root first on every conversations.replies page. The
+// root is the oldest message of the thread, so ReadHistory returns it only on
+// the page that reaches the start of the thread, and a Before cursor at the root
+// is the end of the history.
+func TestSlackReadHistoryThreadRoot(t *testing.T) {
+	t.Parallel()
+
+	opts := slack.Options{
+		SigningSecret: "secret",
+		BotToken:      "xoxb-test",
+		TeamID:        "T1",
+		BotUserID:     "UBOT",
+		BotID:         "BBOT",
+	}
+	id := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "111.000")
+
+	t.Run("older replies remain", func(t *testing.T) {
+		t.Parallel()
+
+		api := newSlackAPIServer(t)
+		api.historyResp = map[string]any{
+			"ok":       true,
+			"has_more": true,
+			"messages": []any{
+				map[string]any{"type": "message", "user": "U1", "text": "root", "ts": "111.000", "thread_ts": "111.000"},
+				map[string]any{"type": "message", "user": "U2", "text": "R4", "ts": "114.000", "thread_ts": "111.000"},
+				map[string]any{"type": "message", "user": "U2", "text": "R5", "ts": "115.000", "thread_ts": "111.000"},
+			},
+		}
+		hr := historyReader(t, newSlackRuntime(t, api, opts))
+
+		msgs, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Limit: 2})
+		if err != nil {
+			t.Fatalf("read history: %v", err)
+		}
+		var ids []string
+		for _, msg := range msgs {
+			ids = append(ids, msg.ID)
+		}
+		if want := []string{"115.000", "114.000"}; !slices.Equal(ids, want) {
+			t.Fatalf("message IDs = %v, want %v", ids, want)
+		}
+	})
+
+	t.Run("before the root", func(t *testing.T) {
+		t.Parallel()
+
+		api := newSlackAPIServer(t)
+		hr := historyReader(t, newSlackRuntime(t, api, opts))
+
+		msgs, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Before: "111.000"})
+		if err != nil {
+			t.Fatalf("read history: %v", err)
+		}
+		if len(msgs) != 0 || len(api.historyReqs) != 0 {
+			t.Fatalf("messages = %d, requests = %d, want an empty page without a request", len(msgs), len(api.historyReqs))
+		}
+	})
 }
 
 // A direct-message Thread ID reads conversations.history, not conversations.replies.
