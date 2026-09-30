@@ -24,7 +24,7 @@ Related decisions, not redefined here: outbound rate-limit retry is ADR 0005; th
 
    It has no runtime, state, dispatch, dedupe, locks, or policy. The application brings those.
 
-2. **The Slack adapter moves onto `slackapi` for the Web API call, retry, and signature check.** There is one implementation of each. The adapter's methods, options, and error text do not change.
+2. **The Slack adapter moves onto `slackapi` for the Web API call, retry, signature check, and history reads.** There is one implementation of each. The adapter's `HistoryReader` calls `ConversationReplies` and `ConversationHistory`. The adapter's methods, options, and error text do not change.
 
 3. **JSON by default, form encoding where Slack documents it.** Methods send a JSON POST with the bearer token. Slack documents `users.info`, `conversations.info`, `conversations.history`, `conversations.replies`, and `files.getUploadURLExternal` as GET or form-only methods, so the client sends them as a form-encoded POST with the bearer token. `Call` picks the encoding from its payload: a `url.Values` payload is sent as a form and any other payload as JSON, so the escape hatch reaches form-only methods too. The POST to an upload URL sends raw bytes and no token, as the official Slack Python SDK does, because the upload URL is pre-authorized.
 
@@ -36,6 +36,7 @@ Related decisions, not redefined here: outbound rate-limit retry is ADR 0005; th
 
 - Applications that own their runtime can use Slack without the **Go Chat Runtime**, and share the adapter's tested Slack code instead of copying it.
 - The Slack adapter now also retries the Slack error code `rate_limited` (the `chat.postMessage` workspace message cap), in addition to HTTP 429 and `ratelimited`. A post that failed at once with `rate_limited` now retries within the **Retry Policy** and returns a typed `RateLimited` when retry stops. This extends the Slack throttling map in ADR 0005.
+- The Slack adapter's `HistoryReader` now sends form-encoded requests. Before, it sent JSON, which Slack rejects with `invalid_arguments`, so every `ReadHistory` call failed on real Slack.
 - `slack.RetryPolicy` and `slack.RateLimited` are now type aliases of `slackapi.RetryPolicy` and `slackapi.RateLimited`. Existing code compiles unchanged, and `errors.As` matches either name.
 - The portable surface does not grow. The `chat.Adapter` interface and the `Thread` API do not change, and ADR 0004's deferral of portable edit, delete, and reactions stands. Slack's edit, delete, reaction, and file methods exist only in `slackapi`, for Slack-only callers.
 - The module keeps zero dependencies.

@@ -1,5 +1,7 @@
 package slackapi
 
+import "encoding/json"
+
 // Message is a Slack message as it appears in events and in
 // conversations.history and conversations.replies responses. The JSON tags
 // are the Slack field names.
@@ -27,6 +29,11 @@ type Message struct {
 	Files []File `json:"files,omitempty"`
 	// Edited is set when the message was edited.
 	Edited *Edited `json:"edited,omitempty"`
+	// Raw is the message object exactly as Slack sent it, including the
+	// fields that Message does not decode. ConversationHistory and
+	// ConversationReplies set it. For an event, Envelope.Event holds the raw
+	// JSON instead.
+	Raw json.RawMessage `json:"-"`
 }
 
 // Edited records the last edit of a Message.

@@ -2,6 +2,8 @@ package slackapi
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/url"
 )
 
@@ -145,11 +147,12 @@ func setFormPage(values url.Values, oldest, latest string, inclusive bool, limit
 	setFormString(values, "cursor", cursor)
 }
 
-// messagePage calls a paginated message method and returns the page.
+// messagePage calls a paginated message method and returns the page, with
+// Message.Raw set on each message.
 func (c *Client) messagePage(ctx context.Context, method string, values url.Values) (*MessagePage, error) {
 	var resp struct {
-		Messages         []Message `json:"messages"`
-		HasMore          bool      `json:"has_more"`
+		Messages         []json.RawMessage `json:"messages"`
+		HasMore          bool              `json:"has_more"`
 		ResponseMetadata struct {
 			NextCursor string `json:"next_cursor"`
 		} `json:"response_metadata"`
@@ -157,8 +160,15 @@ func (c *Client) messagePage(ctx context.Context, method string, values url.Valu
 	if err := c.Call(ctx, method, values, &resp); err != nil {
 		return nil, err
 	}
+	messages := make([]Message, len(resp.Messages))
+	for i, raw := range resp.Messages {
+		if err := json.Unmarshal(raw, &messages[i]); err != nil {
+			return nil, fmt.Errorf("slack: decode %s response: %w", method, err)
+		}
+		messages[i].Raw = raw
+	}
 	return &MessagePage{
-		Messages:   resp.Messages,
+		Messages:   messages,
 		HasMore:    resp.HasMore,
 		NextCursor: resp.ResponseMetadata.NextCursor,
 	}, nil

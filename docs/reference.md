@@ -596,8 +596,8 @@ yet wrapped is in [linear-agent-capabilities.md](linear-agent-capabilities.md).
 own their runtime (their own state, dispatch, and routing) and so do not use
 `chat.New`. It works on raw Slack IDs and holds Slack protocol and data
 formats only: it has no runtime, state, dispatch, or policy. The Slack
-adapter uses it for its Web API calls, retry, and signature check
-([ADR 0016](adr/0016-slack-api-package.md)).
+adapter uses it for its Web API calls, retry, signature check, and history
+reads ([ADR 0016](adr/0016-slack-api-package.md)).
 
 ```go
 client := slackapi.New(slackapi.Options{Token: botToken})

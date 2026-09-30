@@ -4,7 +4,7 @@
 // portable chat.Adapter surface. It holds Slack protocol and data formats only.
 // It has no runtime, state, dispatch, or policy; the application brings those.
 // The Slack adapter (package slack) uses it for its Web API calls, rate-limit
-// retry, and signature check. See ADR 0016.
+// retry, signature check, and history reads. See ADR 0016.
 //
 // # Web API
 //

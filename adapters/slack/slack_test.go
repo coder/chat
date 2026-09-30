@@ -610,11 +610,11 @@ type slackAPIServer struct {
 // and cursor handling.
 type historyRequest struct {
 	Method    string
-	Channel   string `json:"channel"`
-	TS        string `json:"ts"`
-	Limit     int    `json:"limit"`
-	Latest    string `json:"latest"`
-	Inclusive bool   `json:"inclusive"`
+	Channel   string
+	TS        string
+	Limit     int
+	Latest    string
+	Inclusive bool
 	Auth      string
 }
 
@@ -677,10 +677,25 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 			}
 			writeJSON(t, w, map[string]any{"ok": true, "channel": map[string]any{"id": "D-fallback"}})
 		case "/conversations.replies", "/conversations.history":
-			var req historyRequest
-			decodeJSON(t, r.Body, &req)
-			req.Method = r.URL.Path
-			req.Auth = r.Header.Get("Authorization")
+			// Slack reads these methods only from a form body, and rejects any
+			// other body as missing its required fields.
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse %s form: %v", r.URL.Path, err)
+			}
+			if r.PostForm.Get("channel") == "" {
+				writeJSON(t, w, map[string]any{"ok": false, "error": "invalid_arguments"})
+				return
+			}
+			limit, _ := strconv.Atoi(r.PostForm.Get("limit"))
+			req := historyRequest{
+				Method:    r.URL.Path,
+				Channel:   r.PostForm.Get("channel"),
+				TS:        r.PostForm.Get("ts"),
+				Limit:     limit,
+				Latest:    r.PostForm.Get("latest"),
+				Inclusive: r.PostForm.Get("inclusive") == "true",
+				Auth:      r.Header.Get("Authorization"),
+			}
 			api.mu.Lock()
 			api.historyReqs = append(api.historyReqs, req)
 			block := api.historyBlock

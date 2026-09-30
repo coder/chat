@@ -57,20 +57,24 @@ func TestConversationInfo(t *testing.T) {
 	})
 }
 
-const methodsPageBody = `{
+const (
+	methodsPageFirst  = `{"type": "message", "user": "U1", "text": "first", "ts": "1700000000.000001", "reactions": [{"name": "wave", "count": 1}]}`
+	methodsPageSecond = `{"type": "message", "bot_id": "B1", "text": "second", "ts": "1700000000.000002", "thread_ts": "1700000000.000001"}`
+	methodsPageBody   = `{
 	"ok": true,
 	"messages": [
-		{"type": "message", "user": "U1", "text": "first", "ts": "1700000000.000001"},
-		{"type": "message", "bot_id": "B1", "text": "second", "ts": "1700000000.000002", "thread_ts": "1700000000.000001"}
+		` + methodsPageFirst + `,
+		` + methodsPageSecond + `
 	],
 	"has_more": true,
 	"response_metadata": {"next_cursor": "bmV4dA=="}
 }`
+)
 
 var methodsWantPage = &slackapi.MessagePage{
 	Messages: []slackapi.Message{
-		{Type: "message", User: "U1", Text: "first", TS: "1700000000.000001"},
-		{Type: "message", BotID: "B1", Text: "second", TS: "1700000000.000002", ThreadTS: "1700000000.000001"},
+		{Type: "message", User: "U1", Text: "first", TS: "1700000000.000001", Raw: json.RawMessage(methodsPageFirst)},
+		{Type: "message", BotID: "B1", Text: "second", TS: "1700000000.000002", ThreadTS: "1700000000.000001", Raw: json.RawMessage(methodsPageSecond)},
 	},
 	HasMore:    true,
 	NextCursor: "bmV4dA==",
