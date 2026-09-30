@@ -694,7 +694,9 @@ Formats:
 - `SplitMarkdown(text, limit)` splits text into chunks of at most `limit`
   runes (zero or less means `MarkdownBlockLimit`, 12,000) at blank lines,
   newlines, or spaces. When the limit leaves room, it closes and reopens a
-  fenced code block across chunks. It does not convert Markdown.
+  fenced code block across chunks. It does not convert Markdown. Slack
+  applies the 12,000 limit to all the `markdown` blocks of one message
+  together, so post each chunk as its own message.
 - `UserMentions(text)` returns the user IDs of `<@U123>` and `<@U123|label>`
   mentions. `ReplaceUserMentions(text, name)` replaces each mention with `@`
   and the name that `name` returns.

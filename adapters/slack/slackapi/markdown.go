@@ -6,14 +6,14 @@ import (
 )
 
 // MarkdownBlockLimit is the maximum number of characters that Slack accepts
-// in the text of a markdown block and in the markdown_text field of a
-// message.
+// in the markdown_text field of a message, and in all the markdown blocks of
+// one message together.
 const MarkdownBlockLimit = 12000
 
 const fenceMarker = "```"
 
 // SplitMarkdown splits text into chunks of at most limit runes each, so that
-// each chunk fits in one MarkdownBlock. A limit of zero or less means
+// each chunk fits in one message as one MarkdownBlock. A limit of zero or less means
 // MarkdownBlockLimit. Empty text returns nil. Text within the limit returns
 // one chunk equal to text.
 //

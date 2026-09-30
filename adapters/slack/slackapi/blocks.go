@@ -13,8 +13,9 @@ type Block interface {
 }
 
 // MarkdownBlock is a Block Kit "markdown" block. Slack renders Text as
-// standard Markdown. Text can hold at most MarkdownBlockLimit characters;
-// use SplitMarkdown to split longer text.
+// standard Markdown. The markdown blocks of one message can hold at most
+// MarkdownBlockLimit characters together; use SplitMarkdown to split longer
+// text over more messages.
 type MarkdownBlock struct {
 	// Text is the Markdown text of the block.
 	Text string
