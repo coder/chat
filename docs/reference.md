@@ -655,8 +655,11 @@ methods, so the client sends them form encoded. Every method except
 the bearer token on every allowed redirect; `UploadToURL` never sends it.
 `UploadToURL` rejects a 301, 302, or 303 redirect, because `net/http` follows
 it with a `GET` that has no content. `DownloadFile` writes at most `maxBytes`,
-which must be positive. It rejects a `text/html` response, because Slack
-answers a bad token with an HTML login page and status 200.
+which must be positive. A bad token, or a token without the `files:read`
+scope, makes Slack redirect to the workspace sign-in page, whose origin is not
+in the default `Options.FileOrigins`. `DownloadFile` also rejects a
+`text/html` response, because Slack serves stored files, HTML files too, as
+`application/force-download`, so an HTML response is a sign-in or error page.
 
 Errors:
 

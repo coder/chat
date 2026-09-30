@@ -185,9 +185,12 @@ func (c *Client) UploadFile(ctx context.Context, req UploadFileRequest) (*File, 
 // bearer token on every redirect, because each redirect goes to an origin in
 // Options.FileOrigins. An empty fileURL, for example the missing
 // url_private_download of an external file, returns an error. A non-2xx status
-// returns *APIError with Method "files.download". A text/html response is an
-// error, because Slack answers a request with a bad token with an HTML login
-// page and status 200. A body larger than maxBytes returns an error that wraps
+// returns *APIError with Method "files.download". A bad token, or a token
+// without the files:read scope, makes Slack redirect to the sign-in page of the
+// workspace, whose origin is not in the default Options.FileOrigins. A
+// text/html response is an error, because Slack serves stored files, HTML
+// files too, as application/force-download, so an HTML response is a sign-in
+// or error page. A body larger than maxBytes returns an error that wraps
 // ErrFileTooLarge after DownloadFile has written maxBytes bytes to w. maxBytes
 // must be positive.
 func (c *Client) DownloadFile(ctx context.Context, fileURL string, w io.Writer, maxBytes int64) (int64, error) {
