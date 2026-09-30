@@ -51,17 +51,4 @@ func TestSetAssistantThreadStatus(t *testing.T) {
 			"status": ""
 		}`)
 	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("assistant.threads.setStatus", methodsSlackError("invalid_thread_ts"))
-
-		err := methodsNewClient(srv).SetAssistantThreadStatus(t.Context(), slackapi.SetAssistantThreadStatusRequest{
-			ChannelID: "D1",
-			ThreadTS:  "bad",
-			Status:    "is thinking...",
-		})
-		methodsCheckAPIError(t, err, "assistant.threads.setStatus", "invalid_thread_ts")
-	})
 }

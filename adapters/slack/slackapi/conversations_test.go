@@ -21,15 +21,15 @@ func TestConversationInfo(t *testing.T) {
 				"id": "C1",
 				"name": "general",
 				"is_channel": true,
-				"is_group": false,
-				"is_im": false,
-				"is_mpim": false,
-				"is_private": false,
-				"is_archived": false,
+				"is_group": true,
+				"is_im": true,
+				"is_mpim": true,
+				"is_private": true,
+				"is_archived": true,
 				"is_shared": true,
 				"is_ext_shared": true,
-				"is_org_shared": false,
-				"is_pending_ext_shared": false,
+				"is_org_shared": true,
+				"is_pending_ext_shared": true,
 				"is_member": true
 			}
 		}`))
@@ -40,25 +40,20 @@ func TestConversationInfo(t *testing.T) {
 		}
 		methodsCheckForm(t, srv, "conversations.info", url.Values{"channel": {"C1"}})
 		methodsCheckEqual(t, "conversation", conv, &slackapi.Conversation{
-			ID:          "C1",
-			Name:        "general",
-			IsChannel:   true,
-			IsShared:    true,
-			IsExtShared: true,
-			IsMember:    true,
+			ID:                 "C1",
+			Name:               "general",
+			IsChannel:          true,
+			IsGroup:            true,
+			IsIM:               true,
+			IsMPIM:             true,
+			IsPrivate:          true,
+			IsArchived:         true,
+			IsShared:           true,
+			IsExtShared:        true,
+			IsOrgShared:        true,
+			IsPendingExtShared: true,
+			IsMember:           true,
 		})
-	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("conversations.info", methodsSlackError("channel_not_found"))
-
-		conv, err := methodsNewClient(srv).ConversationInfo(t.Context(), slackapi.ConversationInfoRequest{Channel: "C404"})
-		if conv != nil {
-			t.Errorf("conversation = %+v, want nil", conv)
-		}
-		methodsCheckAPIError(t, err, "conversations.info", "channel_not_found")
 	})
 }
 
@@ -110,32 +105,6 @@ func TestConversationHistory(t *testing.T) {
 		})
 		methodsCheckEqual(t, "page", page, methodsWantPage)
 	})
-
-	t.Run("LastPage", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("conversations.history", json.RawMessage(`{"ok":true,"messages":[],"has_more":false}`))
-
-		page, err := methodsNewClient(srv).ConversationHistory(t.Context(), slackapi.ConversationHistoryRequest{Channel: "C1"})
-		if err != nil {
-			t.Fatalf("ConversationHistory: %v", err)
-		}
-		if page.HasMore || page.NextCursor != "" || len(page.Messages) != 0 {
-			t.Errorf("page = %+v, want an empty last page", page)
-		}
-	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("conversations.history", methodsSlackError("channel_not_found"))
-
-		page, err := methodsNewClient(srv).ConversationHistory(t.Context(), slackapi.ConversationHistoryRequest{Channel: "C404"})
-		if page != nil {
-			t.Errorf("page = %+v, want nil", page)
-		}
-		methodsCheckAPIError(t, err, "conversations.history", "channel_not_found")
-	})
 }
 
 func TestConversationReplies(t *testing.T) {
@@ -168,20 +137,5 @@ func TestConversationReplies(t *testing.T) {
 			"cursor":    {"Y3Vy"},
 		})
 		methodsCheckEqual(t, "page", page, methodsWantPage)
-	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("conversations.replies", methodsSlackError("thread_not_found"))
-
-		page, err := methodsNewClient(srv).ConversationReplies(t.Context(), slackapi.ConversationRepliesRequest{
-			Channel: "C1",
-			TS:      "1700000000.999999",
-		})
-		if page != nil {
-			t.Errorf("page = %+v, want nil", page)
-		}
-		methodsCheckAPIError(t, err, "conversations.replies", "thread_not_found")
 	})
 }

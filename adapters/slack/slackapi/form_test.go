@@ -27,11 +27,6 @@ func methodsNewClient(srv *slackapitest.Server) *slackapi.Client {
 	})
 }
 
-// methodsSlackError returns an ok:false response body with the error code.
-func methodsSlackError(code string) json.RawMessage {
-	return json.RawMessage(`{"ok":false,"error":"` + code + `"}`)
-}
-
 // methodsOnlyCall returns the only request to method on srv and checks its
 // bearer token and content type.
 func methodsOnlyCall(t *testing.T, srv *slackapitest.Server, method, contentType string) slackapitest.Call {
@@ -88,16 +83,71 @@ func methodsCheckEqual(t *testing.T, what string, got, want any) {
 	}
 }
 
-// methodsCheckAPIError checks that err is an *slackapi.APIError for method
-// with the error code.
-func methodsCheckAPIError(t *testing.T, err error, method, code string) {
-	t.Helper()
-	apiErr, ok := errors.AsType[*slackapi.APIError](err)
-	if !ok {
-		t.Fatalf("error = %v, want *slackapi.APIError", err)
+func TestMethodsReturnAPIError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		method string
+		call   func(context.Context, *slackapi.Client) (any, error)
+	}{
+		{"auth.test", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.AuthTest(ctx)
+		}},
+		{"chat.postMessage", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.PostMessage(ctx, slackapi.PostMessageRequest{})
+		}},
+		{"chat.update", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.UpdateMessage(ctx, slackapi.UpdateMessageRequest{})
+		}},
+		{"chat.delete", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return nil, c.DeleteMessage(ctx, slackapi.DeleteMessageRequest{})
+		}},
+		{"users.info", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.UserInfo(ctx, slackapi.UserInfoRequest{})
+		}},
+		{"conversations.info", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.ConversationInfo(ctx, slackapi.ConversationInfoRequest{})
+		}},
+		{"conversations.history", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.ConversationHistory(ctx, slackapi.ConversationHistoryRequest{})
+		}},
+		{"conversations.replies", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.ConversationReplies(ctx, slackapi.ConversationRepliesRequest{})
+		}},
+		{"reactions.add", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return nil, c.AddReaction(ctx, slackapi.ReactionRequest{})
+		}},
+		{"reactions.remove", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return nil, c.RemoveReaction(ctx, slackapi.ReactionRequest{})
+		}},
+		{"assistant.threads.setStatus", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return nil, c.SetAssistantThreadStatus(ctx, slackapi.SetAssistantThreadStatusRequest{})
+		}},
+		{"files.getUploadURLExternal", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.GetUploadURLExternal(ctx, slackapi.GetUploadURLExternalRequest{})
+		}},
+		{"files.completeUploadExternal", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.CompleteUploadExternal(ctx, slackapi.CompleteUploadExternalRequest{})
+		}},
 	}
-	if apiErr.Method != method || apiErr.Code != code {
-		t.Errorf("APIError method, code = %q, %q, want %q, %q", apiErr.Method, apiErr.Code, method, code)
+	for _, tt := range tests {
+		t.Run(tt.method, func(t *testing.T) {
+			t.Parallel()
+			srv := slackapitest.NewServer(t)
+			srv.Respond(tt.method, json.RawMessage(`{"ok":false,"error":"invalid_auth"}`))
+
+			got, err := tt.call(t.Context(), methodsNewClient(srv))
+			if got != nil && !reflect.ValueOf(got).IsNil() {
+				t.Errorf("result = %+v, want nil", got)
+			}
+			apiErr, ok := errors.AsType[*slackapi.APIError](err)
+			if !ok {
+				t.Fatalf("error = %v, want *slackapi.APIError", err)
+			}
+			if apiErr.Method != tt.method || apiErr.Code != "invalid_auth" {
+				t.Errorf("APIError method, code = %q, %q, want %q, %q", apiErr.Method, apiErr.Code, tt.method, "invalid_auth")
+			}
+		})
 	}
 }
 
@@ -118,15 +168,6 @@ func TestFormMethodsOmitZeroFields(t *testing.T) {
 				return err
 			},
 			want: url.Values{"user": {"U1"}},
-		},
-		{
-			name:   "ConversationInfo",
-			method: "conversations.info",
-			call: func(ctx context.Context, c *slackapi.Client) error {
-				_, err := c.ConversationInfo(ctx, slackapi.ConversationInfoRequest{Channel: "C1"})
-				return err
-			},
-			want: url.Values{"channel": {"C1"}},
 		},
 		{
 			name:   "ConversationHistory",

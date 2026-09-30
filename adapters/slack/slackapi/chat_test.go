@@ -70,22 +70,6 @@ func TestPostMessage(t *testing.T) {
 			"unfurl_media": true
 		}`)
 	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("chat.postMessage", methodsSlackError("markdown_text_conflict"))
-
-		resp, err := methodsNewClient(srv).PostMessage(t.Context(), slackapi.PostMessageRequest{
-			Channel:      "C1",
-			Text:         "Done",
-			MarkdownText: "**Done**",
-		})
-		if resp != nil {
-			t.Errorf("response = %+v, want nil", resp)
-		}
-		methodsCheckAPIError(t, err, "chat.postMessage", "markdown_text_conflict")
-	})
 }
 
 func TestUpdateMessage(t *testing.T) {
@@ -137,22 +121,6 @@ func TestUpdateMessage(t *testing.T) {
 			"markdown_text": "_Edited_"
 		}`)
 	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("chat.update", methodsSlackError("message_not_found"))
-
-		resp, err := methodsNewClient(srv).UpdateMessage(t.Context(), slackapi.UpdateMessageRequest{
-			Channel: "C1",
-			TS:      "1700000000.000100",
-			Text:    "Edited",
-		})
-		if resp != nil {
-			t.Errorf("response = %+v, want nil", resp)
-		}
-		methodsCheckAPIError(t, err, "chat.update", "message_not_found")
-	})
 }
 
 func TestDeleteMessage(t *testing.T) {
@@ -171,17 +139,5 @@ func TestDeleteMessage(t *testing.T) {
 			t.Fatalf("DeleteMessage: %v", err)
 		}
 		methodsCheckJSONBody(t, srv, "chat.delete", `{"channel":"C1","ts":"1700000000.000100"}`)
-	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("chat.delete", methodsSlackError("cant_delete_message"))
-
-		err := methodsNewClient(srv).DeleteMessage(t.Context(), slackapi.DeleteMessageRequest{
-			Channel: "C1",
-			TS:      "1700000000.000100",
-		})
-		methodsCheckAPIError(t, err, "chat.delete", "cant_delete_message")
 	})
 }

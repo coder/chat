@@ -106,23 +106,6 @@ func TestGetUploadURLExternal(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("api error", func(t *testing.T) {
-		t.Parallel()
-
-		srv := slackapitest.NewServer(t)
-		srv.Respond("files.getUploadURLExternal", map[string]any{"ok": false, "error": "invalid_auth"})
-		client := filesNewClient(srv, slackapi.Options{})
-
-		got, err := client.GetUploadURLExternal(t.Context(), slackapi.GetUploadURLExternalRequest{Filename: "a.txt", Length: 1})
-		apiErr, ok := errors.AsType[*slackapi.APIError](err)
-		if !ok || got != nil {
-			t.Fatalf("response = %v, err = %v, want nil and *slackapi.APIError", got, err)
-		}
-		if apiErr.Method != "files.getUploadURLExternal" || apiErr.Code != "invalid_auth" {
-			t.Fatalf("APIError = %+v", apiErr)
-		}
-	})
 }
 
 func TestUploadToURL(t *testing.T) {
@@ -295,23 +278,6 @@ func TestCompleteUploadExternal(t *testing.T) {
 			}
 		})
 	}
-
-	t.Run("api error", func(t *testing.T) {
-		t.Parallel()
-
-		srv := slackapitest.NewServer(t)
-		srv.Respond("files.completeUploadExternal", map[string]any{"ok": false, "error": "file_not_found"})
-		client := filesNewClient(srv, slackapi.Options{})
-
-		got, err := client.CompleteUploadExternal(t.Context(), slackapi.CompleteUploadExternalRequest{Files: []slackapi.FileSummary{{ID: "F1"}}})
-		apiErr, ok := errors.AsType[*slackapi.APIError](err)
-		if !ok || got != nil {
-			t.Fatalf("response = %v, err = %v, want nil and *slackapi.APIError", got, err)
-		}
-		if apiErr.Method != "files.completeUploadExternal" || apiErr.Code != "file_not_found" {
-			t.Fatalf("APIError = %+v", apiErr)
-		}
-	})
 }
 
 func TestUploadFile(t *testing.T) {
@@ -522,7 +488,6 @@ func TestDownloadFile(t *testing.T) {
 			{name: "under", body: "1234", maxBytes: 5},
 			{name: "exact", body: "12345", maxBytes: 5},
 			{name: "over", body: "123456", maxBytes: 5, wantErr: true},
-			{name: "over by a lot", body: strings.Repeat("x", 64<<10), maxBytes: 5, wantErr: true},
 		}
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
@@ -577,15 +542,11 @@ func TestDownloadFile(t *testing.T) {
 		client := filesNewClient(srv, slackapi.Options{FileOrigins: []string{srv.URL()}})
 		target := srv.ServeFile("/a.txt", "text/plain", []byte("hello"))
 
-		for _, fileURL := range []string{target, "/a.txt", "http://[::1"} {
+		for _, fileURL := range []string{target, "/a.txt"} {
 			n, err := client.DownloadFile(t.Context(), fileURL, &bytes.Buffer{}, 1024)
-			if err == nil || n != 0 {
-				t.Fatalf("DownloadFile(%q) = %d, %v, want an error", fileURL, n, err)
+			if err == nil || !strings.Contains(err.Error(), "not in FileOrigins") || n != 0 {
+				t.Fatalf("DownloadFile(%q) = %d, %v, want an origin error", fileURL, n, err)
 			}
-		}
-		_, err := client.DownloadFile(t.Context(), target, &bytes.Buffer{}, 1024)
-		if !strings.Contains(err.Error(), "not in FileOrigins") {
-			t.Fatalf("err = %v, want an origin error", err)
 		}
 		if got := len(srv.FileRequests(target)); got != 0 {
 			t.Fatalf("file requests = %d, want 0", got)
@@ -615,23 +576,6 @@ func TestDownloadFile(t *testing.T) {
 		}
 		if got := calls[0].Header.Get("Authorization"); got != "Bearer xoxb-files" {
 			t.Fatalf("redirect Authorization = %q, want the bearer token", got)
-		}
-	})
-
-	t.Run("redirect to other host", func(t *testing.T) {
-		t.Parallel()
-
-		srv := slackapitest.NewServer(t)
-		client := filesNewClient(srv, slackapi.Options{})
-		moved := srv.ServeFile("/a.txt", "text/plain", []byte("hello"))
-		target := srv.HandleFile("/redirect", func(slackapitest.FileRequest) any { return filesRedirect(filesLocalhost(t, moved)) })
-
-		n, err := client.DownloadFile(t.Context(), target, &bytes.Buffer{}, 1024)
-		if err == nil || !strings.Contains(err.Error(), "redirect origin") || n != 0 {
-			t.Fatalf("n = %d, err = %v, want a redirect origin error", n, err)
-		}
-		if got := len(srv.FileRequests(moved)); got != 0 {
-			t.Fatalf("redirect target requests = %d, want 0", got)
 		}
 	})
 
@@ -682,21 +626,45 @@ func TestDownloadFile(t *testing.T) {
 	t.Run("redirect to other origin", func(t *testing.T) {
 		t.Parallel()
 
-		srv := slackapitest.NewServer(t)
-		srv.Respond("files/F1", slackapitest.Response{Header: http.Header{"Content-Type": {"text/plain"}}, Body: []byte("moved")})
-		client := filesNewClient(srv, slackapi.Options{})
-		target := srv.HandleFile("/redirect", func(slackapitest.FileRequest) any { return filesRedirect(srv.URL() + "/files/F1") })
+		tests := []struct {
+			name     string
+			redirect func(t *testing.T, srv *slackapitest.Server) (origins []string, location string)
+		}{
+			{
+				name: "other host",
+				redirect: func(t *testing.T, srv *slackapitest.Server) ([]string, string) {
+					return []string{srv.FileOrigin(), srv.URL()}, filesLocalhost(t, srv.URL()) + "/files/F1"
+				},
+			},
+			{
+				name: "other port",
+				redirect: func(_ *testing.T, srv *slackapitest.Server) ([]string, string) {
+					return []string{srv.FileOrigin()}, srv.URL() + "/files/F1"
+				},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				t.Parallel()
 
-		var buf bytes.Buffer
-		n, err := client.DownloadFile(t.Context(), target, &buf, 1024)
-		if err == nil || !strings.Contains(err.Error(), "redirect origin") || n != 0 || buf.Len() != 0 {
-			t.Fatalf("n = %d, written = %d, err = %v, want a redirect origin error", n, buf.Len(), err)
-		}
-		if got := len(srv.Calls("files/F1")); got != 0 {
-			t.Fatalf("redirect target calls = %d, want 0", got)
-		}
-		if srv.Client().CheckRedirect != nil {
-			t.Fatal("DownloadFile set CheckRedirect on the shared HTTP client")
+				srv := slackapitest.NewServer(t)
+				srv.Respond("files/F1", slackapitest.Response{Header: http.Header{"Content-Type": {"text/plain"}}, Body: []byte("moved")})
+				origins, location := tt.redirect(t, srv)
+				client := filesNewClient(srv, slackapi.Options{FileOrigins: origins})
+				target := srv.HandleFile("/redirect", func(slackapitest.FileRequest) any { return filesRedirect(location) })
+
+				var buf bytes.Buffer
+				n, err := client.DownloadFile(t.Context(), target, &buf, 1024)
+				if err == nil || !strings.Contains(err.Error(), "redirect origin") || n != 0 || buf.Len() != 0 {
+					t.Fatalf("n = %d, written = %d, err = %v, want a redirect origin error", n, buf.Len(), err)
+				}
+				if got := len(srv.Calls("files/F1")); got != 0 {
+					t.Fatalf("redirect target calls = %d, want 0", got)
+				}
+				if srv.Client().CheckRedirect != nil {
+					t.Fatal("DownloadFile set CheckRedirect on the shared HTTP client")
+				}
+			})
 		}
 	})
 

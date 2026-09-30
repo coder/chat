@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"os"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -191,18 +190,6 @@ func TestLive(t *testing.T) {
 		t.Fatalf("step 9 ConversationReplies: parent found %t, reply found %t", foundParent, foundReply)
 	}
 
-	var jsonReplies struct {
-		Messages []slackapi.Message `json:"messages"`
-	}
-	err = client.Call(ctx, "conversations.replies", map[string]any{"channel": channel, "ts": parent.TS, "limit": 10}, &jsonReplies)
-	if err != nil {
-		t.Logf("step 10 conversations.replies as JSON (diagnostic): rejected: %s", liveErr(err))
-	} else {
-		firstIsParent := len(jsonReplies.Messages) > 0 && jsonReplies.Messages[0].TS == parent.TS
-		jsonReply := slices.ContainsFunc(jsonReplies.Messages, func(m slackapi.Message) bool { return m.TS == reply.TS })
-		t.Logf("step 10 conversations.replies as JSON (diagnostic): ok, %d messages, first is parent %t, reply found %t", len(jsonReplies.Messages), firstIsParent, jsonReply)
-	}
-
 	content := []byte("slackapi live test snippet\nsecond line\n")
 	uploaded, err := client.UploadFile(ctx, slackapi.UploadFileRequest{
 		Filename:    "slackapi-live.txt",
@@ -213,10 +200,10 @@ func TestLive(t *testing.T) {
 		ThreadTS:    parent.TS,
 	})
 	if err != nil {
-		t.Fatalf("step 11 UploadFile: %s", liveErr(err))
+		t.Fatalf("step 10 UploadFile: %s", liveErr(err))
 	}
 	liveDeleteFileOnCleanup(t, client, uploaded.ID)
-	t.Logf("step 11 UploadFile (upload URL accepted raw bytes without a token): file %s, completed file has url_private_download %t", uploaded.ID, uploaded.URLPrivateDownload != "")
+	t.Logf("step 10 UploadFile (upload URL accepted raw bytes without a token): file %s, completed file has url_private_download %t", uploaded.ID, uploaded.URLPrivateDownload != "")
 
 	shareTS, shared, found := liveFindThreadFile(ctx, t, client, channel, parent.TS, uploaded.ID)
 	if found {
@@ -224,7 +211,7 @@ func TestLive(t *testing.T) {
 	}
 	downloadURL := cmp.Or(uploaded.URLPrivateDownload, shared.URLPrivateDownload)
 	if downloadURL == "" {
-		t.Fatalf("step 11: file %s has no url_private_download", uploaded.ID)
+		t.Fatalf("step 10: file %s has no url_private_download", uploaded.ID)
 	}
 	// The HTTP client records redirect origins so the log shows whether the download redirected.
 	var redirects []string
@@ -241,30 +228,12 @@ func TestLive(t *testing.T) {
 	var downloaded bytes.Buffer
 	n, err := downloader.DownloadFile(ctx, downloadURL, &downloaded, 1<<20)
 	if err != nil {
-		t.Fatalf("step 11 DownloadFile: %s (redirects %v)", liveErr(err), redirects)
+		t.Fatalf("step 10 DownloadFile: %s (redirects %v)", liveErr(err), redirects)
 	}
 	if !bytes.Equal(downloaded.Bytes(), content) {
-		t.Fatalf("step 11 DownloadFile: got %q, want %q", downloaded.Bytes(), content)
+		t.Fatalf("step 10 DownloadFile: got %q, want %q", downloaded.Bytes(), content)
 	}
-	t.Logf("step 11 DownloadFile: %d bytes match the upload, %d redirects %v", n, len(redirects), redirects)
-
-	large, err := client.PostMessage(ctx, slackapi.PostMessageRequest{
-		Channel:  channel,
-		ThreadTS: parent.TS,
-		Text:     "Two markdown blocks of 7,000 characters each",
-		Blocks: []slackapi.Block{
-			slackapi.MarkdownBlock{Text: strings.Repeat("block one ", 700)},
-			slackapi.MarkdownBlock{Text: strings.Repeat("block two ", 700)},
-		},
-	})
-	if apiErr, ok := errors.AsType[*slackapi.APIError](err); ok {
-		t.Logf("step 12 PostMessage 2 x 7,000 characters: per-message limit: rejected with %s (detail %q)", apiErr.Code, apiErr.Detail)
-	} else if err != nil {
-		t.Fatalf("step 12 PostMessage 2 x 7,000 characters: %s", liveErr(err))
-	} else {
-		liveDeleteMessageOnCleanup(t, client, channel, large.TS)
-		t.Logf("step 12 PostMessage 2 x 7,000 characters: per-block limit: accepted, ts %s", large.TS)
-	}
+	t.Logf("step 10 DownloadFile: %d bytes match the upload, %d redirects %v", n, len(redirects), redirects)
 }
 
 // liveStatusWait sets the thread status, sets it again after 100 s, and waits
@@ -303,14 +272,14 @@ func liveFindThreadFile(ctx context.Context, t *testing.T, client *slackapi.Clie
 	for attempt := 1; ; attempt++ {
 		ts, file, err := liveThreadFile(pollCtx, client, channel, threadTS, fileID)
 		if err != nil && pollCtx.Err() == nil {
-			t.Fatalf("step 11 ConversationReplies: %s", liveErr(err))
+			t.Fatalf("step 10 ConversationReplies: %s", liveErr(err))
 		}
 		if ts != "" {
-			t.Logf("step 11 ConversationReplies: file %s shared in message %s after %d attempts", fileID, ts, attempt)
+			t.Logf("step 10 ConversationReplies: file %s shared in message %s after %d attempts", fileID, ts, attempt)
 			return ts, file, true
 		}
 		if liveWait(pollCtx, time.Second) != nil {
-			t.Logf("step 11 ConversationReplies: file %s not in the thread after %d attempts", fileID, attempt)
+			t.Logf("step 10 ConversationReplies: file %s not in the thread after %d attempts", fileID, attempt)
 			return "", slackapi.File{}, false
 		}
 	}

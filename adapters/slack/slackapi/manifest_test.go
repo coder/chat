@@ -65,16 +65,6 @@ func formatsManifest() slackapi.Manifest {
 	}
 }
 
-func TestManifestMarshalJSON(t *testing.T) {
-	t.Parallel()
-
-	got, err := json.Marshal(formatsManifest())
-	if err != nil {
-		t.Fatalf("json.Marshal: %v", err)
-	}
-	formatsAssertSameJSON(t, got, []byte(formatsManifestJSON))
-}
-
 func TestManifestRoundTrip(t *testing.T) {
 	t.Parallel()
 

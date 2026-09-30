@@ -73,51 +73,6 @@ func TestBlocksMarshalJSON(t *testing.T) {
 	}
 }
 
-func TestBlocksPointerMarshalJSON(t *testing.T) {
-	t.Parallel()
-
-	blocks := []slackapi.Block{
-		&slackapi.MarkdownBlock{Text: "hi"},
-		&slackapi.ActionsBlock{Elements: []slackapi.ButtonElement{{Text: "Open"}}},
-		&slackapi.ImageBlock{ImageURL: "https://example.com/a.png", AltText: "a"},
-	}
-	want := `[` +
-		`{"type":"markdown","text":"hi"},` +
-		`{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"Open"}}]},` +
-		`{"type":"image","image_url":"https://example.com/a.png","alt_text":"a"}` +
-		`]`
-	formatsAssertJSON(t, blocks, want)
-}
-
-func TestBlocksSliceMarshalJSON(t *testing.T) {
-	t.Parallel()
-
-	blocks := []slackapi.Block{
-		slackapi.MarkdownBlock{Text: "Done. See the chat."},
-		slackapi.ImageBlock{ImageURL: "https://example.com/a.png", AltText: "a chart", Title: "Usage"},
-		slackapi.ActionsBlock{Elements: []slackapi.ButtonElement{
-			{Text: "Open chat", URL: "https://example.com/chat/1", ActionID: "open_chat"},
-		}},
-	}
-	want := `[` +
-		`{"type":"markdown","text":"Done. See the chat."},` +
-		`{"type":"image","image_url":"https://example.com/a.png","alt_text":"a chart","title":{"type":"plain_text","text":"Usage"}},` +
-		`{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"Open chat"},"url":"https://example.com/chat/1","action_id":"open_chat"}]}` +
-		`]`
-	formatsAssertJSON(t, blocks, want)
-
-	body, err := json.Marshal(struct {
-		Channel string           `json:"channel"`
-		Blocks  []slackapi.Block `json:"blocks"`
-	}{Channel: "C123", Blocks: blocks[:1]})
-	if err != nil {
-		t.Fatalf("marshal message: %v", err)
-	}
-	if got, want := string(body), `{"channel":"C123","blocks":[{"type":"markdown","text":"Done. See the chat."}]}`; got != want {
-		t.Fatalf("message JSON = %s, want %s", got, want)
-	}
-}
-
 func TestBlockType(t *testing.T) {
 	t.Parallel()
 

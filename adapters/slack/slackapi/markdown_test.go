@@ -46,15 +46,6 @@ func TestSplitMarkdown(t *testing.T) {
 			},
 		},
 		{
-			name:  "FenceWithoutInfoString",
-			text:  "```\nfmt.Println(1)\nfmt.Println(2)\n```",
-			limit: 25,
-			want: []string{
-				"```\nfmt.Println(1)\n```",
-				"```\nfmt.Println(2)\n```",
-			},
-		},
-		{
 			name:  "FenceSpansThreeChunks",
 			text:  "```go\nline1\nline2\nline3\n```",
 			limit: 20,

@@ -15,13 +15,11 @@ func TestReactions(t *testing.T) {
 	tests := []struct {
 		name   string
 		method string
-		code   string
 		call   func(context.Context, *slackapi.Client, slackapi.ReactionRequest) error
 	}{
 		{
 			name:   "AddReaction",
 			method: "reactions.add",
-			code:   "already_reacted",
 			call: func(ctx context.Context, c *slackapi.Client, req slackapi.ReactionRequest) error {
 				return c.AddReaction(ctx, req)
 			},
@@ -29,7 +27,6 @@ func TestReactions(t *testing.T) {
 		{
 			name:   "RemoveReaction",
 			method: "reactions.remove",
-			code:   "no_reaction",
 			call: func(ctx context.Context, c *slackapi.Client, req slackapi.ReactionRequest) error {
 				return c.RemoveReaction(ctx, req)
 			},
@@ -53,15 +50,6 @@ func TestReactions(t *testing.T) {
 					"timestamp": "1700000000.000100",
 					"name": "eyes"
 				}`)
-			})
-
-			t.Run("APIError", func(t *testing.T) {
-				t.Parallel()
-				srv := slackapitest.NewServer(t)
-				srv.Respond(tt.method, methodsSlackError(tt.code))
-
-				err := tt.call(t.Context(), methodsNewClient(srv), req)
-				methodsCheckAPIError(t, err, tt.method, tt.code)
 			})
 		})
 	}

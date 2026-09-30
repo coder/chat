@@ -37,16 +37,4 @@ func TestAuthTest(t *testing.T) {
 			URL:    "https://example.slack.com/",
 		})
 	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("auth.test", methodsSlackError("invalid_auth"))
-
-		resp, err := methodsNewClient(srv).AuthTest(t.Context())
-		if resp != nil {
-			t.Errorf("response = %+v, want nil", resp)
-		}
-		methodsCheckAPIError(t, err, "auth.test", "invalid_auth")
-	})
 }

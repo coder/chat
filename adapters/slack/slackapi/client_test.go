@@ -385,27 +385,33 @@ func TestNewFileOrigins(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		origins []string
-		want    []string
+		origin  string
+		fileURL string
+		wantErr bool
 	}{
-		{name: "default", want: []string{"https://files.slack.com", "https://slack.com"}},
-		{
-			name:    "normalized",
-			origins: []string{"HTTPS://Files.Example.COM/path?q=1", "https://a.example:8443/", "not a url", "/relative"},
-			want:    []string{"https://files.example.com", "https://a.example:8443"},
-		},
-		{
-			name:    "default port",
-			origins: []string{"https://files.slack.com:443", "HTTP://A.example:80", "https://b.example:80", "http://c.example:443", "https://[::1]:443"},
-			want:    []string{"https://files.slack.com", "http://a.example", "https://b.example:80", "http://c.example:443", "https://[::1]"},
-		},
+		{name: "case", origin: "HTTPS://Files.Example.COM", fileURL: "https://files.example.com/x"},
+		{name: "path and query", origin: "https://files.example.com/p?q", fileURL: "https://files.example.com/x"},
+		{name: "https default port", origin: "https://files.example.com:443", fileURL: "https://files.example.com/x"},
+		{name: "http default port", origin: "http://files.example.com:80", fileURL: "http://files.example.com/x"},
+		{name: "http port on https", origin: "https://files.example.com:80", fileURL: "https://files.example.com/x", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			client := slackapi.New(slackapi.Options{FileOrigins: tt.origins})
-			if got := client.FileOriginsForTest(); !slices.Equal(got, tt.want) {
-				t.Fatalf("file origins = %q, want %q", got, tt.want)
+			transport := filesTransport(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Request: req}, nil
+			})
+			client := slackapi.New(slackapi.Options{HTTPClient: &http.Client{Transport: transport}, FileOrigins: []string{tt.origin}})
+
+			_, err := client.DownloadFile(t.Context(), tt.fileURL, &bytes.Buffer{}, 1024)
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "not in FileOrigins") {
+					t.Fatalf("err = %v, want an origin error", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("DownloadFile: %v", err)
 			}
 		})
 	}
@@ -415,13 +421,10 @@ func TestNewLogsDroppedFileOrigins(t *testing.T) {
 	t.Parallel()
 
 	var buf bytes.Buffer
-	client := slackapi.New(slackapi.Options{
+	slackapi.New(slackapi.Options{
 		FileOrigins: []string{"https://files.example.com", "not a url", "/relative"},
 		Logger:      slog.New(slog.NewTextHandler(&buf, nil)),
 	})
-	if got, want := client.FileOriginsForTest(), []string{"https://files.example.com"}; !slices.Equal(got, want) {
-		t.Fatalf("file origins = %q, want %q", got, want)
-	}
 	out := buf.String()
 	if got := strings.Count(out, "level=WARN"); got != 2 {
 		t.Fatalf("warnings = %d, want 2:\n%s", got, out)

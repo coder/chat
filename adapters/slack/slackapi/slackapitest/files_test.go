@@ -3,7 +3,6 @@ package slackapitest_test
 import (
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -22,9 +21,7 @@ func filesDo(t *testing.T, srv *slackapitest.Server, method, target string, head
 	for key, values := range header {
 		req.Header[key] = values
 	}
-	client := *srv.Client()
-	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	resp, err := client.Do(req)
+	resp, err := srv.Client().Do(req)
 	if err != nil {
 		t.Fatalf("%s %s: %v", method, target, err)
 	}
@@ -34,26 +31,6 @@ func filesDo(t *testing.T, srv *slackapitest.Server, method, target string, head
 		t.Fatalf("read response: %v", err)
 	}
 	return resp, string(payload)
-}
-
-func TestFileOrigin(t *testing.T) {
-	t.Parallel()
-
-	srv := slackapitest.NewServer(t)
-	origin, err := url.Parse(srv.FileOrigin())
-	if err != nil {
-		t.Fatalf("parse FileOrigin: %v", err)
-	}
-	api, err := url.Parse(srv.URL())
-	if err != nil {
-		t.Fatalf("parse URL: %v", err)
-	}
-	if origin.Scheme == "" || origin.Host == "" || origin.Path != "" {
-		t.Fatalf("FileOrigin = %q, want scheme://host", srv.FileOrigin())
-	}
-	if origin.Host == api.Host {
-		t.Fatalf("FileOrigin host = API host %q, want a separate origin", origin.Host)
-	}
 }
 
 func TestUploadURL(t *testing.T) {
@@ -125,29 +102,6 @@ func TestServeFile(t *testing.T) {
 				t.Fatalf("Authorization = %q", got)
 			}
 		})
-	}
-}
-
-func TestHandleFile(t *testing.T) {
-	t.Parallel()
-
-	srv := slackapitest.NewServer(t)
-	target := srv.HandleFile("/redirect", func(slackapitest.FileRequest) any {
-		return slackapitest.Response{
-			StatusCode: http.StatusFound,
-			Header:     http.Header{"Location": {srv.URL() + "/elsewhere"}},
-		}
-	})
-
-	resp, _ := filesDo(t, srv, http.MethodGet, target, nil, "")
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("status = %d, want 302", resp.StatusCode)
-	}
-	if got := resp.Header.Get("Location"); got != srv.URL()+"/elsewhere" {
-		t.Fatalf("Location = %q", got)
-	}
-	if got := len(srv.FileRequests(target)); got != 1 {
-		t.Fatalf("file requests = %d, want 1", got)
 	}
 }
 

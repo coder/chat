@@ -135,7 +135,7 @@ func TestCallRetryStopsBeforeDeadline(t *testing.T) {
 	})
 	client := coreNewClient(srv, slackapi.Options{RetryPolicy: slackapi.RetryPolicy{
 		MaxAttempts: 5,
-		MaxElapsed:  time.Hour,
+		MaxElapsed:  2 * time.Hour,
 		BaseDelay:   time.Hour,
 		MaxDelay:    time.Hour,
 	}})

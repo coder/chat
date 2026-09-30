@@ -22,8 +22,8 @@ func TestUserInfo(t *testing.T) {
 				"team_id": "T1",
 				"name": "ada",
 				"real_name": "Ada Lovelace",
-				"deleted": false,
-				"is_bot": false,
+				"deleted": true,
+				"is_bot": true,
 				"is_stranger": true,
 				"tz": "Europe/London",
 				"locale": "en-GB",
@@ -47,6 +47,8 @@ func TestUserInfo(t *testing.T) {
 			TeamID:     "T1",
 			Name:       "ada",
 			RealName:   "Ada Lovelace",
+			Deleted:    true,
+			IsBot:      true,
 			IsStranger: true,
 			TZ:         "Europe/London",
 			Locale:     "en-GB",
@@ -56,18 +58,6 @@ func TestUserInfo(t *testing.T) {
 				Email:       "ada@example.com",
 			},
 		})
-	})
-
-	t.Run("APIError", func(t *testing.T) {
-		t.Parallel()
-		srv := slackapitest.NewServer(t)
-		srv.Respond("users.info", methodsSlackError("user_not_found"))
-
-		user, err := methodsNewClient(srv).UserInfo(t.Context(), slackapi.UserInfoRequest{User: "U404"})
-		if user != nil {
-			t.Errorf("user = %+v, want nil", user)
-		}
-		methodsCheckAPIError(t, err, "users.info", "user_not_found")
 	})
 }
 
