@@ -599,6 +599,11 @@ formats only: it has no runtime, state, dispatch, or policy. The Slack
 adapter uses it for its Web API calls, retry, signature check, and history
 reads ([ADR 0016](adr/0016-slack-api-package.md)).
 
+`slackapi` and `slackapitest` are `experimental`: their exported API may
+change before they are promoted to supported. `RetryPolicy` and
+`RateLimited` keep the Slack adapter's `supported` tier, because the adapter
+exports them as type aliases.
+
 ```go
 client := slackapi.New(slackapi.Options{Token: botToken})
 resp, err := client.PostMessage(ctx, slackapi.PostMessageRequest{

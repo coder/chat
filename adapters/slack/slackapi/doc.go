@@ -6,6 +6,10 @@
 // The Slack adapter (package slack) uses it for its Web API calls, rate-limit
 // retry, signature check, and history reads. See ADR 0016.
 //
+// The package is experimental. Its exported API may change before promotion.
+// RetryPolicy and RateLimited keep the Slack adapter's supported tier because
+// the adapter exports them as type aliases.
+//
 // # Web API
 //
 // New returns a Client for Options; the fields of Options document the

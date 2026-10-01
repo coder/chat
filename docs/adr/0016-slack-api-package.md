@@ -8,7 +8,7 @@ Accepted
 
 The **Go Chat Runtime** reaches Slack only through the Slack **Platform Adapter**. Before this ADR, the adapter kept its Web API calls, its bounded rate-limit retry (ADR 0005), and its request signature check private. It exposes Slack behavior through the portable surface and through **Adapter Access** on a registered adapter. Both paths assume that the application runs the runtime.
 
-Some applications own their runtime. The first is coderd, the Coder server: it runs a Slack bot on its own database and its own chat engine, so it has its own state, dispatch, and routing, and it cannot use `chat.New` or `chat.State`. It still needs the same Slack protocol work that the adapter does: Web API calls with bounded retry, the v0 signature check, Events API parsing, file upload and download, Block Kit, and Markdown split to Slack's block limit. It also needs Slack methods that the portable surface leaves out on purpose: ADR 0004 defers portable edit, delete, and reactions, and files are not portable either.
+Some applications own their runtime. The first is coderd, the Coder server: it runs a Slack bot on its own database and its own chat engine, so it has its own state, dispatch, and routing, and it cannot use `chat.New` or `chat.State`. It still needs the same Slack protocol work that the adapter does: Web API calls with bounded retry, the v0 signature check, Events API parsing, file upload and download, Block Kit, and Markdown split to Slack's block limit. Its bot setup gives the admin a Slack app manifest to create the app from, and while an agent works, the bot shows a status such as "thinking" in the Slack thread (`assistant.threads.setStatus`). It also needs Slack methods that the portable surface leaves out on purpose: ADR 0004 defers portable edit, delete, and reactions, and files are not portable either.
 
 Without a shared package, each such application copies the Slack protocol code out of the adapter, and the copies drift from the adapter and from ADR 0005.
 
@@ -37,10 +37,11 @@ Related decisions, not redefined here: outbound rate-limit retry is ADR 0005; th
 - Applications that own their runtime can use Slack without the **Go Chat Runtime**, and share the adapter's tested Slack code instead of copying it.
 - The Slack adapter now also retries the Slack error code `rate_limited` (the `chat.postMessage` workspace message cap), in addition to HTTP 429 and `ratelimited`. A post that failed at once with `rate_limited` now retries within the **Retry Policy** and returns a typed `RateLimited` when retry stops. This extends the Slack throttling map in ADR 0005.
 - The Slack adapter's `HistoryReader` now sends form-encoded requests. Before, it sent JSON, which Slack rejects with `invalid_arguments`, so every `ReadHistory` call failed on real Slack.
+- The Slack adapter's `HistoryReader` now returns thread replies newest-first, as its GoDoc says, with the thread root once, on the page that reaches the start of the thread. Before, it returned each `conversations.replies` page as Slack sends it: oldest-first, with the root at the start of every page.
 - `slack.RetryPolicy` and `slack.RateLimited` are now type aliases of `slackapi.RetryPolicy` and `slackapi.RateLimited`. Existing code compiles unchanged, and `errors.As` matches either name.
 - The portable surface does not grow. The `chat.Adapter` interface and the `Thread` API do not change, and ADR 0004's deferral of portable edit, delete, and reactions stands. Slack's edit, delete, reaction, and file methods exist only in `slackapi`, for Slack-only callers.
 - The module keeps zero dependencies.
-- Cost: `slackapi` and `slackapitest` are public API to maintain. `slackapi` is not a complete Slack SDK: a method with no typed wrapper goes through `Call`.
+- Cost: `slackapi` and `slackapitest` are public API. Both start experimental, so their API may change before promotion. `RetryPolicy` and `RateLimited` are the exception, because the supported adapter aliases them. `slackapi` is not a complete Slack SDK: a method with no typed wrapper goes through `Call`.
 
 ## Alternatives Considered
 

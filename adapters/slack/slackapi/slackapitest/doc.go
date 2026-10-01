@@ -23,4 +23,7 @@
 //
 // A Server is safe for concurrent use. Handle and HandleFile functions run on
 // the server goroutine, so they must not call t.Fatal.
+//
+// The package is experimental: its exported API may change before it is
+// promoted to supported.
 package slackapitest
