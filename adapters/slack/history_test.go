@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/url"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -21,19 +24,13 @@ func historyReader(t *testing.T, bot *chat.Chat) chat.HistoryReader {
 	return hr
 }
 
-// ReadHistory on a thread-rooted Thread ID reads conversations.replies with the
-// channel and root ts decoded from the opaque Thread ID, and normalizes each Slack
-// message into a chat.Message using the same actor mapping as inbound events.
 func TestSlackReadHistoryThreadRepliesNormalization(t *testing.T) {
 	t.Parallel()
 
 	api := newSlackAPIServer(t)
-	api.historyResp = map[string]any{
-		"ok": true,
-		"messages": []any{
-			map[string]any{"type": "message", "user": "U1", "text": "hello", "ts": "111.000", "thread_ts": "111.000"},
-			map[string]any{"type": "message", "bot_id": "BBOT", "subtype": "bot_message", "text": "hi back", "ts": "112.000", "thread_ts": "111.000"},
-		},
+	api.historyMessages = []map[string]any{
+		{"type": "message", "user": "U1", "text": "hello", "ts": "111.000", "thread_ts": "111.000"},
+		{"type": "message", "bot_id": "BBOT", "subtype": "bot_message", "text": "hi back", "ts": "112.000", "thread_ts": "111.000"},
 	}
 	bot := newSlackRuntime(t, api, slack.Options{
 		SigningSecret: "secret",
@@ -49,20 +46,6 @@ func TestSlackReadHistoryThreadRepliesNormalization(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read history: %v", err)
 	}
-	if len(api.historyReqs) != 1 {
-		t.Fatalf("history requests = %d, want 1", len(api.historyReqs))
-	}
-	req := api.historyReqs[0]
-	if req.Method != "/conversations.replies" {
-		t.Fatalf("method = %q, want conversations.replies", req.Method)
-	}
-	if req.Channel != "C1" || req.TS != "111.000" {
-		t.Fatalf("request channel/ts = %q/%q, want C1/111.000", req.Channel, req.TS)
-	}
-	if req.Limit != 20 {
-		t.Fatalf("request limit = %d, want 20", req.Limit)
-	}
-
 	if len(msgs) != 2 {
 		t.Fatalf("messages = %d, want 2", len(msgs))
 	}
@@ -89,11 +72,8 @@ func TestSlackReadHistoryPreservesRaw(t *testing.T) {
 	t.Parallel()
 
 	api := newSlackAPIServer(t)
-	api.historyResp = map[string]any{
-		"ok": true,
-		"messages": []any{
-			map[string]any{"type": "message", "user": "U1", "text": "hello", "ts": "111.000", "reactions": []any{map[string]any{"name": "wave"}}},
-		},
+	api.historyMessages = []map[string]any{
+		{"type": "message", "user": "U1", "text": "hello", "ts": "111.000", "reactions": []any{map[string]any{"name": "wave"}}},
 	}
 	bot := newSlackRuntime(t, api, slack.Options{
 		SigningSecret: "secret",
@@ -133,78 +113,7 @@ func TestSlackReadHistoryPreservesRaw(t *testing.T) {
 	}
 }
 
-// Limit clamping is adapter-owned: above Slack's max it clamps to 1000, and <= 0
-// uses the adapter default (100).
-func TestSlackReadHistoryClampsLimit(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name      string
-		limit     int
-		wantLimit int
-	}{
-		{"above-max", 5000, 1000},
-		{"zero-default", 0, 100},
-		{"negative-default", -3, 100},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			api := newSlackAPIServer(t)
-			bot := newSlackRuntime(t, api, slack.Options{
-				SigningSecret: "secret",
-				BotToken:      "xoxb-test",
-				TeamID:        "T1",
-				BotUserID:     "UBOT",
-				BotID:         "BBOT",
-			})
-			hr := historyReader(t, bot)
-			id := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "111.000")
-			if _, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Limit: tc.limit}); err != nil {
-				t.Fatalf("read history: %v", err)
-			}
-			if len(api.historyReqs) != 1 {
-				t.Fatalf("history requests = %d, want 1", len(api.historyReqs))
-			}
-			if got := api.historyReqs[0].Limit; got != tc.wantLimit {
-				t.Fatalf("limit = %d, want %d", got, tc.wantLimit)
-			}
-		})
-	}
-}
-
-// The Before cursor (a Message.ID) maps to Slack latest=<ts> with inclusive=false,
-// paging toward older messages.
-func TestSlackReadHistoryBeforeCursor(t *testing.T) {
-	t.Parallel()
-
-	api := newSlackAPIServer(t)
-	bot := newSlackRuntime(t, api, slack.Options{
-		SigningSecret: "secret",
-		BotToken:      "xoxb-test",
-		TeamID:        "T1",
-		BotUserID:     "UBOT",
-		BotID:         "BBOT",
-	})
-	hr := historyReader(t, bot)
-	id := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "100.000")
-	if _, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Before: "111.000"}); err != nil {
-		t.Fatalf("read history: %v", err)
-	}
-	req := api.historyReqs[0]
-	if req.Latest != "111.000" {
-		t.Fatalf("latest = %q, want 111.000", req.Latest)
-	}
-	if req.Inclusive {
-		t.Fatalf("inclusive = true, want false")
-	}
-}
-
-// Slack puts the thread root first on every conversations.replies page. The
-// root is the oldest message of the thread, so ReadHistory returns it only on
-// the page that reaches the start of the thread, and a Before cursor at the root
-// is the end of the history.
-func TestSlackReadHistoryThreadRoot(t *testing.T) {
+func TestSlackReadHistoryRequest(t *testing.T) {
 	t.Parallel()
 
 	opts := slack.Options{
@@ -214,83 +123,180 @@ func TestSlackReadHistoryThreadRoot(t *testing.T) {
 		BotUserID:     "UBOT",
 		BotID:         "BBOT",
 	}
-	id := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "111.000")
+	thread := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "111.000")
+	cases := []struct {
+		name       string
+		id         chat.ThreadID
+		query      chat.HistoryQuery
+		wantMethod string
+		wantForm   url.Values
+	}{
+		{
+			name:       "replies",
+			id:         thread,
+			query:      chat.HistoryQuery{Limit: 20},
+			wantMethod: "conversations.replies",
+			wantForm:   url.Values{"channel": {"C1"}, "ts": {"111.000"}, "limit": {"20"}},
+		},
+		{
+			name:       "default limit",
+			id:         thread,
+			query:      chat.HistoryQuery{},
+			wantMethod: "conversations.replies",
+			wantForm:   url.Values{"channel": {"C1"}, "ts": {"111.000"}, "limit": {"100"}},
+		},
+		{
+			name:       "negative limit",
+			id:         thread,
+			query:      chat.HistoryQuery{Limit: -3},
+			wantMethod: "conversations.replies",
+			wantForm:   url.Values{"channel": {"C1"}, "ts": {"111.000"}, "limit": {"100"}},
+		},
+		{
+			name:       "clamped limit",
+			id:         thread,
+			query:      chat.HistoryQuery{Limit: 5000},
+			wantMethod: "conversations.replies",
+			wantForm:   url.Values{"channel": {"C1"}, "ts": {"111.000"}, "limit": {"1000"}},
+		},
+		{
+			name:       "before",
+			id:         thread,
+			query:      chat.HistoryQuery{Before: "115.000"},
+			wantMethod: "conversations.replies",
+			wantForm:   url.Values{"channel": {"C1"}, "ts": {"111.000"}, "latest": {"115.000"}, "limit": {"100"}},
+		},
+		{
+			name:       "direct",
+			id:         slack.EncodeDirectThreadIDForTest("T1", "D1"),
+			query:      chat.HistoryQuery{},
+			wantMethod: "conversations.history",
+			wantForm:   url.Values{"channel": {"D1"}, "limit": {"100"}},
+		},
+		{
+			name:       "direct, before, clamped limit",
+			id:         slack.EncodeDirectThreadIDForTest("T1", "D1"),
+			query:      chat.HistoryQuery{Limit: 9000, Before: "222.000"},
+			wantMethod: "conversations.history",
+			wantForm:   url.Values{"channel": {"D1"}, "latest": {"222.000"}, "limit": {"1000"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 
-	t.Run("older replies remain", func(t *testing.T) {
-		t.Parallel()
-
-		api := newSlackAPIServer(t)
-		api.historyResp = map[string]any{
-			"ok":       true,
-			"has_more": true,
-			"messages": []any{
-				map[string]any{"type": "message", "user": "U1", "text": "root", "ts": "111.000", "thread_ts": "111.000"},
-				map[string]any{"type": "message", "user": "U2", "text": "R4", "ts": "114.000", "thread_ts": "111.000"},
-				map[string]any{"type": "message", "user": "U2", "text": "R5", "ts": "115.000", "thread_ts": "111.000"},
-			},
-		}
-		hr := historyReader(t, newSlackRuntime(t, api, opts))
-
-		msgs, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Limit: 2})
-		if err != nil {
-			t.Fatalf("read history: %v", err)
-		}
-		var ids []string
-		for _, msg := range msgs {
-			ids = append(ids, msg.ID)
-		}
-		if want := []string{"115.000", "114.000"}; !slices.Equal(ids, want) {
-			t.Fatalf("message IDs = %v, want %v", ids, want)
-		}
-	})
-
-	t.Run("before the root", func(t *testing.T) {
-		t.Parallel()
-
-		api := newSlackAPIServer(t)
-		hr := historyReader(t, newSlackRuntime(t, api, opts))
-
-		msgs, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{Before: "111.000"})
-		if err != nil {
-			t.Fatalf("read history: %v", err)
-		}
-		if len(msgs) != 0 || len(api.historyReqs) != 0 {
-			t.Fatalf("messages = %d, requests = %d, want an empty page without a request", len(msgs), len(api.historyReqs))
-		}
-	})
+			api := newSlackAPIServer(t)
+			hr := historyReader(t, newSlackRuntime(t, api, opts))
+			if _, err := hr.ReadHistory(context.Background(), tc.id, tc.query); err != nil {
+				t.Fatalf("read history: %v", err)
+			}
+			if len(api.historyReqs) != 1 {
+				t.Fatalf("history requests = %d, want 1", len(api.historyReqs))
+			}
+			req := api.historyReqs[0]
+			if req.Method != tc.wantMethod || !reflect.DeepEqual(req.Form, tc.wantForm) {
+				t.Fatalf("request = %s %v, want %s %v", req.Method, req.Form, tc.wantMethod, tc.wantForm)
+			}
+		})
+	}
 }
 
-// A direct-message Thread ID reads conversations.history, not conversations.replies.
-func TestSlackReadHistoryDirectUsesHistory(t *testing.T) {
+func TestSlackReadHistoryPagesNewestFirst(t *testing.T) {
 	t.Parallel()
 
-	api := newSlackAPIServer(t)
-	bot := newSlackRuntime(t, api, slack.Options{
+	opts := slack.Options{
 		SigningSecret: "secret",
 		BotToken:      "xoxb-test",
 		TeamID:        "T1",
 		BotUserID:     "UBOT",
 		BotID:         "BBOT",
-	})
-	hr := historyReader(t, bot)
-	id := slack.EncodeDirectThreadIDForTest("T1", "D1")
-	if _, err := hr.ReadHistory(context.Background(), id, chat.HistoryQuery{}); err != nil {
-		t.Fatalf("read history: %v", err)
 	}
-	req := api.historyReqs[0]
-	if req.Method != "/conversations.history" {
-		t.Fatalf("method = %q, want conversations.history", req.Method)
+	thread := slack.EncodeThreadReplyThreadIDForTest("T1", "C1", "100.000")
+	conversation := func(first, last int) []map[string]any {
+		var msgs []map[string]any
+		for i := first; i <= last; i++ {
+			msgs = append(msgs, map[string]any{"type": "message", "user": "U1", "text": "m", "ts": fmt.Sprintf("%d.000", i)})
+		}
+		return msgs
 	}
-	if req.Channel != "D1" {
-		t.Fatalf("channel = %q, want D1", req.Channel)
+	newestFirst := func(newest, oldest int) []string {
+		var ids []string
+		for i := newest; i >= oldest; i-- {
+			ids = append(ids, fmt.Sprintf("%d.000", i))
+		}
+		return ids
 	}
-	if req.TS != "" {
-		t.Fatalf("history request carried ts = %q, want empty", req.TS)
+	cases := []struct {
+		name       string
+		id         chat.ThreadID
+		messages   []map[string]any
+		wantIDs    []string
+		wantLatest []string
+	}{
+		{
+			name:       "replies, short last page",
+			id:         thread,
+			messages:   conversation(100, 107),
+			wantIDs:    newestFirst(107, 100),
+			wantLatest: []string{"", "105.000", "102.000"},
+		},
+		{
+			name:       "replies, full last page",
+			id:         thread,
+			messages:   conversation(100, 106),
+			wantIDs:    newestFirst(106, 100),
+			wantLatest: []string{"", "104.000"},
+		},
+		{
+			name:       "direct",
+			id:         slack.EncodeDirectThreadIDForTest("T1", "D1"),
+			messages:   conversation(101, 107),
+			wantIDs:    newestFirst(107, 101),
+			wantLatest: []string{"", "105.000", "102.000", "101.000"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			api := newSlackAPIServer(t)
+			api.historyMessages = tc.messages
+			hr := historyReader(t, newSlackRuntime(t, api, opts))
+
+			var ids []string
+			var before string
+			for pages := 0; ; pages++ {
+				if pages == 10 {
+					t.Fatalf("no empty page after %d pages, IDs so far %v", pages, ids)
+				}
+				msgs, err := hr.ReadHistory(context.Background(), tc.id, chat.HistoryQuery{Limit: 3, Before: before})
+				if err != nil {
+					t.Fatalf("read history page %d: %v", pages, err)
+				}
+				if len(msgs) == 0 {
+					break
+				}
+				for _, msg := range msgs {
+					ids = append(ids, msg.ID)
+				}
+				before = msgs[len(msgs)-1].ID
+			}
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Fatalf("message IDs = %v, want %v", ids, tc.wantIDs)
+			}
+			var latest []string
+			for _, req := range api.historyReqs {
+				latest = append(latest, req.Form.Get("latest"))
+			}
+			if !slices.Equal(latest, tc.wantLatest) {
+				t.Fatalf("latest per request = %q, want %q", latest, tc.wantLatest)
+			}
+		})
 	}
 }
 
 // A cancelled context aborts the platform read promptly (the read never outlives the
-// caller's deadline). callWithToken threads ctx into the HTTP request.
+// caller's deadline).
 func TestSlackReadHistoryContextCancellation(t *testing.T) {
 	t.Parallel()
 
@@ -333,7 +339,7 @@ func TestSlackReadHistoryAPIErrorSurfaces(t *testing.T) {
 	t.Parallel()
 
 	api := newSlackAPIServer(t)
-	api.historyResp = map[string]any{"ok": false, "error": "channel_not_found"}
+	api.historyError = "channel_not_found"
 	bot := newSlackRuntime(t, api, slack.Options{
 		SigningSecret: "secret",
 		BotToken:      "xoxb-test",
