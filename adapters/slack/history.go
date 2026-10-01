@@ -2,9 +2,10 @@ package slack
 
 import (
 	"context"
-	"fmt"
+	"slices"
 
 	"github.com/coder/chat"
+	"github.com/coder/chat/adapters/slack/slackapi"
 )
 
 // Compile-time assertion that the Slack adapter is the first HistoryReader
@@ -27,11 +28,16 @@ const (
 // summaries, RAG corpora) is Thread Application State, owned by the application in
 // its own storage keyed by Thread ID; this method is a thin live read-through only.
 //
-// Ordering and pagination are adapter-owned (Slack's read APIs are newest-first):
-//   - Messages are returned newest-first, as Slack returns them.
+// Ordering and pagination are adapter-owned:
+//   - Messages are returned newest-first. conversations.history is newest-first;
+//     conversations.replies is oldest-first and puts the thread root at the start
+//     of every page, so ReadHistory reverses the replies and returns the root only
+//     on the page that reaches the start of the thread. That page may carry up to
+//     Limit+1 messages.
 //   - HistoryQuery.Before is a Message.ID (a Slack ts) returned by a prior page; it
 //     pages toward older messages. It maps to Slack's latest=<ts> with
-//     inclusive=false, so the cursor message itself is excluded.
+//     inclusive=false, so the cursor message itself is excluded. A Before cursor
+//     at the thread root returns an empty page without a Slack call.
 //   - HistoryQuery.Limit is clamped to Slack's maximum page size (1000) and defaults
 //     to 100 when Limit <= 0.
 //
@@ -47,9 +53,10 @@ const (
 // the platform bot_id rather than the canonical per-install bot user id (inbound
 // normalization rewrites that only because the webhook envelope carries it).
 //
-// Outbound calls reuse the adapter's shared callWithToken seam, so this read
-// inherits the Observation Hook (ObsAdapterCall / ObsRateLimit), the per-tenant
-// token resolution (postToken), and context-bounded cancellation/backoff. The
+// The read goes through the adapter's slackapi client (ConversationReplies and
+// ConversationHistory), so it inherits the Observation Hook (ObsAdapterCall /
+// ObsRateLimit), the per-tenant token resolution (postToken), and
+// context-bounded cancellation/backoff. The
 // caller's context.Context bounds the read; when history must be fetched during long
 // handler work, the application runs this after ack via the Ack-Then-Work /
 // Detached Work Context seam. ReadHistory is never invoked on the inbound dispatch
@@ -72,56 +79,65 @@ func (a *Adapter) ReadHistory(ctx context.Context, id chat.ThreadID, q chat.Hist
 		limit = slackMaxHistoryLimit
 	}
 
-	// A thread-rooted Thread ID reads the thread's replies; a direct message reads
-	// the channel history. Both share one request shape (TS is empty, hence omitted,
-	// for the history path); inclusive defaults to false so the Before cursor excludes
+	// A direct message reads the channel history; a thread-rooted Thread ID reads
+	// the thread's replies. Inclusive stays false so the Before cursor excludes
 	// itself.
-	req := conversationsReadPayload{
-		Channel: payload.Channel,
-		Limit:   limit,
-		Latest:  q.Before,
-	}
-	method := "conversations.history"
-	if !payload.Direct && payload.Root != "" {
-		method = "conversations.replies"
-		req.TS = payload.Root
+	api := a.api.WithToken(token)
+	var page []slackapi.Message
+	if payload.Direct {
+		history, err := api.ConversationHistory(ctx, slackapi.ConversationHistoryRequest{
+			Channel: payload.Channel,
+			Latest:  q.Before,
+			Limit:   limit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		page = history.Messages
+	} else {
+		if q.Before == payload.Root {
+			return []chat.Message{}, nil
+		}
+		replies, err := api.ConversationReplies(ctx, slackapi.ConversationRepliesRequest{
+			Channel: payload.Channel,
+			TS:      payload.Root,
+			Latest:  q.Before,
+			Limit:   limit,
+		})
+		if err != nil {
+			return nil, err
+		}
+		page = newestFirstReplies(replies, payload.Root)
 	}
 
-	var resp conversationsHistoryResponse
-	if err := a.callWithToken(ctx, token, method, req, &resp); err != nil {
-		return nil, err
-	}
-	if !resp.OK {
-		return nil, fmt.Errorf("slack: %s failed: %s", method, resp.Error)
-	}
-
-	messages := make([]chat.Message, 0, len(resp.Messages))
-	for _, ev := range resp.Messages {
+	messages := make([]chat.Message, 0, len(page))
+	for _, msg := range page {
+		author := slackEvent{Subtype: msg.Subtype, User: msg.User, BotID: msg.BotID}
 		messages = append(messages, chat.Message{
-			ID:     ev.TS,
-			Text:   ev.Text,
-			Author: a.actorForEvent(payload.Team, ev, a.botUserID),
-			Raw:    ev.Raw,
+			ID:     msg.TS,
+			Text:   msg.Text,
+			Author: a.actorForEvent(payload.Team, author, a.botUserID),
+			Raw:    msg.Raw,
 		})
 	}
 	return messages, nil
 }
 
-// conversationsReadPayload is the shared request shape for conversations.history
-// and conversations.replies. TS is set only for the threaded (replies) read.
-type conversationsReadPayload struct {
-	Channel   string `json:"channel"`
-	TS        string `json:"ts,omitempty"`
-	Limit     int    `json:"limit,omitzero"`
-	Latest    string `json:"latest,omitempty"`
-	Inclusive bool   `json:"inclusive,omitzero"`
-}
-
-type conversationsHistoryResponse struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
-	// Messages decode into slackEvent so history normalization reuses the inbound
-	// actor mapping (actorForEvent) and the per-message Raw capture (Platform Escape
-	// Hatch) instead of duplicating the message shape.
-	Messages []slackEvent `json:"messages"`
+// newestFirstReplies returns the messages of a conversations.replies page
+// newest-first. Slack returns the page oldest-first with the thread root at the
+// start of every page, so the root is kept only when no older replies remain.
+func newestFirstReplies(page *slackapi.MessagePage, root string) []slackapi.Message {
+	messages := make([]slackapi.Message, 0, len(page.Messages))
+	var rootMessage *slackapi.Message
+	for _, msg := range slices.Backward(page.Messages) {
+		if msg.TS == root {
+			rootMessage = &msg
+			continue
+		}
+		messages = append(messages, msg)
+	}
+	if rootMessage != nil && !page.HasMore {
+		messages = append(messages, *rootMessage)
+	}
+	return messages
 }

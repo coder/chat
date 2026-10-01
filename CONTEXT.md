@@ -234,6 +234,10 @@ _Avoid_: Raw-first API, parser type contract
 An explicit typed helper path for retrieving a registered **Platform Adapter** when application code needs platform-specific APIs.
 _Avoid_: Unchecked type assertion in examples
 
+**Slack API Package**:
+The low-level `slackapi` package of Slack Web API calls, request verification, Events API parsing, and Slack data formats on raw Slack IDs, for applications that own their runtime; the Slack **Platform Adapter** uses it, and it has no runtime, state, dispatch, or policy.
+_Avoid_: Slack adapter, portable surface, complete Slack SDK
+
 **Agent Activity Thought**:
 A Linear app-actor output that acknowledges the agent is working without serving as the final response.
 _Avoid_: Typing indicator, final response, generic status update

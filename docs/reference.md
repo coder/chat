@@ -12,6 +12,8 @@ supports, and the runnable examples.
 | --- | --- | --- |
 | `github.com/coder/chat` | core | [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat) |
 | `github.com/coder/chat/adapters/slack` | core | [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat/adapters/slack) |
+| `github.com/coder/chat/adapters/slack/slackapi` | core | [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat/adapters/slack/slackapi) |
+| `github.com/coder/chat/adapters/slack/slackapi/slackapitest` | core | [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat/adapters/slack/slackapi/slackapitest) |
 | `github.com/coder/chat/adapters/linear` | core | [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat/adapters/linear) |
 | `github.com/coder/chat/state/memory` | core | [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat/state/memory) |
 | `github.com/coder/chat/state/redis` | separate | [pkg.go.dev](https://pkg.go.dev/github.com/coder/chat/state/redis) |
@@ -45,6 +47,9 @@ go doc github.com/coder/chat/adapters/slack
   `ErrInstallNotFound`) plus `slack.SlackInstall` / `linear.LinearInstall`.
 - **State contract**: package `chat` (`State`) with implementations in the
   four `state/*` packages.
+- **Slack without the runtime**: package `slackapi` (`slackapi.New`,
+  `VerifyRequest`, `ParseEnvelope`) and its test helper `slackapitest`; see
+  [Slack API Package](#slack-api-package).
 
 ## Core Model
 
@@ -372,6 +377,8 @@ field rather than converting CommonMark to `mrkdwn` itself.
 
 Posting returns the `SentMessage` identity. Edit, delete, reactions, files,
 and typed rich payload builders are outside the portable surface.
+Slack-only applications that own their runtime can call those Slack methods
+directly through the [`slackapi`](#slack-api-package) package.
 Platform-native content and Slack modal opening are reachable deliberately
 through typed adapter access (see
 [Command And Interaction Events](#command-and-interaction-events)).
@@ -539,7 +546,9 @@ The Slack adapter (`adapters/slack`) is the `supported` adapter. It covers:
 The adapter uses local structs for the Slack payload shapes it supports,
 preserves raw payload data as an escape hatch, and validates required fields
 for supported event types. It is not a complete Slack product surface; see
-[Intentional Gaps](explanation.md#intentional-gaps).
+[Intentional Gaps](explanation.md#intentional-gaps). Its Web API calls,
+rate-limit retry, and signature check go through the
+[`slackapi`](#slack-api-package) package.
 
 ### Linear Adapter
 
@@ -580,6 +589,141 @@ and platform-specific behavior is exposed through narrow methods rather than
 a raw Linear client. The [Linear agent sessions guide](how-to/linear-agent-sessions.md)
 walks through building an agent; the tracked list of Linear agent APIs not
 yet wrapped is in [linear-agent-capabilities.md](linear-agent-capabilities.md).
+
+## Slack API Package
+
+`adapters/slack/slackapi` is a low-level Slack package for applications that
+own their runtime (their own state, dispatch, and routing) and so do not use
+`chat.New`. It works on raw Slack IDs and holds Slack protocol and data
+formats only: it has no runtime, state, dispatch, or policy. The Slack
+adapter uses it for its Web API calls, retry, signature check, and history
+reads ([ADR 0016](adr/0016-slack-api-package.md)).
+
+`slackapi` and `slackapitest` are `experimental`: their exported API may
+change before they are promoted to supported. `RetryPolicy` and
+`RateLimited` keep the Slack adapter's `supported` tier, because the adapter
+exports them as type aliases.
+
+```go
+client := slackapi.New(slackapi.Options{Token: botToken})
+resp, err := client.PostMessage(ctx, slackapi.PostMessageRequest{
+	Channel:  "C123",
+	ThreadTS: "1700000000.000001",
+	Text:     "Build finished",
+})
+```
+
+The table shows what `New` does with each empty `Options` field. A `Client`
+is safe for concurrent use, and `WithToken` returns a copy that sends another
+token.
+
+| Option | Empty value |
+| --- | --- |
+| `Token` | No `Authorization` header. |
+| `BaseURL` | `DefaultBaseURL` (`https://slack.com/api`). A trailing slash is removed. |
+| `HTTPClient` | `http.DefaultClient`. |
+| `RetryPolicy` | 3 attempts, 2s of total backoff, 200ms base delay, 1s maximum delay. `MaxAttempts: 1` disables retry. |
+| `FileOrigins` | `https://files.slack.com` and `https://slack.com`. Entries become lowercase `scheme://host` without the default port of the scheme; an entry that is not an absolute URL is dropped with a warning to `Logger`. |
+| `Observer` | No-op. Receives `ObsAdapterCall` for every attempt and `ObsRateLimit` for every throttled response. |
+| `Logger` | Discards. Receives a warning for every throttled response and every dropped `FileOrigins` entry. |
+
+The client methods and how each one sends its request:
+
+| Method | Slack call | Request |
+| --- | --- | --- |
+| `AuthTest` | `auth.test` | JSON |
+| `PostMessage`, `UpdateMessage`, `DeleteMessage` | `chat.postMessage`, `chat.update`, `chat.delete` | JSON |
+| `SetAssistantThreadStatus` | `assistant.threads.setStatus` | JSON |
+| `AddReaction`, `RemoveReaction` | `reactions.add`, `reactions.remove` | JSON |
+| `UserInfo` | `users.info` | form |
+| `ConversationInfo` | `conversations.info` | form |
+| `ConversationHistory`, `ConversationReplies` | `conversations.history`, `conversations.replies` | form; one `MessagePage` per call, send `NextCursor` as `Cursor` for the next page |
+| `GetUploadURLExternal` | `files.getUploadURLExternal` | form |
+| `UploadToURL` | the `upload_url` from `GetUploadURLExternal` | raw bytes, no token |
+| `CompleteUploadExternal` | `files.completeUploadExternal` | JSON |
+| `UploadFile` | the three upload steps above, in order | as above |
+| `DownloadFile` | a file URL such as `url_private_download` | GET, no retry |
+| `Call` | any Web API method (the escape hatch) | form for a `url.Values` payload, else JSON |
+| `PostResponseURL` | the `response_url` of a command or an interaction | JSON, no token |
+
+Requests are POSTs with the bearer token unless the table says otherwise.
+Slack documents `users.info`, `conversations.info`, `conversations.history`,
+`conversations.replies`, and `files.getUploadURLExternal` as GET or form-only
+methods, so the client sends them form encoded. Every method except
+`DownloadFile` retries Slack throttling (HTTP 429, or the error code
+`ratelimited` or `rate_limited`) within the `RetryPolicy`. It honors
+`Retry-After` up to `MaxDelay` and never sleeps past the context deadline
+([ADR 0005](adr/0005-rate-limit-handling.md)).
+
+`UploadToURL` and `DownloadFile` accept only URLs whose origin is in
+`Options.FileOrigins`, and both check every redirect too. `DownloadFile` sends
+the bearer token on every allowed redirect; `UploadToURL` never sends it.
+`UploadToURL` rejects a 301, 302, or 303 redirect, because `net/http` follows
+it with a `GET` that has no content. `DownloadFile` writes at most `maxBytes`,
+which must be positive. A bad token, or a token without the `files:read`
+scope, makes Slack redirect to the workspace sign-in page, whose origin is not
+in the default `Options.FileOrigins`. `DownloadFile` also rejects a
+`text/html` response, because Slack serves stored files, HTML files too, as
+`application/force-download`, so an HTML response is a sign-in or error page.
+
+Errors:
+
+- `*APIError`: Slack rejected the call. For an `ok:false` response, `Code`
+  holds the Slack error code and the text is
+  `slack: <method> failed: <code>`. For a non-2xx status, `Code` is empty and
+  the text is `slack: <method> status <status>`.
+  `Detail` holds the missing scope or the `response_metadata` messages, and
+  `Raw` holds the response body.
+- `*RateLimited`: throttling continued after the last attempt, or the next
+  wait would pass `MaxElapsed` or the context deadline. It carries the last
+  `Retry-After`, the attempt count, and the raw response.
+- `ErrFileTooLarge`: `DownloadFile` wraps it when the file is larger than
+  `maxBytes`.
+- `UploadFile` names the failed step and wraps its error, so `errors.As` still
+  finds `*APIError` and `*RateLimited`.
+
+Inbound requests:
+
+- `VerifyRequest(header, body, secret, now, tolerance)` checks the Slack v0
+  signature. It rejects an empty secret. A tolerance of zero or less uses
+  `DefaultSignatureTolerance` (5 minutes).
+- `ParseEnvelope(body)` decodes an Events API request body. It does not
+  verify the signature. Answer an `EnvelopeURLVerification` envelope with its
+  `Challenge`.
+- `(*Envelope).MessageEvent()` decodes an `app_mention` or `message` event
+  with any subtype, and returns false for other envelopes and events. For
+  `message_changed` and `message_deleted`, `NewMessage` and
+  `PreviousMessage` hold the changed message.
+
+Formats:
+
+- Block Kit: the `Block` interface, `MarkdownBlock`, `ActionsBlock` with
+  `ButtonElement`, and `ImageBlock`. Any type that implements `Block` and
+  encodes itself as a Block Kit object can go in a `[]Block`.
+- `SplitMarkdown(text, limit)` splits text into chunks of at most `limit`
+  runes (zero or less means `MarkdownBlockLimit`, 12,000) at blank lines,
+  newlines, or spaces. When the limit leaves room, it closes and reopens a
+  fenced code block across chunks. It does not convert Markdown. Slack
+  applies the 12,000 limit to all the `markdown` blocks of one message
+  together, so post each chunk as its own message.
+- `UserMentions(text)` returns the user IDs of `<@U123>` and `<@U123|label>`
+  mentions. `ReplaceUserMentions(text, name)` replaces each mention with `@`
+  and the name that `name` returns.
+- `Manifest` and its section types encode a Slack app manifest for a bot app.
+
+### Testing With slackapitest
+
+`slackapitest.NewServer(t)` starts a fake Slack Web API and closes it when
+the test ends. Point `Options.BaseURL` at `Server.URL()` and
+`Options.HTTPClient` at `Server.Client()`. Set responses with `Respond` or
+`Handle`; return a `slackapitest.Response` to set the status and headers, for
+example a 429 with `Retry-After`. Read the requests with `Calls`. A call to a
+method with no response fails the test.
+
+For files, add `Server.FileOrigin()` to `Options.FileOrigins`, return
+`Server.UploadURL(fileID)` from `files.getUploadURLExternal`, serve downloads
+with `ServeFile` or `HandleFile`, and read the requests with `FileRequests`.
+`SignRequest` signs a request so that `VerifyRequest` accepts it.
 
 ## Examples
 
