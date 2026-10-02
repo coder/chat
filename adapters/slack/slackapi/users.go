@@ -24,6 +24,11 @@ type User struct {
 	// IsStranger is true when the user is in an external workspace that shares
 	// a channel with this workspace.
 	IsStranger bool `json:"is_stranger,omitzero"`
+	// IsRestricted is true when the user is a guest: a multi-channel guest,
+	// or a single-channel guest when IsUltraRestricted is also true.
+	IsRestricted bool `json:"is_restricted,omitzero"`
+	// IsUltraRestricted is true when the user is a single-channel guest.
+	IsUltraRestricted bool `json:"is_ultra_restricted,omitzero"`
 	// TZ is the IANA time zone of the user, for example "America/New_York".
 	TZ string `json:"tz,omitempty"`
 	// Locale is the locale of the user, for example "en-US". Slack sends it

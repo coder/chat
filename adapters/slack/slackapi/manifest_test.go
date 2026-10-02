@@ -17,6 +17,7 @@ const formatsManifestJSON = `{
     "background_color": "#1F2937"
   },
   "features": {
+    "app_home": {"home_tab_enabled": false, "messages_tab_enabled": false, "messages_tab_read_only_enabled": false},
     "bot_user": {"display_name": "coder", "always_online": true}
   },
   "oauth_config": {
@@ -47,6 +48,7 @@ func formatsManifest() slackapi.Manifest {
 			BackgroundColor: "#1F2937",
 		},
 		Features: &slackapi.ManifestFeatures{
+			AppHome: &slackapi.ManifestAppHome{},
 			BotUser: &slackapi.ManifestBotUser{DisplayName: "coder", AlwaysOnline: true},
 		},
 		OAuthConfig: &slackapi.ManifestOAuthConfig{

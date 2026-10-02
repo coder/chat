@@ -15,6 +15,12 @@ type Message struct {
 	User string `json:"user,omitempty"`
 	// BotID is the ID of the bot that sent the message.
 	BotID string `json:"bot_id,omitempty"`
+	// Username is the name that a bot message shows instead of a user name.
+	// It is usually set only on a SubtypeBotMessage message.
+	Username string `json:"username,omitempty"`
+	// BotProfile is the profile of the app that sent the message. It is set
+	// only on a message from an app or a bot.
+	BotProfile *BotProfile `json:"bot_profile,omitempty"`
 	// Text is the message text in Slack mrkdwn.
 	Text string `json:"text,omitempty"`
 	// TS is the message timestamp, which is also the message ID in its
@@ -25,6 +31,12 @@ type Message struct {
 	ThreadTS string `json:"thread_ts,omitempty"`
 	// Team is the ID of the workspace of the sender.
 	Team string `json:"team,omitempty"`
+	// UserTeam is the ID of the workspace of the user who sent the message.
+	// In a channel that is shared with another organization, it differs from
+	// the workspace of the app for a user from the other organization.
+	UserTeam string `json:"user_team,omitempty"`
+	// SourceTeam is the ID of the workspace where the message was sent.
+	SourceTeam string `json:"source_team,omitempty"`
 	// Files are the files attached to the message.
 	Files []File `json:"files,omitempty"`
 	// Edited is set when the message was edited.
@@ -34,6 +46,14 @@ type Message struct {
 	// ConversationReplies set it. For an event, Envelope.Event holds the raw
 	// JSON instead.
 	Raw json.RawMessage `json:"-"`
+}
+
+// BotProfile is the profile of the app that sent a Message.
+type BotProfile struct {
+	// ID is the bot ID, the same as Message.BotID.
+	ID string `json:"id,omitempty"`
+	// Name is the name of the app.
+	Name string `json:"name,omitempty"`
 }
 
 // Edited records the last edit of a Message.

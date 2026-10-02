@@ -21,6 +21,8 @@ func TestMessageDecodesRepliesMessage(t *testing.T) {
 		"thread_ts": "1700000000.000100",
 		"parent_user_id": "U061F7AUR",
 		"team": "T0001",
+		"user_team": "T0001",
+		"source_team": "T0002",
 		"blocks": [{"type": "rich_text", "block_id": "x9Y8z", "elements": []}],
 		"files": [{
 			"id": "F0FILE1234",
@@ -45,13 +47,15 @@ func TestMessageDecodesRepliesMessage(t *testing.T) {
 		t.Fatalf("unmarshal message: %v", err)
 	}
 	want := slackapi.Message{
-		Type:     "message",
-		Subtype:  slackapi.SubtypeFileShare,
-		User:     "U061F7AUR",
-		Text:     "here is the log, see line 12",
-		TS:       "1700000300.000400",
-		ThreadTS: "1700000000.000100",
-		Team:     "T0001",
+		Type:       "message",
+		Subtype:    slackapi.SubtypeFileShare,
+		User:       "U061F7AUR",
+		Text:       "here is the log, see line 12",
+		TS:         "1700000300.000400",
+		ThreadTS:   "1700000000.000100",
+		Team:       "T0001",
+		UserTeam:   "T0001",
+		SourceTeam: "T0002",
 		Files: []slackapi.File{{
 			ID:                 "F0FILE1234",
 			Name:               "build.log",
@@ -71,7 +75,7 @@ func TestMessageDecodesRepliesMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal message: %v", err)
 	}
-	const wantJSON = `{"type":"message","subtype":"file_share","user":"U061F7AUR","text":"here is the log, see line 12","ts":"1700000300.000400","thread_ts":"1700000000.000100","team":"T0001","files":[{"id":"F0FILE1234","name":"build.log","title":"build.log","mimetype":"text/plain","filetype":"text","size":2048,"url_private_download":"https://files.slack.com/files-pri/T0001-F0FILE1234/download/build.log"}],"edited":{"user":"U061F7AUR","ts":"1700000350.000000"}}`
+	const wantJSON = `{"type":"message","subtype":"file_share","user":"U061F7AUR","text":"here is the log, see line 12","ts":"1700000300.000400","thread_ts":"1700000000.000100","team":"T0001","user_team":"T0001","source_team":"T0002","files":[{"id":"F0FILE1234","name":"build.log","title":"build.log","mimetype":"text/plain","filetype":"text","size":2048,"url_private_download":"https://files.slack.com/files-pri/T0001-F0FILE1234/download/build.log"}],"edited":{"user":"U061F7AUR","ts":"1700000350.000000"}}`
 	if string(encoded) != wantJSON {
 		t.Fatalf("marshal mismatch\ngot:  %s\nwant: %s", encoded, wantJSON)
 	}

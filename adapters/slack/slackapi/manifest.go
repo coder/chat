@@ -41,8 +41,22 @@ type ManifestDisplayInformation struct {
 
 // ManifestFeatures is the features section of a Manifest.
 type ManifestFeatures struct {
+	// AppHome is the optional app_home section.
+	AppHome *ManifestAppHome `json:"app_home,omitempty"`
 	// BotUser is the optional bot_user section.
 	BotUser *ManifestBotUser `json:"bot_user,omitempty"`
+}
+
+// ManifestAppHome is the features.app_home section of a Manifest.
+type ManifestAppHome struct {
+	// HomeTabEnabled shows the Home tab of the app.
+	HomeTabEnabled bool `json:"home_tab_enabled"`
+	// MessagesTabEnabled shows the Messages tab of the app, where users can
+	// send direct messages to the bot. When it is false, Slack blocks direct
+	// messages to the bot.
+	MessagesTabEnabled bool `json:"messages_tab_enabled"`
+	// MessagesTabReadOnlyEnabled makes the Messages tab read-only.
+	MessagesTabReadOnlyEnabled bool `json:"messages_tab_read_only_enabled"`
 }
 
 // ManifestBotUser is the features.bot_user section of a Manifest.
