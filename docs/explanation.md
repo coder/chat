@@ -137,16 +137,21 @@ API shape:
 
 Messages and content:
 
-- no edit, delete, reaction, or other outbound mutation APIs beyond what a
-  native interaction response needs
-- no JSX cards, files, or typed Block Kit / Adaptive Card payload builders
-  (native Block Kit content ships as an opaque payload via
-  `NativeContentPoster`)
+- no edit, delete, reaction, or other outbound mutation APIs in the portable
+  surface beyond what a native interaction response needs
+- no JSX cards, files, or typed Block Kit / Adaptive Card payload builders in
+  the portable surface (native Block Kit content ships as an opaque payload
+  via `NativeContentPoster`)
 - no Slack shortcuts or Block Kit workflow steps (`block_actions` buttons and
   menus are routed as Interaction Events)
 - no synchronous modal `view_submission` response (modal open via
   `views.open` ships; the synchronous `response_action` is incompatible with
   ack-then-work and is deferred)
+
+Slack-only applications that own their runtime can call Slack's edit,
+delete, reaction, and file methods through the low-level
+[`slackapi`](reference.md#slack-api-package) package
+([ADR 0016](adr/0016-slack-api-package.md)).
 
 State and history:
 
@@ -202,3 +207,4 @@ Operations:
 | [0013](adr/0013-linear-generic-comments.md) | Linear generic issue/comment participation | Accepted |
 | [0014](adr/0014-nats-state-adapter.md) | NATS JetStream state adapter | Accepted |
 | [0015](adr/0015-runtime-coordination.md) | Deferred-dispatch admission bound; cross-instance coalescing rejected for now | Accepted |
+| [0016](adr/0016-slack-api-package.md) | Low-level `slackapi` package for applications that own their runtime; the Slack adapter builds on it and the portable surface does not grow | Accepted |

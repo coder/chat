@@ -1,7 +1,6 @@
 package slack
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,19 +11,6 @@ import (
 
 	"github.com/coder/chat"
 )
-
-// noopObserver is the adapter's default Observer when none is configured.
-type noopObserver struct{}
-
-func (noopObserver) Event(context.Context, chat.ObservationName, ...chat.Attr) {}
-
-func (noopObserver) Dispatch(ctx context.Context, _ ...chat.Attr) (context.Context, chat.DispatchSpan) {
-	return ctx, noopSpan{}
-}
-
-type noopSpan struct{}
-
-func (noopSpan) End(chat.DispatchOutcome, ...chat.Attr) {}
 
 // Compile-time assertions for the Optional Capabilities reached via Adapter Access.
 var (
@@ -386,9 +372,6 @@ func (a *Adapter) PostNative(ctx context.Context, thread chat.ThreadRef, content
 	if err := a.callWithToken(ctx, token, "chat.postMessage", payload, &resp); err != nil {
 		return nil, err
 	}
-	if !resp.OK {
-		return nil, fmt.Errorf("slack: chat.postMessage failed: %s", resp.Error)
-	}
 	return &chat.SentMessage{ID: resp.TS, ThreadID: thread.ID, Raw: resp}, nil
 }
 
@@ -431,13 +414,7 @@ func (a *Adapter) OpenModalForTenant(ctx context.Context, tenant string, trigger
 
 func (a *Adapter) openModalWithToken(ctx context.Context, token string, triggerID string, view any) error {
 	var resp openViewResponse
-	if err := a.callWithToken(ctx, token, "views.open", openViewPayload{TriggerID: triggerID, View: view}, &resp); err != nil {
-		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("slack: views.open failed: %s", resp.Error)
-	}
-	return nil
+	return a.callWithToken(ctx, token, "views.open", openViewPayload{TriggerID: triggerID, View: view}, &resp)
 }
 
 // OpenModalFromRaw opens a modal using the trigger_id preserved on a Command or
@@ -478,25 +455,16 @@ func (a *Adapter) RespondURL(ctx context.Context, raw any, msg chat.PostableMess
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(responseURLPayload{
+	// The response_url is a pre-authorized webhook returning a plain 200/429, so it
+	// shares the bounded rate-limit retry seam (ADR 0005): a 429 with Retry-After is
+	// retried within the RetryPolicy and surfaces as a typed *RateLimited on
+	// exhaustion, with no JSON envelope to decode.
+	return a.api.PostResponseURL(ctx, responseURL, responseURLPayload{
 		Text:         fields.Text,
 		MarkdownText: fields.MarkdownText,
 		Mrkdwn:       fields.Mrkdwn,
 		ResponseType: "ephemeral",
 	})
-	if err != nil {
-		return fmt.Errorf("slack: encode response_url body: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, responseURL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	// The response_url is a pre-authorized webhook returning a plain 200/429, so it
-	// shares the bounded rate-limit retry seam (ADR 0005) with a nil dest: a 429 with
-	// Retry-After is retried within the RetryPolicy and surfaces as a typed
-	// *RateLimited on exhaustion, with no JSON envelope to decode.
-	return a.doWithRetry(ctx, "response_url", req, nil)
 }
 
 // responseURLFromRaw extracts the preserved response_url from a Command.Raw or
