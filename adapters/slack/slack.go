@@ -1,12 +1,8 @@
 package slack
 
 import (
-	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,11 +11,11 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/coder/chat"
+	"github.com/coder/chat/adapters/slack/slackapi"
 )
 
 const (
@@ -73,14 +69,10 @@ type Adapter struct {
 	botUserID              string
 	botID                  string
 	installStore           chat.InstallStore
-	apiBaseURL             string
-	client                 *http.Client
+	api                    *slackapi.Client
 	now                    func() time.Time
 	signatureTolerance     time.Duration
 	disableNativeEphemeral bool
-	logger                 *slog.Logger
-	observer               chat.Observer
-	retryPolicy            RetryPolicy
 }
 
 // slackInstall is the resolved per-event credential the webhook and posting paths
@@ -107,34 +99,25 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	if opts.BotToken == "" && opts.InstallStore == nil {
 		return nil, errors.New("slack: bot token or install store is required")
 	}
-	client := opts.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	apiBaseURL := strings.TrimRight(opts.APIBaseURL, "/")
-	if apiBaseURL == "" {
-		apiBaseURL = "https://slack.com/api"
-	}
 	now := opts.Now
 	if now == nil {
 		now = time.Now
 	}
 	tolerance := opts.SignatureTolerance
 	if tolerance == 0 {
-		tolerance = 5 * time.Minute
+		tolerance = slackapi.DefaultSignatureTolerance
 	}
 	if tolerance < 0 {
 		return nil, errors.New("slack: signature tolerance must be non-negative")
 	}
-	logger := opts.Logger
-	if logger == nil {
-		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
-	}
-	observer := opts.Observer
-	if observer == nil {
-		observer = noopObserver{}
-	}
-	retryPolicy := opts.RetryPolicy.withDefaults()
+	api := slackapi.New(slackapi.Options{
+		Token:       opts.BotToken,
+		BaseURL:     opts.APIBaseURL,
+		HTTPClient:  opts.Client,
+		RetryPolicy: opts.RetryPolicy,
+		Observer:    opts.Observer,
+		Logger:      opts.Logger,
+	})
 	return &Adapter{
 		signingSecret:          opts.SigningSecret,
 		botToken:               opts.BotToken,
@@ -142,14 +125,10 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 		botUserID:              opts.BotUserID,
 		botID:                  opts.BotID,
 		installStore:           opts.InstallStore,
-		apiBaseURL:             apiBaseURL,
-		client:                 client,
+		api:                    api,
 		now:                    now,
 		signatureTolerance:     tolerance,
 		disableNativeEphemeral: opts.DisableNativeEphemeral,
-		logger:                 logger,
-		observer:               observer,
-		retryPolicy:            retryPolicy,
 	}, nil
 }
 
@@ -176,9 +155,6 @@ func (a *Adapter) Init(ctx context.Context) error {
 	var resp authTestResponse
 	if err := a.call(ctx, "auth.test", map[string]any{}, &resp); err != nil {
 		return err
-	}
-	if !resp.OK {
-		return fmt.Errorf("slack: auth.test failed: %s", resp.Error)
 	}
 	if err := requireMatchingAuthField("team_id", a.teamID, resp.TeamID); err != nil {
 		return err
@@ -358,9 +334,6 @@ func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg ch
 	if err := a.callWithToken(ctx, token, "chat.postMessage", payload, &resp); err != nil {
 		return nil, err
 	}
-	if !resp.OK {
-		return nil, fmt.Errorf("slack: chat.postMessage failed: %s", resp.Error)
-	}
 	return &chat.SentMessage{ID: resp.TS, ThreadID: thread.ID, Raw: resp}, nil
 }
 
@@ -386,14 +359,14 @@ func (a *Adapter) PostEphemeralMessage(ctx context.Context, thread chat.ThreadRe
 		}
 
 		var resp postEphemeralResponse
-		if err := a.callWithToken(ctx, token, "chat.postEphemeral", payload, &resp); err != nil {
-			return nil, err
-		}
-		if resp.OK {
+		err := a.callWithToken(ctx, token, "chat.postEphemeral", payload, &resp)
+		if err == nil {
 			return &chat.SentMessage{ID: resp.MessageTS, ThreadID: thread.ID, Raw: resp}, nil
 		}
-		if !opts.FallbackToDM {
-			return nil, fmt.Errorf("slack: chat.postEphemeral failed: %s", resp.Error)
+		// Only an ok:false rejection falls back to a DM; a transport, HTTP status,
+		// or rate-limit failure returns as is.
+		if _, rejected := apiRejection(err); !rejected || !opts.FallbackToDM {
+			return nil, err
 		}
 	}
 
@@ -591,29 +564,7 @@ func supportedMessageEvent(ev slackEvent) bool {
 }
 
 func (a *Adapter) verifySignature(r *http.Request, body []byte) error {
-	timestampHeader := r.Header.Get("X-Slack-Request-Timestamp")
-	if timestampHeader == "" {
-		return errors.New("slack: missing signature timestamp")
-	}
-	timestamp, err := strconv.ParseInt(timestampHeader, 10, 64)
-	if err != nil {
-		return errors.New("slack: invalid signature timestamp")
-	}
-	signedAt := time.Unix(timestamp, 0)
-	if a.signatureTolerance > 0 && absDuration(a.now().Sub(signedAt)) > a.signatureTolerance {
-		return errors.New("slack: signature timestamp outside tolerance")
-	}
-
-	base := []byte("v0:" + timestampHeader + ":")
-	base = append(base, body...)
-	mac := hmac.New(sha256.New, []byte(a.signingSecret))
-	_, _ = mac.Write(base)
-	expected := "v0=" + hex.EncodeToString(mac.Sum(nil))
-	got := r.Header.Get("X-Slack-Signature")
-	if !hmac.Equal([]byte(expected), []byte(got)) {
-		return errors.New("slack: signature mismatch")
-	}
-	return nil
+	return slackapi.VerifyRequest(r.Header, body, a.signingSecret, a.now(), a.signatureTolerance)
 }
 
 func (a *Adapter) postEphemeralFallback(ctx context.Context, token string, tenant string, actor chat.Actor, msg chat.PostableMessage) (*chat.SentMessage, error) {
@@ -624,9 +575,6 @@ func (a *Adapter) postEphemeralFallback(ctx context.Context, token string, tenan
 	var openResp openConversationResponse
 	if err := a.callWithToken(ctx, token, "conversations.open", openConversationPayload{Users: actor.ID}, &openResp); err != nil {
 		return nil, err
-	}
-	if !openResp.OK {
-		return nil, fmt.Errorf("slack: conversations.open failed: %s", openResp.Error)
 	}
 	if openResp.Channel.ID == "" {
 		return nil, errors.New("slack: conversations.open did not return channel id")
@@ -643,10 +591,10 @@ func (a *Adapter) postEphemeralFallback(ctx context.Context, token string, tenan
 		MarkdownText: messageFields.MarkdownText,
 		Mrkdwn:       messageFields.Mrkdwn,
 	}, &postResp); err != nil {
+		if apiErr, rejected := apiRejection(err); rejected {
+			return nil, fmt.Errorf("slack: fallback chat.postMessage failed: %s", apiErr.Code)
+		}
 		return nil, err
-	}
-	if !postResp.OK {
-		return nil, fmt.Errorf("slack: fallback chat.postMessage failed: %s", postResp.Error)
 	}
 	return &chat.SentMessage{ID: postResp.TS, ThreadID: threadID, Raw: postResp}, nil
 }
@@ -677,21 +625,22 @@ func (a *Adapter) call(ctx context.Context, method string, payload any, dest any
 
 // callWithToken posts to the Slack Web API authorizing with the given per-workspace
 // bot token. It is the single outbound seam both modes share. Bounded rate-limit
-// retry lives in doWithRetry (ADR 0005): a transient Slack 429 or ratelimited
-// envelope is retried within the per-adapter RetryPolicy and the caller's context
-// deadline, then surfaced as a typed *RateLimited on exhaustion.
+// retry lives in slackapi (ADR 0005): a transient Slack 429, ratelimited, or
+// rate_limited response is retried within the per-adapter RetryPolicy and the
+// caller's context deadline, then surfaced as a typed *RateLimited on exhaustion.
+// An ok:false response returns a *slackapi.APIError.
 func (a *Adapter) callWithToken(ctx context.Context, token string, method string, payload any, dest any) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("slack: encode %s request: %w", method, err)
+	return a.api.WithToken(token).Call(ctx, method, payload, dest)
+}
+
+// apiRejection reports whether err is an ok:false Web API response, as opposed to
+// a transport, HTTP status, or rate-limit failure.
+func apiRejection(err error) (*slackapi.APIError, bool) {
+	apiErr, ok := errors.AsType[*slackapi.APIError](err)
+	if !ok || apiErr.StatusCode < 200 || apiErr.StatusCode > 299 {
+		return nil, false
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.apiBaseURL+"/"+method, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
-	return a.doWithRetry(ctx, method, req, dest)
+	return apiErr, true
 }
 
 type eventEnvelope struct {
@@ -835,11 +784,4 @@ func requireMatchingAuthField(name string, configured string, discovered string)
 		return fmt.Errorf("slack: auth.test returned %s %q, expected %q", name, discovered, configured)
 	}
 	return nil
-}
-
-func absDuration(duration time.Duration) time.Duration {
-	if duration < 0 {
-		return -duration
-	}
-	return duration
 }

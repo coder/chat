@@ -11,8 +11,11 @@ import (
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -601,21 +604,17 @@ type slackAPIServer struct {
 	authCalls      int
 	openViewTrigID string
 	historyReqs    []historyRequest
-	historyResp    map[string]any
-	historyBlock   chan struct{}
+	// historyMessages must be oldest first, with equal-width ts values because
+	// the server compares timestamps as strings.
+	historyMessages []map[string]any
+	historyError    string
+	historyBlock    chan struct{}
 }
 
-// historyRequest records a decoded conversations.history / conversations.replies
-// request so history tests can assert Thread ID to read mapping, limit clamping,
-// and cursor handling.
 type historyRequest struct {
-	Method    string
-	Channel   string `json:"channel"`
-	TS        string `json:"ts"`
-	Limit     int    `json:"limit"`
-	Latest    string `json:"latest"`
-	Inclusive bool   `json:"inclusive"`
-	Auth      string
+	Method string
+	Form   url.Values
+	Auth   string
 }
 
 type slackPost struct {
@@ -677,14 +676,31 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 			}
 			writeJSON(t, w, map[string]any{"ok": true, "channel": map[string]any{"id": "D-fallback"}})
 		case "/conversations.replies", "/conversations.history":
-			var req historyRequest
-			decodeJSON(t, r.Body, &req)
-			req.Method = r.URL.Path
-			req.Auth = r.Header.Get("Authorization")
+			// Slack reads these methods only from a form body, and rejects any
+			// other body as missing its required fields.
+			if err := r.ParseForm(); err != nil {
+				t.Errorf("parse %s form: %v", r.URL.Path, err)
+			}
+			replies := r.URL.Path == "/conversations.replies"
+			form := r.PostForm
+			for key := range form {
+				if !slices.Contains([]string{"channel", "ts", "latest", "limit"}, key) {
+					t.Errorf("%s: unexpected form field %q", r.URL.Path, key)
+				}
+			}
+			if form.Get("channel") == "" || (replies && form.Get("ts") == "") {
+				writeJSON(t, w, map[string]any{"ok": false, "error": "invalid_arguments"})
+				return
+			}
 			api.mu.Lock()
-			api.historyReqs = append(api.historyReqs, req)
+			api.historyReqs = append(api.historyReqs, historyRequest{
+				Method: strings.TrimPrefix(r.URL.Path, "/"),
+				Form:   form,
+				Auth:   r.Header.Get("Authorization"),
+			})
 			block := api.historyBlock
-			response := maps.Clone(api.historyResp)
+			messages := slices.Clone(api.historyMessages)
+			apiError := api.historyError
 			api.mu.Unlock()
 			if block != nil {
 				select {
@@ -693,10 +709,35 @@ func newSlackAPIServer(t *testing.T) *slackAPIServer {
 					return
 				}
 			}
-			if response == nil {
-				response = map[string]any{"ok": true, "messages": []any{}}
+			if apiError != "" {
+				writeJSON(t, w, map[string]any{"ok": false, "error": apiError})
+				return
 			}
-			writeJSON(t, w, response)
+			// Like live Slack, a page holds the newest limit messages before
+			// latest. A replies page is oldest first, with the thread root first
+			// on every page, outside the limit. A history page is newest first.
+			limit, _ := strconv.Atoi(form.Get("limit"))
+			latest := form.Get("latest")
+			var root map[string]any
+			older := []map[string]any{}
+			for _, msg := range messages {
+				ts, _ := msg["ts"].(string)
+				switch {
+				case replies && ts == form.Get("ts"):
+					root = msg
+				case latest == "" || ts < latest:
+					older = append(older, msg)
+				}
+			}
+			hasMore := len(older) > limit
+			page := older[max(0, len(older)-limit):]
+			if replies && root != nil {
+				page = append([]map[string]any{root}, page...)
+			}
+			if !replies {
+				slices.Reverse(page)
+			}
+			writeJSON(t, w, map[string]any{"ok": true, "messages": page, "has_more": hasMore})
 		default:
 			t.Fatalf("unexpected Slack API path %s", r.URL.Path)
 		}
