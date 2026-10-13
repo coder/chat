@@ -193,11 +193,18 @@ func TestRateLimitDeadlineReturnsTypedRateLimited(t *testing.T) {
 	})
 	threadID := agentSessionThread(t, bot, api, now())
 
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	// The deadline is the invariant's reference point, not a race the transport
+	// must win: the no-sleep branch triggers whenever now+delay (one hour here)
+	// overshoots the deadline, so any timeout far below an hour exercises it
+	// identically. The timeout only needs to leave the OAuth token fetch and the
+	// first GraphQL roundtrip comfortable headroom: 50ms lost that race under
+	// -race CPU load (issue #109, same cause as Slack's #39). 10s sits ~3 orders
+	// of magnitude above a loaded roundtrip and ~3 below the one-hour sleep it
+	// guards against.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	done := make(chan error, 1)
-	start := time.Now()
 	go func() {
 		_, err := adapter.PostThought(ctx, threadID, "thinking")
 		done <- err
@@ -208,10 +215,10 @@ func TestRateLimitDeadlineReturnsTypedRateLimited(t *testing.T) {
 		if _, ok := errors.AsType[*linear.RateLimited](err); !ok {
 			t.Fatalf("err = %v, want *linear.RateLimited (deadline-bounded, not slept off)", err)
 		}
-		if elapsed := time.Since(start); elapsed > time.Second {
-			t.Fatalf("PostThought took %s; it must not sleep past the context deadline", elapsed)
-		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
+		// A correct adapter returns after two roundtrips with no sleep. A broken
+		// one blocks at least until the 10s ctx deadline, or the full one-hour
+		// backoff, so 5s cleanly separates the two without racing the transport.
 		t.Fatal("PostThought slept past its caller deadline: a long backoff was not deadline-bounded")
 	}
 }
