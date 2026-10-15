@@ -31,12 +31,13 @@ type commandForm struct {
 }
 
 // commandBusyMessage is the truthful busy signal a slash command invoker sees
-// when the runtime's Admission Bound rejects the invocation (ADR 0015). It
-// renders as the command's ephemeral response.
+// when the runtime rejects the invocation at admission (ADR 0015). It renders
+// as the command's ephemeral response.
 const commandBusyMessage = "The bot is at capacity right now. Your command was not run — please try again in a moment."
 
-// commandBusyReply is the ack body of a slash command that the Admission Bound
-// rejects. Slack shows its text to the invoking user.
+// commandBusyReply is the ack body of a slash command that the runtime rejects
+// at admission (the Admission Bound or Runtime Shutdown). Slack shows its text
+// to the invoking user.
 type commandBusyReply struct {
 	Text string `json:"text"`
 }
