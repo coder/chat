@@ -22,6 +22,9 @@ supports, and the runnable examples.
 
 Redis, Postgres, and NATS state live in separate Go modules so applications
 that only use core, Slack, or memory state do not pull their dependencies.
+The core module has one dependency, `github.com/coder/websocket`, for the
+Slack Socket Mode client ([ADR 0017](adr/0017-slack-socket-mode.md)). Only
+builds that import `slackapi` or `slackapitest` compile it.
 The repository uses `go.work` for local development across the root module,
 the state modules, and the example modules.
 
@@ -37,27 +40,32 @@ go doc github.com/coder/chat/adapters/slack
 - **Runtime construction, hooks, dispatch, runtime options**: package `chat`
   (`chat.New`, `Chat.OnNewMention`, `Chat.OnSubscribedMessage`,
   `Chat.OnCommand`, `Chat.OnInteraction`, `RuntimeOptions`).
+- **Receiving deliveries**: package `chat` (`Chat.Webhook`, `Chat.Listen`,
+  the `Listener` interface); see [Receiving Deliveries](#receiving-deliveries).
 - **Event and message model**: package `chat` (`Event`, `Message`,
   `MessageEvent`, `CommandEvent`, `InteractionEvent`, `Thread`, `ThreadID`,
   `Actor`).
 - **Optional capabilities**: package `chat` (`NativeContentPoster`,
-  `HistoryReader`, `EphemeralPoster` interfaces) plus the adapter packages
+  `HistoryReader`, `EphemeralPoster`, `Listener` interfaces) plus the adapter packages
   for what each adapter actually implements.
 - **Multi-tenant installs**: package `chat` (`InstallStore`, `Install`,
   `ErrInstallNotFound`) plus `slack.SlackInstall` / `linear.LinearInstall`.
 - **State contract**: package `chat` (`State`) with implementations in the
   four `state/*` packages.
 - **Slack without the runtime**: package `slackapi` (`slackapi.New`,
-  `VerifyRequest`, `ParseEnvelope`) and its test helper `slackapitest`; see
+  `Webhook`, `Client.Listen`, `VerifyRequest`, `ParseEnvelope`) and its test
+  helper `slackapitest`; see
   [Slack API Package](#slack-api-package).
 
 ## Core Model
 
 `Chat` is the runtime. It owns adapter registration, runtime state, handler
-registration, webhook mounting, dispatch, dedupe, locking, and shutdown.
+registration, webhook mounting, listener runs, dispatch, dedupe, locking, and
+shutdown.
 
-A `Platform Adapter` is a platform boundary. It verifies inbound webhooks,
-normalizes platform payloads, renders outbound messages, and exposes
+A `Platform Adapter` is a platform boundary. It receives inbound deliveries
+over a webhook handler or a listener, verifies them, normalizes platform
+payloads, renders outbound messages, and exposes
 platform-specific APIs through typed adapter access. It does not own
 application routing.
 
@@ -79,7 +87,7 @@ workspaces, channels, and platforms. Application code may store and pass it
 around, but must not build it manually.
 
 Thread handles can be reconstructed from a stored `ThreadID` for
-out-of-webhook work such as reminders or proactive follow-ups:
+work outside a delivery, such as reminders or proactive follow-ups:
 
 ```go
 thread, err := bot.Thread(ctx, threadID)
@@ -116,7 +124,7 @@ defer func() {
 
 `chat.New` requires a `State` and at least one adapter, validates the runtime
 options, and initializes every adapter (which is where the Slack adapter
-discovers its own bot identity) before any webhook is served. A failing
+discovers its own bot identity) before any delivery is received. A failing
 adapter initialization shuts down the adapters registered so far and returns
 the joined error. This is an intentional difference from Vercel Chat
 SDK, which initializes lazily on first use.
@@ -132,11 +140,28 @@ Options:
   (it does not merge), so start from `chat.DefaultRuntimeOptions()`. See
   [Dedupe, Locks, And Concurrency](#dedupe-locks-and-concurrency).
 
-`Shutdown(ctx)` is idempotent. It cancels detached work, runs every
-adapter's cleanup hook before state cleanup, and returns joined errors if
-cleanup fails.
+`Shutdown(ctx)` stops the runtime in this order:
 
-## Webhooks
+1. It closes dispatch admission. Every new delivery, in both dispatch modes,
+   gets `chat.ErrAdmissionRejected`.
+2. It cancels deferred work and waits for it to finish.
+3. It cancels every `Listen` call and waits for it to return.
+4. It runs every adapter's cleanup hook, then state cleanup.
+
+`ctx` bounds the waits in steps 2 and 3. `Shutdown` returns the joined errors
+of the steps. It is idempotent: a later call waits for the first call to
+finish, bounded by its own `ctx`, and then returns nil.
+
+## Receiving Deliveries
+
+A delivery is one inbound payload that a platform sends to an adapter. An
+adapter receives deliveries over a webhook handler, over a listener, or over
+both. Both transports use the same adapter pipeline, so a payload becomes the
+same `Event` over each of them. The runtime starts no HTTP server and no
+listener on its own: the application mounts the handler and runs the
+listener.
+
+### Webhooks
 
 The runtime exposes `net/http` handlers and does not own the HTTP server:
 
@@ -155,6 +180,37 @@ a production 404.
 Adapters own platform handshakes. For Slack, the `url_verification`
 challenge is answered inside the Slack webhook handler and never reaches
 application handlers.
+
+### Listeners
+
+A listener is an Optional Capability (`chat.Listener`) of an adapter that
+opens an outbound connection to the platform, so the application needs no
+public URL. The Slack adapter implements it with Socket Mode
+([ADR 0017](adr/0017-slack-socket-mode.md)). Run it with `Chat.Listen`:
+
+```go
+ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+defer stop()
+
+if err := bot.Listen(ctx, "slack"); err != nil {
+	return err
+}
+```
+
+`Listen` blocks until `ctx` is done or `Shutdown` stops listeners, and then
+returns nil. It returns the adapter's error when the adapter cannot continue
+to listen, for example when Slack rejects the app token. It returns an error
+at once when the named adapter is not registered, or when it does not
+implement `Listener` (`chat.ErrUnsupportedCapability`). After `Shutdown` has
+started, it returns nil at once. Concurrent calls are allowed, and an
+application can serve the webhook handler of the same adapter at the same
+time.
+
+`Shutdown` stops listeners only after it closes admission and drains deferred
+work. So a delivery that arrives while `Shutdown` runs gets
+`chat.ErrAdmissionRejected`, and the adapter gives the platform the same
+overload answer as at the `MaxDetached` bound. For example, the Slack adapter
+does not ack an Events API delivery, so Slack can deliver it again.
 
 ## Routing
 
@@ -211,7 +267,8 @@ to their own single-slot hooks:
 
 Both hooks are single-slot and no-op when unset, like the message hooks; an
 unset handler is still acknowledged. The platform acknowledgement is
-adapter-owned: the Slack adapter returns an empty 2xx and preserves
+adapter-owned: the Slack adapter sends an empty acknowledgement (an empty
+2xx over HTTP) and preserves
 `response_url` and `trigger_id` on the `Raw` platform escape hatch. Under the
 default synchronous dispatch the handler runs before that acknowledgement, so
 long command or interaction work needs
@@ -240,7 +297,8 @@ Slack configuration and handler patterns.
 ## Dispatch And Acknowledgement
 
 The default dispatch mode is synchronous (`DispatchSync`): handlers run on the
-inbound webhook request context before the platform acknowledgement. For
+inbound webhook request context, or on the delivery context of a listener,
+before the platform acknowledgement. For
 long-running work, opt in to `DispatchDeferred` (ack-then-work,
 [ADR 0002](adr/0002-async-dispatch.md)): the dedupe and lock prelude runs
 before the acknowledgement, then the handler runs on a detached work context
@@ -248,11 +306,13 @@ with automatic lock lease renewal, bounded by `DetachTimeout` (which must be
 positive under deferred dispatch). Under deferred dispatch `MaxDetached`
 bounds admitted-but-incomplete deliveries; a delivery arriving at the bound is
 rejected with `chat.ErrAdmissionRejected` before acknowledgement and before
-dedupe marking ([ADR 0015](adr/0015-runtime-coordination.md)).
+dedupe marking ([ADR 0015](adr/0015-runtime-coordination.md)). After
+`Shutdown` starts, every new delivery gets the same error, in both dispatch
+modes.
 The [deferred dispatch guide](how-to/deferred-dispatch.md) covers enabling
 it and writing handlers for the detached context.
 
-Once a webhook is verified and normalized into an accepted event, handler
+Once a delivery is verified and normalized into an accepted event, handler
 errors are logged and observed but the event is still acknowledged to the
 platform. This avoids platform retry storms after partial side effects such as
 posting a message.
@@ -494,7 +554,8 @@ if !ok {
 
 `chat.AdapterAs[T](bot, name)` returns `(T, bool)`; prefer it over unchecked
 type assertions. Optional capabilities (`NativeContentPoster`,
-`HistoryReader`, `EphemeralPoster`) are reached the same way.
+`HistoryReader`, `EphemeralPoster`) are reached the same way. The runtime
+runs the `Listener` capability itself, through `Chat.Listen`.
 
 ## Adapter Capability Status
 
@@ -505,6 +566,8 @@ platform-specific surfaces differ:
 | Capability | Slack | Linear |
 | --- | --- | --- |
 | Message events (mentions, subscribed threads, DMs) | Yes | Yes (agent sessions and issue comments) |
+| Webhook handler (`Chat.Webhook`) | Yes (with `SigningSecret`) | Yes |
+| Listener (`Chat.Listen`) | Yes (Socket Mode, with `AppToken`) | No (unsupported capability) |
 | Ephemeral messages with explicit DM fallback (`Thread.PostEphemeral`) | Yes | No (unsupported capability); Linear-specific ephemeral *thoughts* via `PostThought` on agent-session threads |
 | Slash commands (`OnCommand`) | Yes | No (no platform equivalent) |
 | Interactive components (`OnInteraction`) | Yes (message `block_actions`; modal-view actions are not normalized) | No |
@@ -524,6 +587,11 @@ The Slack adapter (`adapters/slack`) is the `supported` adapter. It covers:
 - single-install configuration, and multi-tenant installs via an
   application-implemented `InstallStore`
   ([ADR 0006](adr/0006-multi-tenant-install.md))
+- two transports, alone or together: the HTTP webhook handler with
+  `Options.SigningSecret`, and Socket Mode through `Chat.Listen` with
+  `Options.AppToken`, an app-level token (`xapp-`) with the
+  `connections:write` scope ([ADR 0017](adr/0017-slack-socket-mode.md));
+  at least one is required
 - signing secret verification and URL verification
 - bot identity discovery during adapter initialization
 - supported-shape decoding with unknown-field tolerance
@@ -547,7 +615,7 @@ The adapter uses local structs for the Slack payload shapes it supports,
 preserves raw payload data as an escape hatch, and validates required fields
 for supported event types. It is not a complete Slack product surface; see
 [Intentional Gaps](explanation.md#intentional-gaps). Its Web API calls,
-rate-limit retry, and signature check go through the
+rate-limit retry, and both transports go through the
 [`slackapi`](#slack-api-package) package.
 
 ### Linear Adapter
@@ -596,8 +664,9 @@ yet wrapped is in [linear-agent-capabilities.md](linear-agent-capabilities.md).
 own their runtime (their own state, dispatch, and routing) and so do not use
 `chat.New`. It works on raw Slack IDs and holds Slack protocol and data
 formats only: it has no runtime, state, dispatch, or policy. The Slack
-adapter uses it for its Web API calls, retry, signature check, and history
-reads ([ADR 0016](adr/0016-slack-api-package.md)).
+adapter uses it for its Web API calls, retry, history reads, and both inbound
+transports ([ADR 0016](adr/0016-slack-api-package.md),
+[ADR 0017](adr/0017-slack-socket-mode.md)).
 
 `slackapi` and `slackapitest` are `experimental`: their exported API may
 change before they are promoted to supported. `RetryPolicy` and
@@ -682,8 +751,30 @@ Errors:
 - `UploadFile` names the failed step and wraps its error, so `errors.As` still
   finds `*APIError` and `*RateLimited`.
 
-Inbound requests:
+Inbound deliveries:
 
+- A `Delivery` is one inbound payload: its `Type` (`DeliveryEventsAPI`,
+  `DeliverySlashCommands`, or `DeliveryInteractive`), the JSON `Payload`, and
+  `RetryAttempt` and `RetryReason` for a redelivery. It is the same for both
+  transports. A slash command payload is a JSON object of strings over both.
+- A `Handler` handles a `Delivery` and gives the acknowledgement. A nil error
+  acknowledges the delivery, and a non-nil response is the acknowledgement
+  body, encoded as JSON. An error does not acknowledge it:
+
+  | Handler error | `Webhook` answer | `Listen` answer |
+  | --- | --- | --- |
+  | nil | 200, with the response as a JSON body | ack, with the response as the payload |
+  | `ErrBusy` | 503 | no ack |
+  | `ErrInvalidPayload` | 400 | no ack |
+  | another error | 500 | no ack |
+
+  Slack delivers an Events API payload again when it gets no ack. Slack
+  expects the ack within 3 seconds.
+- `Webhook` is the HTTP transport, an `http.Handler` for the Events API,
+  slash command, and interactivity request URLs. It accepts only POST (else
+  405) and a body of at most 1 MiB (else 413), checks the signature with
+  `VerifyRequest` (else 401), answers `url_verification` itself, and makes a
+  `Delivery` from each other request.
 - `VerifyRequest(header, body, secret, now, tolerance)` checks the Slack v0
   signature. It rejects an empty secret. A tolerance of zero or less uses
   `DefaultSignatureTolerance` (5 minutes).
@@ -694,6 +785,46 @@ Inbound requests:
   with any subtype, and returns false for other envelopes and events. For
   `message_changed` and `message_deleted`, `NewMessage` and
   `PreviousMessage` hold the changed message.
+
+Socket Mode:
+
+- `(*Client).Listen(ctx, handler, ListenOptions)` is the Socket Mode
+  transport. Call it on a client with the app-level token (`xapp-`), for
+  example `client.WithToken(appToken).Listen(ctx, handler, opts)`. The token
+  needs the `connections:write` scope, and Socket Mode must be on in the app
+  settings. `Listen` opens the websocket with the client's HTTP client, so its
+  proxy settings apply. It gives each envelope to the handler as a `Delivery`
+  in its own goroutine, and acks the envelope on the connection that it came
+  on.
+- `Listen` keeps one connection up. When Slack asks for a refresh, or sends
+  no ping for `PingTimeout`, `Listen` opens a new connection and closes the
+  old one only when the new one is up. A connection closes in this order: it
+  waits at most 3 seconds for its running handlers, sends a close frame, and
+  waits for Slack to close the connection.
+- `Listen` retries other errors with backoff from `MinBackoff` to
+  `MaxBackoff`, waits at least the `Retry-After` of a rate limit, and gives
+  each error that it recovers from to `OnError`. It does not use the client's
+  `RetryPolicy`. When ctx is done, it closes every connection, waits for every
+  handler, and returns nil.
+- `Listen` returns at once, and does not retry, when Slack rejects the token
+  (an `*APIError` with the code `not_authed`, `invalid_auth`,
+  `account_inactive`, `token_revoked`, `token_expired`,
+  `user_removed_from_team`, `team_disabled`, `not_allowed_token_type`, or
+  `missing_scope`) or turns Socket Mode off (a `*DisconnectError` with the
+  reason `link_disabled`).
+- `OpenConnection(ctx)` calls `apps.connections.open` and returns the
+  websocket URL of a new connection. `Listen` calls it for each connection.
+
+| `ListenOptions` field | Empty value |
+| --- | --- |
+| `OnConnect` | No-op. Called with the `Hello` (`NumConnections`, `AppID`, `Host`) of each connection when it is up. |
+| `OnError` | No-op. Called with each error that `Listen` recovers from, for example `ErrPingTimeout`, or a `*DisconnectError` with the reason `too_many_websockets`. |
+| `PingTimeout` | 30 seconds. `Listen` starts to check it after the first ping. |
+| `MinBackoff` | 1 second. |
+| `MaxBackoff` | 1 minute. Also the wait after `too_many_websockets`. |
+
+`OnConnect` and `OnError` run on the goroutine that called `Listen`, so they
+must return quickly.
 
 Formats:
 
@@ -725,13 +856,25 @@ For files, add `Server.FileOrigin()` to `Options.FileOrigins`, return
 with `ServeFile` or `HandleFile`, and read the requests with `FileRequests`.
 `SignRequest` signs a request so that `VerifyRequest` accepts it.
 
+For Socket Mode, `Server.SocketMode(SocketModeOptions)` starts a fake Socket
+Mode: `apps.connections.open` returns a `ws://` URL on the fake server, and
+each connection gets hello and websocket pings. `Send` sends an envelope to a
+random live connection, and the fake resends an envelope that gets no ack, as
+Slack does. `Disconnect`, `DisconnectConn`, `StopPings`, and `Drop` make
+Slack's refresh and failure cases. `Conns`, `Envelope`, `Envelopes`, and
+`Closes` show which connection got each envelope and sent each ack, and
+whether each close had a close frame. `WaitLive`, `WaitClosed`, and
+`WaitAcked` wait for a state, with a timeout.
+
 ## Examples
 
 Runnable, documented examples live in [`examples/`](../examples/). Pick one:
 
 - [`slack-hello-world`](../examples/slack-hello-world/README.md) — start here.
-  Memory state, no infrastructure; the [tutorial](tutorials/slack-bot.md)
-  walks through it end to end.
+  Memory state, no infrastructure. It uses Socket Mode when `SLACK_APP_TOKEN`
+  is set, so it needs no public URL, and serves HTTP when
+  `SLACK_SIGNING_SECRET` is set. The [tutorial](tutorials/slack-bot.md) walks
+  through it end to end.
 - [`slack-redis-state`](../examples/slack-redis-state/README.md),
   [`slack-postgres-state`](../examples/slack-postgres-state/README.md),
   [`slack-nats-state`](../examples/slack-nats-state/README.md) — the same bot
