@@ -6,11 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"mime"
 	"net/http"
-	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,10 +16,7 @@ import (
 	"github.com/coder/chat/adapters/slack/slackapi"
 )
 
-const (
-	adapterName         = "slack"
-	maxWebhookBodyBytes = 1 << 20
-)
+const adapterName = "slack"
 
 type Options struct {
 	SigningSecret string
@@ -189,110 +184,85 @@ func (a *Adapter) Shutdown(context.Context) error {
 	return nil
 }
 
+// Webhook returns the HTTP transport for the request URLs of the Slack app: the
+// Events API, slash command, and interactivity URLs. It uses the same delivery
+// handler as Listen.
 func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			return
-		}
-
-		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes))
-		if err != nil {
-			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-				http.Error(w, "slack payload too large", http.StatusRequestEntityTooLarge)
-				return
-			}
-			http.Error(w, "read body", http.StatusBadRequest)
-			return
-		}
-		// Slack signs with the shared app-level signing secret in both modes, so
-		// verification stays before tenant parse; the per-workspace bot token is used
-		// only for replies.
-		if err := a.verifySignature(r, body); err != nil {
-			http.Error(w, "invalid slack signature", http.StatusUnauthorized)
-			return
-		}
-
-		// Commands and interactivity arrive as x-www-form-urlencoded; event callbacks
-		// arrive as JSON. Branch only after signature verification.
-		if isFormContentType(r.Header.Get("Content-Type")) {
-			a.handleFormWebhook(w, r, dispatch, body)
-			return
-		}
-
-		var envelope eventEnvelope
-		if err := json.Unmarshal(body, &envelope); err != nil {
-			http.Error(w, "invalid slack payload", http.StatusBadRequest)
-			return
-		}
-		switch envelope.Type {
-		case "url_verification":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(envelope.Challenge))
-		case "event_callback":
-			install, found, err := a.resolveInstall(r.Context(), envelope.TeamID)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			if !found {
-				// ErrInstallNotFound (or no tenant): Ignored Event. Acknowledge without
-				// dispatch.
-				w.WriteHeader(http.StatusOK)
-				return
-			}
-			event, ok, err := a.normalizeEvent(r, envelope, body, install.botUserID)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if ok {
-				if err := dispatch(r.Context(), event); err != nil {
-					if errors.Is(err, chat.ErrAdmissionRejected) {
-						// Events API callbacks are platform-redelivered: a
-						// retry-inducing status lets Slack's own retry cover
-						// the event, and because the delivery was never
-						// dedupe-marked that retry is not deduped away.
-						http.Error(w, "slack runtime at capacity", http.StatusServiceUnavailable)
-						return
-					}
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-			}
-			w.WriteHeader(http.StatusOK)
-		default:
-			w.WriteHeader(http.StatusOK)
-		}
-	})
+	return &slackapi.Webhook{
+		SigningSecret:      a.signingSecret,
+		Handler:            a.deliveryHandler(dispatch),
+		Now:                a.now,
+		SignatureTolerance: a.signatureTolerance,
+	}
 }
 
-func isFormContentType(contentType string) bool {
-	mediaType, _, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return false
+// deliveryHandler returns the one inbound pipeline of the adapter, for both
+// transports. It normalizes a delivery to an Event and dispatches it. An Ignored
+// Event is acknowledged without dispatch.
+func (a *Adapter) deliveryHandler(dispatch chat.DispatchFunc) slackapi.Handler {
+	return func(ctx context.Context, d *slackapi.Delivery) (any, error) {
+		event, err := a.normalizeDelivery(ctx, d)
+		if err != nil || event == nil {
+			return nil, err
+		}
+		err = dispatch(ctx, event)
+		if !errors.Is(err, chat.ErrAdmissionRejected) {
+			return nil, err
+		}
+		if event.Command != nil {
+			// Slack does not redeliver slash commands, so a missing ack would
+			// lose the invocation with only a generic Slack error shown. Slack
+			// shows the ack body to the invoking user as an ephemeral message, so
+			// the ack carries a truthful busy signal instead: never a silent
+			// failure, never a fake success.
+			return commandBusyReply{Text: commandBusyMessage}, nil
+		}
+		// Slack redelivers an Events API payload that gets no ack, and the
+		// delivery was never dedupe-marked, so the redelivery is not deduped
+		// away. Slack does not redeliver block_actions, but a missing ack is the
+		// truthful signal: Slack shows a warning on the activated component, and
+		// the rejection stays observable through Runtime Observation.
+		return nil, fmt.Errorf("%w: %w", slackapi.ErrBusy, err)
 	}
-	return mediaType == "application/x-www-form-urlencoded"
 }
 
-// handleFormWebhook decodes a slash command or interactivity payload from the
-// verified form body and dispatches it through the same DispatchFunc seam as
-// messages. The empty 200 is the Ack-Then-Work ack within Slack's 3-second budget.
-func (a *Adapter) handleFormWebhook(w http.ResponseWriter, r *http.Request, dispatch chat.DispatchFunc, body []byte) {
-	form, err := url.ParseQuery(string(body))
-	if err != nil {
-		http.Error(w, "invalid slack form payload", http.StatusBadRequest)
-		return
-	}
-
-	switch {
-	case form.Get("payload") != "":
-		a.handleInteractionForm(w, r, dispatch, form.Get("payload"))
-	case form.Get("command") != "":
-		a.handleCommandForm(w, r, dispatch, form)
+// normalizeDelivery returns the Event of a delivery, or a nil Event for an
+// Ignored Event: a delivery type, envelope type, or interaction type that the
+// adapter does not support, or a workspace with no install. A malformed or
+// cross-tenant payload is an error that wraps slackapi.ErrInvalidPayload. An
+// install store failure is another error.
+func (a *Adapter) normalizeDelivery(ctx context.Context, d *slackapi.Delivery) (*chat.Event, error) {
+	switch d.Type {
+	case slackapi.DeliveryEventsAPI:
+		return a.normalizeEvent(ctx, d)
+	case slackapi.DeliverySlashCommands:
+		return a.normalizeCommand(ctx, d)
+	case slackapi.DeliveryInteractive:
+		return a.normalizeInteraction(ctx, d)
 	default:
-		http.Error(w, "unsupported slack form payload", http.StatusBadRequest)
+		return nil, nil
 	}
+}
+
+// invalidPayload marks err as a malformed or rejected payload, so the
+// transport answers it with slackapi.ErrInvalidPayload.
+func invalidPayload(err error) error {
+	return invalidPayloadError{err}
+}
+
+type invalidPayloadError struct{ error }
+
+func (e invalidPayloadError) Unwrap() []error {
+	return []error{e.error, slackapi.ErrInvalidPayload}
+}
+
+// retryMetadata returns the Retry Metadata of a delivery.
+func retryMetadata(d *slackapi.Delivery) chat.RetryMetadata {
+	retry := chat.RetryMetadata{Reason: d.RetryReason}
+	if d.RetryAttempt > 0 {
+		retry.Num = strconv.Itoa(d.RetryAttempt)
+	}
+	return retry
 }
 
 func (a *Adapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, error) {
@@ -457,46 +427,70 @@ func slackCredential(credential any) (SlackInstall, error) {
 	}
 }
 
-func (a *Adapter) normalizeEvent(r *http.Request, envelope eventEnvelope, raw []byte, botUserID string) (*chat.Event, bool, error) {
+// normalizeEvent returns the Message Event of an Events API delivery, or a nil
+// Event for an Ignored Event.
+func (a *Adapter) normalizeEvent(ctx context.Context, d *slackapi.Delivery) (*chat.Event, error) {
+	var envelope slackapi.Envelope
+	if err := json.Unmarshal(d.Payload, &envelope); err != nil {
+		return nil, invalidPayload(fmt.Errorf("slack: invalid event payload: %w", err))
+	}
+	if envelope.Type != slackapi.EnvelopeEventCallback {
+		return nil, nil
+	}
+	install, found, err := a.resolveInstall(ctx, envelope.TeamID)
+	if err != nil || !found {
+		return nil, err
+	}
+	event, err := a.messageEvent(&envelope, d, install.botUserID)
+	if err != nil {
+		return nil, invalidPayload(err)
+	}
+	return event, nil
+}
+
+// messageEvent validates an event_callback envelope and returns its Message
+// Event, or a nil Event for an event type that the adapter does not support or
+// for the bot's own message in multi-tenant mode.
+func (a *Adapter) messageEvent(envelope *slackapi.Envelope, d *slackapi.Delivery, botUserID string) (*chat.Event, error) {
 	if envelope.TeamID == "" {
-		return nil, false, errors.New("slack: team_id is required")
+		return nil, errors.New("slack: team_id is required")
 	}
 	// The cross-tenant guard only applies to a single-install adapter pinned to one
 	// team; in multi-tenant mode every workspace the store serves is valid.
 	if !a.multiTenant() && a.teamID != "" && envelope.TeamID != a.teamID {
-		return nil, false, fmt.Errorf("slack: team_id %q does not match configured team", envelope.TeamID)
+		return nil, fmt.Errorf("slack: team_id %q does not match configured team", envelope.TeamID)
 	}
 	if envelope.EventID == "" {
-		return nil, false, errors.New("slack: event_id is required")
+		return nil, errors.New("slack: event_id is required")
 	}
 
 	var ev slackEvent
 	if err := json.Unmarshal(envelope.Event, &ev); err != nil {
-		return nil, false, fmt.Errorf("slack: invalid event: %w", err)
+		return nil, fmt.Errorf("slack: invalid event: %w", err)
 	}
 	if !supportedMessageEvent(ev) {
-		return nil, false, nil
+		return nil, nil
 	}
 	if ev.Channel == "" {
-		return nil, false, errors.New("slack: event channel is required")
+		return nil, errors.New("slack: event channel is required")
 	}
 	if ev.TS == "" {
-		return nil, false, errors.New("slack: event ts is required")
+		return nil, errors.New("slack: event ts is required")
 	}
 
 	threadID, direct, err := a.threadIDForEvent(envelope.TeamID, ev)
 	if err != nil {
-		return nil, false, err
+		return nil, err
 	}
 	author := a.actorForEvent(envelope.TeamID, ev, botUserID)
 	if author.ID == "" {
-		return nil, false, errors.New("slack: event author is required")
+		return nil, errors.New("slack: event author is required")
 	}
 	// Multi-tenant self-filtering is tenant-correct from the per-install bot id: the
 	// runtime's BotActor() filter cannot match because there is no single bot
 	// identity, so drop the bot's own messages here as an Ignored Event.
 	if a.multiTenant() && author.BotKind == chat.BotBot && botUserID != "" && author.ID == botUserID {
-		return nil, false, nil
+		return nil, nil
 	}
 
 	return &chat.Event{
@@ -505,11 +499,8 @@ func (a *Adapter) normalizeEvent(r *http.Request, envelope eventEnvelope, raw []
 		Tenant:        envelope.TeamID,
 		ThreadID:      threadID,
 		DirectMessage: direct,
-		Retry: chat.RetryMetadata{
-			Num:    r.Header.Get("X-Slack-Retry-Num"),
-			Reason: r.Header.Get("X-Slack-Retry-Reason"),
-		},
-		Raw: json.RawMessage(raw),
+		Retry:         retryMetadata(d),
+		Raw:           d.Payload,
 		Message: &chat.Message{
 			ID:        ev.TS,
 			Text:      ev.Text,
@@ -517,7 +508,7 @@ func (a *Adapter) normalizeEvent(r *http.Request, envelope eventEnvelope, raw []
 			Mentioned: direct || ev.Type == "app_mention" || strings.Contains(ev.Text, "<@"+botUserID+">"),
 			Raw:       ev.Raw,
 		},
-	}, true, nil
+	}, nil
 }
 
 func (a *Adapter) actorForEvent(teamID string, ev slackEvent, botUserID string) chat.Actor {
@@ -561,10 +552,6 @@ func supportedMessageEvent(ev slackEvent) bool {
 		return false
 	}
 	return ev.Subtype == "" || ev.Subtype == "bot_message"
-}
-
-func (a *Adapter) verifySignature(r *http.Request, body []byte) error {
-	return slackapi.VerifyRequest(r.Header, body, a.signingSecret, a.now(), a.signatureTolerance)
 }
 
 func (a *Adapter) postEphemeralFallback(ctx context.Context, token string, tenant string, actor chat.Actor, msg chat.PostableMessage) (*chat.SentMessage, error) {
@@ -641,14 +628,6 @@ func apiRejection(err error) (*slackapi.APIError, bool) {
 		return nil, false
 	}
 	return apiErr, true
-}
-
-type eventEnvelope struct {
-	Type      string          `json:"type"`
-	Challenge string          `json:"challenge"`
-	TeamID    string          `json:"team_id"`
-	EventID   string          `json:"event_id"`
-	Event     json.RawMessage `json:"event"`
 }
 
 type slackEvent struct {

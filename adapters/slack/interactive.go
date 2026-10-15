@@ -5,11 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
 	"strings"
 
 	"github.com/coder/chat"
+	"github.com/coder/chat/adapters/slack/slackapi"
 )
 
 // Compile-time assertions for the Optional Capabilities reached via Adapter Access.
@@ -20,52 +19,15 @@ var (
 
 // commandForm is the Supported Platform Shape for a Slack slash command.
 type commandForm struct {
-	Command     string
-	Text        string
-	TeamID      string
-	ChannelID   string
-	ChannelName string
-	UserID      string
-	TriggerID   string
-	ResponseURL string
-	APIAppID    string
-}
-
-// handleCommandForm resolves the per-tenant install for a slash command, then
-// normalizes and dispatches it. A not-installed workspace is an Ignored Event
-// (ack 200, no dispatch); a store transport error is a 5xx the platform may retry.
-func (a *Adapter) handleCommandForm(w http.ResponseWriter, r *http.Request, dispatch chat.DispatchFunc, form url.Values) {
-	_, found, err := a.resolveInstall(r.Context(), form.Get("team_id"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if !found {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-	event, err := a.normalizeCommand(r, form)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := dispatch(r.Context(), event); err != nil {
-		if errors.Is(err, chat.ErrAdmissionRejected) {
-			// Slack does not redeliver slash commands, so a retry-inducing
-			// status would lose the invocation with only a generic Slack error
-			// shown. The shape's acknowledgement contract renders the ack body
-			// as an ephemeral message to the invoking user, so answer 200 with
-			// a truthful busy signal instead — never a silent failure, never a
-			// fake success.
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(commandBusyMessage))
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
+	Command     string `json:"command"`
+	Text        string `json:"text"`
+	TeamID      string `json:"team_id"`
+	ChannelID   string `json:"channel_id"`
+	ChannelName string `json:"channel_name"`
+	UserID      string `json:"user_id"`
+	TriggerID   string `json:"trigger_id"`
+	ResponseURL string `json:"response_url"`
+	APIAppID    string `json:"api_app_id"`
 }
 
 // commandBusyMessage is the truthful busy signal a slash command invoker sees
@@ -73,20 +35,33 @@ func (a *Adapter) handleCommandForm(w http.ResponseWriter, r *http.Request, disp
 // renders as the command's ephemeral response.
 const commandBusyMessage = "The bot is at capacity right now. Your command was not run — please try again in a moment."
 
-// normalizeCommand decodes and validates a slash command into a Command Event. A
-// missing required field or a cross-tenant team is a 400, like a malformed event.
-func (a *Adapter) normalizeCommand(r *http.Request, form url.Values) (*chat.Event, error) {
-	cmd := commandForm{
-		Command:     form.Get("command"),
-		Text:        form.Get("text"),
-		TeamID:      form.Get("team_id"),
-		ChannelID:   form.Get("channel_id"),
-		ChannelName: form.Get("channel_name"),
-		UserID:      form.Get("user_id"),
-		TriggerID:   form.Get("trigger_id"),
-		ResponseURL: form.Get("response_url"),
-		APIAppID:    form.Get("api_app_id"),
+// commandBusyReply is the ack body of a slash command that the Admission Bound
+// rejects. Slack shows its text to the invoking user.
+type commandBusyReply struct {
+	Text string `json:"text"`
+}
+
+// normalizeCommand returns the Command Event of a slash command delivery, or a
+// nil Event when the workspace has no install. A missing required field or a
+// cross-tenant team is an invalid payload, like a malformed event.
+func (a *Adapter) normalizeCommand(ctx context.Context, d *slackapi.Delivery) (*chat.Event, error) {
+	var cmd commandForm
+	if err := json.Unmarshal(d.Payload, &cmd); err != nil {
+		return nil, invalidPayload(fmt.Errorf("slack: invalid command payload: %w", err))
 	}
+	_, found, err := a.resolveInstall(ctx, cmd.TeamID)
+	if err != nil || !found {
+		return nil, err
+	}
+	event, err := a.commandEvent(cmd, d)
+	if err != nil {
+		return nil, invalidPayload(err)
+	}
+	return event, nil
+}
+
+// commandEvent validates a slash command and returns its Command Event.
+func (a *Adapter) commandEvent(cmd commandForm, d *slackapi.Delivery) (*chat.Event, error) {
 	if cmd.Command == "" {
 		return nil, errors.New("slack: command is required")
 	}
@@ -128,11 +103,8 @@ func (a *Adapter) normalizeCommand(r *http.Request, form url.Values) (*chat.Even
 		Tenant:        cmd.TeamID,
 		ThreadID:      threadID,
 		DirectMessage: direct,
-		Retry: chat.RetryMetadata{
-			Num:    r.Header.Get("X-Slack-Retry-Num"),
-			Reason: r.Header.Get("X-Slack-Retry-Reason"),
-		},
-		Raw: cmd,
+		Retry:         retryMetadata(d),
+		Raw:           cmd,
 		Command: &chat.Command{
 			Name:  cmd.Command,
 			Text:  cmd.Text,
@@ -195,58 +167,33 @@ type selectedOption struct {
 	Value string `json:"value"`
 }
 
-// handleInteractionForm resolves the per-tenant install for an interactivity
-// payload, then normalizes and dispatches it. An unsupported interaction type and
-// a not-installed workspace are Ignored Events (ack 200, no dispatch); a store
-// transport error is a 5xx the platform may retry; a missing required field is a
-// 400.
-func (a *Adapter) handleInteractionForm(w http.ResponseWriter, r *http.Request, dispatch chat.DispatchFunc, raw string) {
+// normalizeInteraction returns the Interaction Event of an interactivity
+// delivery, or a nil Event for an Ignored Event: an interaction type that the
+// adapter does not support, or a workspace with no install. A missing required
+// field is an invalid payload, never an ignore.
+func (a *Adapter) normalizeInteraction(ctx context.Context, d *slackapi.Delivery) (*chat.Event, error) {
 	var payload interactionPayload
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		http.Error(w, "slack: invalid interactivity payload", http.StatusBadRequest)
-		return
+	if err := json.Unmarshal(d.Payload, &payload); err != nil {
+		return nil, invalidPayload(fmt.Errorf("slack: invalid interactivity payload: %w", err))
 	}
-	payload.Raw = json.RawMessage(raw)
-
+	payload.Raw = d.Payload
 	if payload.Type != "block_actions" {
-		w.WriteHeader(http.StatusOK)
-		return
+		return nil, nil
 	}
-
-	_, found, err := a.resolveInstall(r.Context(), payload.Team.ID)
+	_, found, err := a.resolveInstall(ctx, payload.Team.ID)
+	if err != nil || !found {
+		return nil, err
+	}
+	event, err := a.interactionEvent(payload, d)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+		return nil, invalidPayload(err)
 	}
-	if !found {
-		w.WriteHeader(http.StatusOK)
-		return
-	}
-
-	event, err := a.normalizeInteraction(r, payload)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if err := dispatch(r.Context(), event); err != nil {
-		if errors.Is(err, chat.ErrAdmissionRejected) {
-			// Slack does not redeliver block_actions, and the shape's ack body
-			// is not rendered to the user; a non-2xx ack is the truthful
-			// signal the shape supports — Slack surfaces the failed delivery
-			// as a visible warning on the activated component, and the
-			// rejection stays observable through Runtime Observation.
-			http.Error(w, "slack runtime at capacity", http.StatusServiceUnavailable)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
+	return event, nil
 }
 
-// normalizeInteraction decodes a verified Slack block_actions payload into an
-// Interaction Event. A missing required field is a 400, never an ignore.
-func (a *Adapter) normalizeInteraction(r *http.Request, payload interactionPayload) (*chat.Event, error) {
+// interactionEvent validates a block_actions payload and returns its
+// Interaction Event.
+func (a *Adapter) interactionEvent(payload interactionPayload, d *slackapi.Delivery) (*chat.Event, error) {
 	if payload.Team.ID == "" {
 		return nil, errors.New("slack: interaction team id is required")
 	}
@@ -301,11 +248,8 @@ func (a *Adapter) normalizeInteraction(r *http.Request, payload interactionPaylo
 		Tenant:        payload.Team.ID,
 		ThreadID:      threadID,
 		DirectMessage: direct,
-		Retry: chat.RetryMetadata{
-			Num:    r.Header.Get("X-Slack-Retry-Num"),
-			Reason: r.Header.Get("X-Slack-Retry-Reason"),
-		},
-		Raw: payload,
+		Retry:         retryMetadata(d),
+		Raw:           payload,
 		Interaction: &chat.Interaction{
 			Kind:     chat.InteractionBlockAction,
 			ActionID: action.ActionID,
