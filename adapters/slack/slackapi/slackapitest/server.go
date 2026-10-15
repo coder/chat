@@ -197,14 +197,8 @@ func (s *Server) writeAny(w http.ResponseWriter, name string, resp any) {
 
 func (s *Server) write(w http.ResponseWriter, method string, resp Response) {
 	var body []byte
-	switch b := resp.Body.(type) {
-	case nil:
-	case json.RawMessage:
-		body = b
-	case []byte:
-		body = b
-	default:
-		encoded, err := json.Marshal(b)
+	if resp.Body != nil {
+		encoded, err := encodeBody(resp.Body)
 		if err != nil {
 			s.t.Errorf("slackapitest: encode %s response: %v", method, err)
 			http.Error(w, "encode response", http.StatusInternalServerError)
@@ -222,6 +216,19 @@ func (s *Server) write(w http.ResponseWriter, method string, resp Response) {
 	}
 	w.WriteHeader(statusOrOK(resp.StatusCode))
 	_, _ = w.Write(body)
+}
+
+// encodeBody encodes v with the rules of Respond: a json.RawMessage or []byte
+// is used as is, and any other value is encoded as JSON.
+func encodeBody(v any) ([]byte, error) {
+	switch b := v.(type) {
+	case json.RawMessage:
+		return b, nil
+	case []byte:
+		return b, nil
+	default:
+		return json.Marshal(b)
+	}
 }
 
 func statusOrOK(status int) int {

@@ -716,16 +716,12 @@ func (env *socketEnvelope) snapshot() SocketEnvelope {
 	return info
 }
 
-// encodeJSON encodes payload with the rules of Respond.
+// encodeJSON encodes payload with the rules of Respond, and checks that the
+// result is valid JSON, because it goes inside an envelope.
 func encodeJSON(payload any) (json.RawMessage, error) {
-	var raw []byte
-	switch p := payload.(type) {
-	case json.RawMessage:
-		raw = p
-	case []byte:
-		raw = p
-	default:
-		return json.Marshal(p)
+	raw, err := encodeBody(payload)
+	if err != nil {
+		return nil, err
 	}
 	if !json.Valid(raw) {
 		return nil, fmt.Errorf("payload %q is not valid JSON", raw)
