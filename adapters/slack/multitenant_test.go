@@ -78,9 +78,6 @@ func TestSlackConstructionModeSelection(t *testing.T) {
 	if _, err := slack.New(ctx, slack.Options{SigningSecret: "secret"}); err == nil {
 		t.Fatal("C4 neither bot token nor install store should fail")
 	}
-	if _, err := slack.New(ctx, slack.Options{InstallStore: store}); err == nil {
-		t.Fatal("missing signing secret should fail in multi-tenant mode")
-	}
 }
 
 // New needs a transport: a signing secret for Webhook, an app token for

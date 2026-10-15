@@ -767,8 +767,9 @@ func TestListenReconnectsAfterDrop(t *testing.T) {
 	t.Parallel()
 
 	// MinBackoff and MaxBackoff are the same, so a backoff waits at least
-	// half of it.
-	const backoff = 300 * time.Millisecond
+	// half of it. It is long, so that a reconnect at once has time to spare
+	// on a loaded machine.
+	const backoff = time.Second
 	tests := []struct {
 		name string
 		// up is the time that connection 1 is up before the drop.
