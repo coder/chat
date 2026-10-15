@@ -97,5 +97,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.writeAny(w, req.Path, fn(req))
+	resp := fn(req)
+	s.changes.notify()
+	s.writeAny(w, req.Path, resp)
 }

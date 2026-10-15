@@ -112,9 +112,14 @@ func (s *Server) Calls(method string) []Call {
 }
 
 // Wait waits until cond returns true. It calls cond at the start and again
-// after each change in the Server: a Web API call, a file request, or a Socket
-// Mode change. It returns nil when cond returns true, and the error of ctx when
-// ctx is done first. cond must not block.
+// after each change in the Server: a Web API call or a file request when the
+// Server records it and again when its Handle or HandleFile function returns,
+// or a Socket Mode change. It returns nil when cond returns true, and the error
+// of ctx when ctx is done first. cond must not block.
+//
+// Wait does not see a change that a Handle or HandleFile function makes while
+// it runs, until the function returns. To wait for a call while its Handle
+// function blocks, check Calls or FileRequests in cond.
 func (s *Server) Wait(ctx context.Context, cond func() bool) error {
 	for {
 		changed := s.changes.next()
@@ -173,7 +178,9 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		s.write(w, method, Response{Body: json.RawMessage(unknownMethodBody)})
 		return
 	}
-	s.writeAny(w, method, fn(call))
+	resp := fn(call)
+	s.changes.notify()
+	s.writeAny(w, method, resp)
 }
 
 // writeAny writes resp with the rules of Respond.

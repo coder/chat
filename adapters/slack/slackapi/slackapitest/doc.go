@@ -28,9 +28,12 @@
 // close.
 //
 // Server.Wait waits until a condition is true. It checks the condition again
-// after each Web API call, file request, and Socket Mode change, so a test does
-// not need to sleep. SocketMode.WaitLive, SocketMode.WaitClosed, and
-// SocketMode.WaitAcked wait for common conditions with a timeout.
+// after each Web API call, file request, and Socket Mode change, and when a
+// Handle or HandleFile function returns, so a test does not need to sleep. It
+// does not see a change that a Handle function makes before it returns, so a
+// test that waits for a call while its Handle function blocks checks Calls.
+// SocketMode.WaitLive, SocketMode.WaitClosed, and SocketMode.WaitAcked wait for
+// common conditions with a timeout.
 //
 // SignRequest sets the Slack signature headers of a request so that
 // slackapi.VerifyRequest accepts it.

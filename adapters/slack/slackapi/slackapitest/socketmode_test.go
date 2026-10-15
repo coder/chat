@@ -719,3 +719,39 @@ func TestServerWait(t *testing.T) {
 		t.Fatalf("Wait = %v, want context.DeadlineExceeded", err)
 	}
 }
+
+func TestServerWaitSeesHandleChanges(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	checks := make(chan struct{}, 10)
+	var handled atomic.Bool
+	srv.Handle("auth.test", func(slackapitest.Call) any {
+		// Change the state only after Wait checked cond for the recorded
+		// call, so that only the end of this function can wake Wait.
+		select {
+		case <-checks:
+		case <-time.After(waitTimeout):
+		}
+		handled.Store(true)
+		return json.RawMessage(`{"ok":true}`)
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(t.Context(), waitTimeout)
+		defer cancel()
+		done <- srv.Wait(ctx, func() bool {
+			select {
+			case checks <- struct{}{}:
+			default:
+			}
+			return handled.Load()
+		})
+	}()
+	<-checks
+	corePost(t, srv, "auth.test", "application/json", `{}`)
+	if err := <-done; err != nil {
+		t.Fatalf("Wait = %v, want nil after the Handle function changed the state", err)
+	}
+}
