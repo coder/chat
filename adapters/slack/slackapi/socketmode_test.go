@@ -270,6 +270,39 @@ func TestListenAcks(t *testing.T) {
 	requireCloseFrames(t, sm)
 }
 
+// TestListenReadsLargePayloads checks that Listen reads an envelope larger than
+// the 32 KiB default read limit of the websocket library.
+func TestListenReadsLargePayloads(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken, ResendAfter: -1})
+	deliveries := make(chan slackapi.Delivery, 1)
+	errs := make(chan error, 10)
+	opts := fastListen()
+	opts.OnError = sendTo(errs)
+	l := startListen(t, socketClient(srv), func(_ context.Context, d *slackapi.Delivery) (any, error) {
+		deliveries <- *d
+		return nil, nil
+	}, opts)
+	sm.WaitLive(t, socketWait, 1)
+
+	payload := `{"type":"block_actions","value":"` + strings.Repeat("x", 100<<10) + `"}`
+	id := sm.Send("interactive", json.RawMessage(payload))
+	if env := sm.WaitAcked(t, socketWait, id); env.Acks[0].Conn != 1 {
+		t.Errorf("ack on connection %d, want 1", env.Acks[0].Conn)
+	}
+	if d := recv(t, deliveries); string(d.Payload) != payload {
+		t.Errorf("handler got a payload of %d bytes, want %d", len(d.Payload), len(payload))
+	}
+
+	if err := l.stop(t); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	requireCloseFrames(t, sm)
+	requireNoError(t, errs)
+}
+
 func TestListenAcksOnTheSameConnection(t *testing.T) {
 	t.Parallel()
 
