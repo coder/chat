@@ -208,3 +208,4 @@ Operations:
 | [0014](adr/0014-nats-state-adapter.md) | NATS JetStream state adapter | Accepted |
 | [0015](adr/0015-runtime-coordination.md) | Deferred-dispatch admission bound; cross-instance coalescing rejected for now | Accepted |
 | [0016](adr/0016-slack-api-package.md) | Low-level `slackapi` package for applications that own their runtime; the Slack adapter builds on it and the portable surface does not grow | Accepted |
+| [0017](adr/0017-slack-socket-mode.md) | Slack Socket Mode next to HTTP: one transport-neutral delivery and handler, one adapter pipeline, the `Listener` capability, and the first dependency (`github.com/coder/websocket`) | Accepted |
