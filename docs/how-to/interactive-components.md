@@ -13,12 +13,16 @@ typed adapter access.
 
 ## Configure Slack
 
-In your Slack app dashboard, under **Interactivity & Shortcuts**, enable
-interactivity and set the **Request URL** to your existing webhook:
+Over HTTP, in your Slack app dashboard, under **Interactivity &
+Shortcuts**, enable interactivity and set the **Request URL** to your
+existing webhook:
 
 ```text
 https://YOUR_PUBLIC_HOST/webhooks/slack
 ```
+
+Over Socket Mode, Slack turns on interactivity for you and sends clicks over
+the bot's connection, so you do not set a Request URL.
 
 ## Post Something Clickable
 
@@ -115,8 +119,9 @@ mention, post Block Kit content with an `mrkdwn` text element containing
 
 ### Acknowledging In Time
 
-Under the default `DispatchSync`, the adapter sends Slack its empty 2xx only
-after your handler returns, so a slow handler can miss Slack's 3-second
+Under the default `DispatchSync`, the adapter sends Slack its empty 2xx (or
+its ack over Socket Mode) only after your handler returns, so a slow handler
+can miss Slack's 3-second
 budget. Enable [deferred dispatch](deferred-dispatch.md), usually with
 `chat.ConcurrencyQueue`, so the acknowledgement no longer waits for your
 handler.
@@ -161,6 +166,6 @@ err := slackAdapter.RespondURL(ctx, ev.Interaction.Raw, chat.Text("Working on it
   modal view have no channel or message to anchor a thread. They are not
   normalized yet; the adapter rejects them before routing.
 - **Modal submissions are not delivered.** Slack expects the answer to a
-  `view_submission` in the webhook's HTTP response body, which does not fit
+  `view_submission` in the acknowledgement body, which does not fit
   ack-then-work. The adapter acknowledges and drops `view_submission`
   payloads, so your code cannot read submitted values today.

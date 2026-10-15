@@ -24,7 +24,8 @@ Redis, Postgres, and NATS state live in separate Go modules so applications
 that only use core, Slack, or memory state do not pull their dependencies.
 The core module has one dependency, `github.com/coder/websocket`, for the
 Slack Socket Mode client ([ADR 0017](adr/0017-slack-socket-mode.md)). Only
-builds that import `slackapi` or `slackapitest` compile it.
+builds that import the Slack adapter, `slackapi`, or `slackapitest` compile
+it.
 The repository uses `go.work` for local development across the root module,
 the state modules, and the example modules.
 

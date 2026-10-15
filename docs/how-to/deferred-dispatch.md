@@ -1,9 +1,9 @@
 # How To Defer Long-Running Work (Ack-Then-Work)
 
-Slack retries a webhook that is not acknowledged within 3 seconds. Linear
-expects a first agent activity within about 10 seconds. By default the runtime
-runs your handler *before* it acknowledges the webhook, so a handler that
-calls an LLM can easily miss those deadlines.
+Slack retries an event that is not acknowledged within 3 seconds, over HTTP
+and over Socket Mode. Linear expects a first agent activity within about 10
+seconds. By default the runtime runs your handler *before* it acknowledges the
+delivery, so a handler that calls an LLM can easily miss those deadlines.
 
 Deferred dispatch fixes this. The acknowledgement no longer waits for your
 handler, which runs on a detached context
@@ -31,7 +31,7 @@ Start from `chat.DefaultRuntimeOptions()` so you keep the required
 | Option | Default | What it does |
 | --- | --- | --- |
 | `Dispatch` | `DispatchSync` | `DispatchDeferred` turns on ack-then-work. |
-| `DetachTimeout` | `0` | How long a handler may run after the webhook request ends. Required under deferred dispatch: `chat.New` fails while it is zero. |
+| `DetachTimeout` | `0` | How long a handler may run after the acknowledgement. Required under deferred dispatch: `chat.New` fails while it is zero. |
 | `Concurrency` | `ConcurrencyDrop` | What happens to an event that arrives while a handler holds the thread lock. See [Pick a concurrency strategy](#pick-a-concurrency-strategy). |
 | `MaxDetached` | `1024` | The cap on deferred work in flight. Must be positive under deferred dispatch. See [Handle overload](#handle-overload). |
 
@@ -39,12 +39,14 @@ Start from `chat.DefaultRuntimeOptions()` so you keep the required
 
 Dispatch runs in two parts:
 
-1. **Before the acknowledgement**, on the request context: signature
-   verification, normalization, dedupe marking, and thread lock acquisition.
+1. **Before the acknowledgement**, on the context of the delivery: signature
+   verification (over HTTP), normalization, dedupe marking, and thread lock
+   acquisition.
 2. **Launched at acknowledgement time**, on a runtime-managed detached
-   context: your handler. It runs concurrently with the webhook response and
-   may start just before the 2xx is written. While it runs, the runtime renews the
-   thread lock lease in the background.
+   context: your handler. It runs concurrently with the acknowledgement and
+   may start just before the adapter sends it (the 2xx over HTTP, the ack
+   over Socket Mode). While it runs, the runtime renews the thread lock lease
+   in the background.
 
 If the lease is lost — the state backend fails to extend it, it expires, or
 another runtime instance releases it — the runtime cancels the handler's
@@ -56,7 +58,7 @@ that ignores its context keeps running.
 ## Write Handlers For The Detached Context
 
 Handlers keep the same signature. Under deferred dispatch the `ctx` they
-receive is the detached context, not the HTTP request context:
+receive is the detached context, not the context of the delivery:
 
 ```go
 bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
@@ -115,7 +117,7 @@ Two caveats apply to the strategies that make events wait:
   shared state lock still serializes handlers, but follow-ups that landed on
   different replicas each run in turn. The same holds for debounce and
   burst batching. If a superseded event must never run, route each thread's
-  webhooks to one replica or make handlers idempotent.
+  deliveries to one replica or make handlers idempotent.
 
 `ConcurrencyQueue` suits most conversational bots: a follow-up sent while
 the bot is still working waits instead of disappearing.
@@ -133,11 +135,12 @@ A delivery that arrives at the cap is rejected with
 marking, so a later redelivery is not mistaken for a duplicate. The adapter
 answers the platform:
 
-| Delivery | Response |
-| --- | --- |
-| Slack Events API callback, Linear webhook | 503, so the platform retries. |
-| Slack slash command | 200 with a visible "at capacity" message. |
-| Slack `block_actions` click | 503, which Slack shows as a warning on the component. |
+| Delivery | Response over HTTP | Response over Socket Mode |
+| --- | --- | --- |
+| Slack Events API callback | 503, so Slack retries. | No ack, so Slack retries. |
+| Linear webhook | 503, so Linear retries. | Not applicable. |
+| Slack slash command | 200 with a visible "at capacity" message. | An ack with the same message. |
+| Slack `block_actions` click | 503, which Slack shows as a warning on the component. | No ack, which Slack shows as a warning on the component. |
 
 Slack does not redeliver slash commands or clicks, so those get an honest
 busy signal instead of a retry.
