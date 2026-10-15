@@ -30,11 +30,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	defer func() {
-		if err := bot.Shutdown(context.Background()); err != nil {
-			slog.Error("chat shutdown failed", "error", err)
-		}
-	}()
 
 	addr := ":" + os.Getenv("PORT")
 	if addr == ":" {
@@ -70,56 +65,63 @@ func newBot(ctx context.Context, opts slack.Options) (*chat.Chat, error) {
 
 // serve receives Slack events until ctx is done or a transport fails. It runs
 // Socket Mode when opts has an app token, and the webhook server on addr when
-// opts has a signing secret. When one transport stops, serve stops the other.
+// opts has a signing secret. Then it shuts down the webhook server, and the
+// runtime last. The webhook server goes first because Runtime Shutdown does
+// not wait for webhook requests in the sync Dispatch Mode. Runtime Shutdown
+// stops acking new Socket Mode events before it closes the connection.
 func serve(ctx context.Context, bot *chat.Chat, opts slack.Options, addr string) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	var transports []func() error
-	if opts.AppToken != "" {
-		transports = append(transports, func() error {
-			return bot.Listen(ctx, "slack")
-		})
-	}
+	var server *http.Server
 	if opts.SigningSecret != "" {
 		slackWebhook, err := bot.Webhook("slack")
 		if err != nil {
 			return err
 		}
-		server := newWebhookServer(addr, slackWebhook)
-		transports = append(transports, func() error {
-			return runWebhookServer(ctx, server)
-		})
+		server = newWebhookServer(addr, slackWebhook)
 	}
 
-	errs := make(chan error, len(transports))
-	for _, transport := range transports {
-		go func() {
-			defer cancel()
-			errs <- transport()
-		}()
+	errs := make(chan error, 2)
+	running := 0
+	if opts.AppToken != "" {
+		running++
+		// Only Shutdown stops Listen, so the connection closes after
+		// admission closes.
+		go func() { errs <- bot.Listen(context.Background(), "slack") }()
 	}
+	if server != nil {
+		running++
+		go func() { errs <- serveWebhooks(server) }()
+	}
+
 	var err error
-	for range transports {
+	select {
+	case <-ctx.Done():
+	case err = <-errs:
+		running--
+	}
+	if server != nil {
+		err = errors.Join(err, shutdown(server.Shutdown))
+	}
+	err = errors.Join(err, shutdown(bot.Shutdown))
+	for range running {
 		err = errors.Join(err, <-errs)
 	}
 	return err
 }
 
-// runWebhookServer serves until ctx is done, and then shuts the server down.
-func runWebhookServer(ctx context.Context, server *http.Server) error {
-	slog.Info("serving Slack webhooks", "addr", server.Addr)
-	served := make(chan error, 1)
-	go func() { served <- server.ListenAndServe() }()
+// shutdown runs stop with a context that ends after 10 seconds.
+func shutdown(stop func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return stop(ctx)
+}
 
-	select {
-	case err := <-served:
+// serveWebhooks serves until the server shuts down.
+func serveWebhooks(server *http.Server) error {
+	slog.Info("serving Slack webhooks", "addr", server.Addr)
+	if err := server.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
-	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		return server.Shutdown(shutdownCtx)
 	}
+	return nil
 }
 
 func newWebhookServer(addr string, slackWebhook http.Handler) *http.Server {

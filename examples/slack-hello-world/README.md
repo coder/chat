@@ -78,8 +78,10 @@ The bot should reply in the same thread with portable Markdown:
 
 If you enabled `message.im`, you can also send a direct message to the bot.
 
-Press `Ctrl-C` to stop the bot. It closes its Socket Mode connection and its
-HTTP server, and then shuts down the runtime.
+Press `Ctrl-C` to stop the bot. It shuts down its HTTP server first, and
+waits for the requests that run. Then it shuts down the runtime with
+`Chat.Shutdown`. The runtime stops acking new Socket Mode events, and then
+closes the Socket Mode connection.
 
 ## Notes
 

@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
+
+	"github.com/coder/chat"
 	"github.com/coder/chat/adapters/slack"
 	"github.com/coder/chat/adapters/slack/slackapi"
 	"github.com/coder/chat/adapters/slack/slackapi/slackapitest"
@@ -37,7 +40,7 @@ func testOptions(srv *slackapitest.Server) slack.Options {
 // startServe builds the bot of opts and runs serve in a goroutine. stop
 // cancels the context of serve and returns the error of serve. served gets
 // the error of serve when serve returns on its own.
-func startServe(t *testing.T, opts slack.Options, addr string) (stop func() error, served <-chan error) {
+func startServe(t *testing.T, opts slack.Options, addr string) (bot *chat.Chat, stop func() error, served <-chan error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	bot, err := newBot(ctx, opts)
@@ -56,7 +59,7 @@ func startServe(t *testing.T, opts slack.Options, addr string) (stop func() erro
 		cancel()
 		return wait(t, result)
 	}
-	return stop, result
+	return bot, stop, result
 }
 
 func wait(t *testing.T, served <-chan error) error {
@@ -78,7 +81,7 @@ func TestServeRepliesOverSocketMode(t *testing.T) {
 	srv.Respond("chat.postMessage", map[string]any{"ok": true, "channel": "C1", "ts": "111.001"})
 	opts := testOptions(srv)
 	opts.AppToken = testAppToken
-	stop, _ := startServe(t, opts, "")
+	bot, stop, _ := startServe(t, opts, "")
 
 	sm.WaitLive(t, testWait, 1)
 	sm.WaitAcked(t, testWait, sm.Send(string(slackapi.DeliveryEventsAPI), json.RawMessage(`{
@@ -103,6 +106,19 @@ func TestServeRepliesOverSocketMode(t *testing.T) {
 	if err := stop(); err != nil {
 		t.Errorf("serve: %v", err)
 	}
+	if c := sm.WaitClosed(t, testWait, 1); !c.CloseFrame || c.CloseCode != websocket.StatusNormalClosure {
+		t.Errorf("connection = %+v, want a close frame with %v", c, websocket.StatusNormalClosure)
+	}
+	// serve stopped Listen with Runtime Shutdown, so Listen now returns at
+	// once and opens no connection.
+	ctx, cancel := context.WithTimeout(t.Context(), testWait)
+	defer cancel()
+	if err := bot.Listen(ctx, "slack"); err != nil {
+		t.Errorf("Listen after serve: %v", err)
+	}
+	if calls := srv.Calls("apps.connections.open"); len(calls) != 1 {
+		t.Errorf("apps.connections.open calls = %d, want 1", len(calls))
+	}
 }
 
 func TestServeStopsWebhookServerWhenSocketModeFails(t *testing.T) {
@@ -113,7 +129,7 @@ func TestServeStopsWebhookServerWhenSocketModeFails(t *testing.T) {
 	opts := testOptions(srv)
 	opts.AppToken = "xapp-revoked"
 	opts.SigningSecret = "secret"
-	_, served := startServe(t, opts, "127.0.0.1:0")
+	_, _, served := startServe(t, opts, "127.0.0.1:0")
 
 	err := wait(t, served)
 	if apiErr, ok := errors.AsType[*slackapi.APIError](err); !ok || apiErr.Code != "invalid_auth" {
@@ -127,7 +143,7 @@ func TestServeWithoutAppTokenServesOnlyWebhooks(t *testing.T) {
 	srv := slackapitest.NewServer(t)
 	opts := testOptions(srv)
 	opts.SigningSecret = "secret"
-	stop, _ := startServe(t, opts, "127.0.0.1:0")
+	_, stop, _ := startServe(t, opts, "127.0.0.1:0")
 
 	if err := stop(); err != nil {
 		t.Errorf("serve: %v", err)
