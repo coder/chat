@@ -460,7 +460,9 @@ func (c *Chat) Webhook(adapterName string) (http.Handler, error) {
 // Shutdown stops listeners only after it closes admission and drains deferred
 // work. So while Shutdown runs, new deliveries from a listener get
 // ErrAdmissionRejected before the listener closes its connections, and the
-// platform can deliver them again.
+// platform can deliver them again. To get this order, stop Listen with
+// Shutdown. When ctx ends first, the listener closes its connections while
+// admission is still open.
 func (c *Chat) Listen(ctx context.Context, adapterName string) error {
 	assert(c != nil, "Listen called on nil runtime")
 	adapter, ok := c.adapters[adapterName]

@@ -178,6 +178,10 @@ http.Handle("/webhooks/slack", handler)
 Webhook lookup is fallible: a misspelled adapter name is a startup error, not
 a production 404.
 
+With `DispatchSync` (the default), `Shutdown` does not wait for the webhook
+requests that run. Shut the HTTP server down before you call `Shutdown`, so
+that those requests finish before the state shuts down.
+
 Adapters own platform handshakes. For Slack, the `url_verification`
 challenge is answered inside the Slack webhook handler and never reaches
 application handlers.
@@ -190,11 +194,16 @@ public URL. The Slack adapter implements it with Socket Mode
 ([ADR 0017](adr/0017-slack-socket-mode.md)). Run it with `Chat.Listen`:
 
 ```go
-ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-defer stop()
+// Listen runs until Shutdown stops it.
+go func() {
+	if err := bot.Listen(context.Background(), "slack"); err != nil {
+		slog.Error("slack listener failed", "error", err)
+	}
+}()
 
-if err := bot.Listen(ctx, "slack"); err != nil {
-	return err
+// Later, for example on SIGTERM:
+if err := bot.Shutdown(shutdownCtx); err != nil {
+	slog.Error("chat shutdown failed", "error", err)
 }
 ```
 
@@ -207,11 +216,16 @@ started, it returns nil at once. Concurrent calls are allowed, and an
 application can serve the webhook handler of the same adapter at the same
 time.
 
-`Shutdown` stops listeners only after it closes admission and drains deferred
-work. So a delivery that arrives while `Shutdown` runs gets
-`chat.ErrAdmissionRejected`, and the adapter gives the platform the same
-overload answer as at the `MaxDetached` bound. For example, the Slack adapter
-does not ack an Events API delivery, so Slack can deliver it again.
+Stop a listener with `Shutdown`, not with the `Listen` context. `Shutdown`
+stops listeners only after it closes admission and drains deferred work. So a
+delivery that arrives while `Shutdown` runs gets `chat.ErrAdmissionRejected`,
+and the adapter gives the platform the same overload answer as at the
+`MaxDetached` bound. For example, the Slack adapter does not ack an Events API
+delivery, so Slack can deliver it again. You get this order only when you call
+`Shutdown` while `Listen` runs. When the `Listen` context ends first, the
+listener closes its connections while admission is still open. The Slack
+listener then still acks the deliveries that arrive while it drains, and with
+`DispatchDeferred` a later `Shutdown` cancels their work.
 
 ## Routing
 

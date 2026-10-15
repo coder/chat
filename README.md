@@ -29,6 +29,7 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
 
 	"github.com/coder/chat"
 	"github.com/coder/chat/adapters/slack"
@@ -59,7 +60,18 @@ func main() {
 		return err
 	})
 
-	if err := bot.Listen(ctx, "slack"); err != nil {
+	// Listen runs until Shutdown stops it.
+	go func() {
+		if err := bot.Listen(ctx, "slack"); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	// On Ctrl-C, Shutdown stops acking new events, and then closes the connection.
+	interrupted, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	<-interrupted.Done()
+	if err := bot.Shutdown(ctx); err != nil {
 		log.Fatal(err)
 	}
 }

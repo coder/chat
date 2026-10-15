@@ -42,7 +42,9 @@ Its whole job is:
 3. Register one handler: when the bot is mentioned, reply with
    `**hello** _world_` in the same thread.
 4. Call `Chat.Listen`, which connects to Slack over Socket Mode and receives
-   events until you stop the bot.
+   events.
+5. When you stop the bot, call `Chat.Shutdown`. It stops acking new events,
+   and then closes the connection.
 
 ## Step 2: Create A Slack App
 
