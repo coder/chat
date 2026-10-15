@@ -833,7 +833,7 @@ Socket Mode:
 | `ListenOptions` field | Empty value |
 | --- | --- |
 | `OnConnect` | No-op. Called with the `Hello` (`NumConnections`, `AppID`, `Host`) of each connection when it is up. |
-| `OnError` | No-op. Called with each error that `Listen` recovers from, for example `ErrPingTimeout`, or a `*DisconnectError` with the reason `too_many_websockets`. |
+| `OnError` | No-op. Called with each error that `Listen` recovers from, for example `ErrPingTimeout`, `ErrConnectTimeout` (a connect took more than 30 seconds), or a `*DisconnectError` with the reason `too_many_websockets`. |
 | `PingTimeout` | 30 seconds. `Listen` starts to check it after the first ping. |
 | `MinBackoff` | 1 second. |
 | `MaxBackoff` | 1 minute. Also the wait after `too_many_websockets`. |

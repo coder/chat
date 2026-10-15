@@ -34,7 +34,11 @@ const reasonTooManyWebsockets = "too_many_websockets"
 // then replaces the connection.
 var ErrPingTimeout = errors.New("slack: socket mode ping timeout")
 
-var errConnectTimeout = errors.New("slack: socket mode connect timeout")
+// ErrConnectTimeout is the error that Listen gives to ListenOptions.OnError
+// when a connect does not finish in 30 seconds. A connect is the call to
+// apps.connections.open, the websocket handshake, and the wait for hello.
+// Listen then retries with backoff.
+var ErrConnectTimeout = errors.New("slack: socket mode connect timeout")
 
 // ListenOptions configures Listen. The zero value uses the defaults.
 //
@@ -45,8 +49,9 @@ type ListenOptions struct {
 	// connection is up. Nil is a no-op.
 	OnConnect func(Hello)
 	// OnError is called with each error that Listen recovers from: by a retry,
-	// or by a replacement of a connection. It is not called with the error
-	// that Listen returns. Nil is a no-op.
+	// or by a replacement of a connection. Examples are ErrPingTimeout and
+	// ErrConnectTimeout. It is not called with the error that Listen returns.
+	// Nil is a no-op.
 	OnError func(error)
 	// PingTimeout is the longest time without a ping from Slack before Listen
 	// replaces a connection. Listen starts to check it after the first ping.
@@ -440,7 +445,7 @@ type socketConn struct {
 
 func newSocketConn(ctx context.Context, l *listener) *socketConn {
 	deadline := time.Now().Add(connectTimeout)
-	connectCtx, cancelConnect := context.WithDeadlineCause(ctx, deadline, errConnectTimeout)
+	connectCtx, cancelConnect := context.WithDeadlineCause(ctx, deadline, ErrConnectTimeout)
 	handlerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &socketConn{
 		l:               l,
