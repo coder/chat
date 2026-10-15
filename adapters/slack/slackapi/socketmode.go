@@ -326,7 +326,8 @@ func (l *listener) handle(ev connEvent) error {
 }
 
 // promote makes the pending connection the active one, and retires the old
-// active connection.
+// active connection. It ends the backoff, because the backoff only delays the
+// next connect.
 func (l *listener) promote(h Hello) {
 	c := l.pending
 	c.cancelConnect()
@@ -335,7 +336,7 @@ func (l *listener) promote(h Hello) {
 	if l.active != nil {
 		l.retire(l.active)
 	}
-	l.active, l.activeSince, l.replacing = c, time.Now(), false
+	l.active, l.activeSince, l.replacing, l.retry = c, time.Now(), false, nil
 	l.api.logger.Info("slack socket mode connected",
 		"adapter", adapterName, "host", h.Host, "num_connections", h.NumConnections, "app_id", h.AppID)
 	l.opts.OnConnect(h)

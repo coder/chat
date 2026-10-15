@@ -645,6 +645,53 @@ func TestListenTooManyWebsockets(t *testing.T) {
 		requireCloseFrames(t, sm)
 	})
 
+	t.Run("disconnect during a replacement", func(t *testing.T) {
+		t.Parallel()
+		srv := slackapitest.NewServer(t)
+		sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken})
+		gate := make(chan struct{})
+		release := sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(release)
+		handleOpens(srv, func(n int, call slackapitest.Call) any {
+			if n == 2 {
+				<-gate
+			}
+			return sm.Open(call)
+		})
+		errs := make(chan error, 10)
+		hellos := make(chan slackapi.Hello, 3)
+		// The backoff after too_many_websockets is longer than the test waits.
+		l := startListen(t, socketClient(srv), ackAll, slackapi.ListenOptions{
+			MinBackoff: time.Millisecond,
+			MaxBackoff: time.Minute,
+			OnConnect:  sendTo(hellos),
+			OnError:    sendTo(errs),
+		})
+		recv(t, hellos)
+
+		sm.DisconnectConn(1, "warning")
+		waitFor(t, srv, "the replacement connect", func() bool { return len(srv.Calls("apps.connections.open")) == 2 })
+		sm.DisconnectConn(1, "too_many_websockets")
+		if got := slackCodeOf(recv(t, errs)); got != "too_many_websockets" {
+			t.Fatalf("OnError code = %q, want too_many_websockets", got)
+		}
+		release()
+		if h := recv(t, hellos); h.Host != "applink-2" {
+			t.Fatalf("OnConnect(%+v), want connection 2", h)
+		}
+		// Connection 2 is up, so the backoff of connection 1 is over, and a
+		// refresh of connection 2 connects at once.
+		sm.DisconnectConn(2, "refresh_requested")
+		if h := recv(t, hellos); h.Host != "applink-3" {
+			t.Fatalf("OnConnect(%+v), want connection 3", h)
+		}
+
+		if err := l.stop(t); err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		requireCloseFrames(t, sm)
+	})
+
 	t.Run("api error", func(t *testing.T) {
 		t.Parallel()
 		srv := slackapitest.NewServer(t)
