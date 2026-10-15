@@ -542,6 +542,14 @@ func TestSocketModePings(t *testing.T) {
 	second.hello(t)
 	first.waitPings(t, 2)
 	second.waitPings(t, 2)
+	ctx, cancel := context.WithTimeout(t.Context(), waitTimeout)
+	defer cancel()
+	if err := srv.Wait(ctx, func() bool {
+		conns := sm.Conns()
+		return conns[0].Pings >= 2 && conns[1].Pings >= 2
+	}); err != nil {
+		t.Fatalf("wait for 2 answered pings on each connection: %v, conns = %+v", err, sm.Conns())
+	}
 
 	sm.StopPings(1)
 	// One ping can be on the way when StopPings returns.

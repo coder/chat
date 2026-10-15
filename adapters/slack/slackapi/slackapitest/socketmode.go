@@ -109,6 +109,10 @@ type SocketConn struct {
 	// CloseSeq is the sequence number of the close. It is 0 while the
 	// connection is open.
 	CloseSeq int
+	// Pings is the number of pings that the client answered with a pong. A
+	// client handles a ping before it sends the pong, so a test can wait for
+	// Pings to know that the client got a ping.
+	Pings int
 	// CloseFrame reports that the client sent a close frame.
 	CloseFrame bool
 	// CloseCode is the status code in the close frame of the client. It is 0
@@ -592,7 +596,13 @@ func (m *SocketMode) ping(c *socketConn) {
 		}
 		// Ping has no timeout: websocket closes the connection when the
 		// context of a Ping ends during its write.
-		_ = c.ws.Ping(m.ctx)
+		if c.ws.Ping(m.ctx) != nil {
+			continue
+		}
+		m.mu.Lock()
+		c.info.Pings++
+		m.mu.Unlock()
+		m.srv.changes.notify()
 	}
 }
 
