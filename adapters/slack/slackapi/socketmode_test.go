@@ -592,8 +592,6 @@ func TestListenTooManyWebsockets(t *testing.T) {
 		if rejected := sm.WaitClosed(t, socketWait, 2); !rejected.Rejected {
 			t.Errorf("connection 2 = %+v, want a rejected connection", rejected)
 		}
-		// Wait for the rejection of the retry, so that no dial runs when
-		// Listen stops.
 		if got := slackCodeOf(recv(t, errs).err); got != "too_many_websockets" {
 			t.Fatalf("second OnError code = %q, want too_many_websockets", got)
 		}
@@ -921,6 +919,57 @@ func TestListenStopDrainTimeout(t *testing.T) {
 	}
 	if env := sm.Envelope(stuck); len(env.Acks) != 0 {
 		t.Errorf("stuck envelope acks = %+v, want none", env.Acks)
+	}
+	requireCloseFrames(t, sm)
+}
+
+// holdUpgrade is an http.RoundTripper that holds the response to a websocket
+// upgrade until release is closed. If the request context is done then, it
+// closes the connection, as http.Transport does when the context ends before
+// it reads the response.
+type holdUpgrade struct {
+	base    http.RoundTripper
+	held    chan struct{}
+	release chan struct{}
+}
+
+func (h *holdUpgrade) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := h.base.RoundTrip(req)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		return resp, err
+	}
+	close(h.held)
+	<-h.release
+	if err := req.Context().Err(); err != nil {
+		_ = resp.Body.Close()
+		return nil, err
+	}
+	return resp, nil
+}
+
+func TestListenStopDuringTheHandshake(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken})
+	hold := &holdUpgrade{base: srv.Client().Transport, held: make(chan struct{}), release: make(chan struct{})}
+	api := slackapi.New(slackapi.Options{
+		Token:      socketAppToken,
+		BaseURL:    srv.URL(),
+		HTTPClient: &http.Client{Transport: hold},
+	})
+	l := startListen(t, api, ackAll, fastListen())
+	recv(t, hold.held)
+
+	// Slack accepted the connection, but the client has not read the
+	// response yet.
+	l.cancel()
+	close(hold.release)
+	if err := l.wait(t); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	if conns := sm.Conns(); len(conns) != 1 {
+		t.Fatalf("connections = %+v, want 1", conns)
 	}
 	requireCloseFrames(t, sm)
 }

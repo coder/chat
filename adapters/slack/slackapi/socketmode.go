@@ -182,9 +182,9 @@ func (c *Client) OpenConnection(ctx context.Context) (string, error) {
 // Listen opens a new connection, and closes the old one only when the new one
 // is up. The old connection keeps acking until it closes. A connection closes
 // in this order: it waits at most 3 seconds for its running handlers, sends a
-// close frame, and waits for its last message. Then the context of its
-// handlers is cancelled. The context of a handler is not cancelled when ctx
-// is done.
+// close frame, and waits for Slack to close the connection. Then the context
+// of its handlers is cancelled. The context of a handler is not cancelled when
+// ctx is done.
 //
 // Listen gives every other error to ListenOptions.OnError, and retries with
 // backoff (see ListenOptions). A rate limit waits at least its Retry-After.
@@ -193,7 +193,10 @@ func (c *Client) OpenConnection(ctx context.Context) (string, error) {
 // when Slack rejects the token (an *APIError with a code such as invalid_auth
 // or token_revoked) or turns Socket Mode off (a *DisconnectError with the
 // reason link_disabled). When ctx is done, it returns nil. Before it returns,
-// Listen closes every connection and waits for every handler.
+// Listen closes every connection and waits for every handler. A stop does not
+// cancel a websocket handshake that runs: Listen waits for it, at most until
+// the 30 second connect limit, and closes that connection with a close frame
+// too.
 //
 // Listen logs connects, refreshes, and retries to the logger of c.
 func (c *Client) Listen(ctx context.Context, h Handler, opts ListenOptions) error {
@@ -406,9 +409,12 @@ func (l *listener) retire(c *socketConn) {
 
 // socketConn is one Socket Mode connection.
 type socketConn struct {
-	l             *listener
-	connectCtx    context.Context
-	cancelConnect context.CancelFunc
+	l *listener
+	// connectDeadline ends the connect. connectCtx also ends when Listen
+	// stops.
+	connectDeadline time.Time
+	connectCtx      context.Context
+	cancelConnect   context.CancelFunc
 	// ctx is the context of the handlers. cancel runs after the close.
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -432,17 +438,19 @@ type socketConn struct {
 }
 
 func newSocketConn(ctx context.Context, l *listener) *socketConn {
-	connectCtx, cancelConnect := context.WithTimeoutCause(ctx, connectTimeout, errConnectTimeout)
+	deadline := time.Now().Add(connectTimeout)
+	connectCtx, cancelConnect := context.WithDeadlineCause(ctx, deadline, errConnectTimeout)
 	handlerCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	return &socketConn{
-		l:             l,
-		connectCtx:    connectCtx,
-		cancelConnect: cancelConnect,
-		ctx:           handlerCtx,
-		cancel:        cancel,
-		dialed:        make(chan struct{}),
-		done:          make(chan struct{}),
-		silent:        make(chan struct{}),
+		l:               l,
+		connectDeadline: deadline,
+		connectCtx:      connectCtx,
+		cancelConnect:   cancelConnect,
+		ctx:             handlerCtx,
+		cancel:          cancel,
+		dialed:          make(chan struct{}),
+		done:            make(chan struct{}),
+		silent:          make(chan struct{}),
 	}
 }
 
@@ -464,11 +472,13 @@ func (c *socketConn) dial() (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
-	// When Listen stops during the handshake, the cancel closes the TCP
-	// connection with no close frame. Listen accepts this short window. A
-	// handshake that it cannot cancel could delay its return by up to
-	// connectTimeout.
-	ws, _, err := websocket.Dial(c.connectCtx, wsURL, &websocket.DialOptions{
+	// Slack can accept the connection before the handshake returns, and a
+	// cancelled handshake closes it without a close frame. So a stop does not
+	// cancel the handshake: close waits for it, and then sends the close frame.
+	// Only the connect timeout ends it.
+	dialCtx, cancel := context.WithDeadline(context.WithoutCancel(c.connectCtx), c.connectDeadline)
+	defer cancel()
+	ws, _, err := websocket.Dial(dialCtx, wsURL, &websocket.DialOptions{
 		HTTPClient:     api.httpClient,
 		OnPingReceived: c.onPing,
 	})
@@ -607,9 +617,9 @@ func (c *socketConn) end() {
 	}
 }
 
-// close closes the connection: it waits for the running handlers, sends the
-// close frame, waits for the read loop to end, and cancels the context of the
-// handlers.
+// close closes the connection: it waits for a running websocket handshake and
+// the running handlers, sends the close frame, waits for the read loop to end,
+// and cancels the context of the handlers.
 func (c *socketConn) close() {
 	c.cancelConnect()
 	c.pingMu.Lock()
