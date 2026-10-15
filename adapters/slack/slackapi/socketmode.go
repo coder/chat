@@ -120,8 +120,9 @@ type Hello struct {
 
 // DisconnectError is a disconnect message from Slack that Listen treats as an
 // error. Listen returns it for the reason link_disabled (Socket Mode is off in
-// the app settings). It gives it to ListenOptions.OnError for the reason
-// too_many_websockets, and retries.
+// the app settings). It gives it to ListenOptions.OnError, and retries, for the
+// reason too_many_websockets and for any other disconnect message that comes
+// before hello.
 type DisconnectError struct {
 	// Reason is the reason in the message, for example "link_disabled".
 	Reason string
