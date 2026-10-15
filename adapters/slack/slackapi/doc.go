@@ -44,10 +44,19 @@
 // in Options.FileOrigins, and both check every redirect too, so a URL from an
 // untrusted payload cannot send the token or file content to another host.
 //
-// # Inbound requests
+// # Inbound payloads
 //
-// VerifyRequest checks the Slack v0 signature of a webhook request.
-// ParseEnvelope decodes an Events API request body, and Envelope.MessageEvent
+// A Delivery is one inbound payload from Slack: an Events API payload, a slash
+// command, or an interactivity payload. A Handler handles a Delivery and gives
+// the acknowledgement. Its error tells the transport how to answer Slack:
+// ErrBusy, ErrInvalidPayload, or another error.
+//
+// Webhook is the HTTP transport. It is an http.Handler for the request URLs of
+// the app. It checks the signature with VerifyRequest, answers the
+// url_verification request, and gives each other request to its Handler as a
+// Delivery.
+//
+// ParseEnvelope decodes an Events API payload, and Envelope.MessageEvent
 // decodes its app_mention or message event.
 //
 // # Formats
