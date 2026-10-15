@@ -2,6 +2,7 @@ package slack_test
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -366,6 +368,11 @@ func TestTransportParityAdmissionRejected(t *testing.T) {
 			sm.WaitLive(t, transportWait, 1)
 			id := sm.Send(string(tt.typ), payload)
 			socketEvents := overSocket.wait(t, deliveries)
+			// Listen runs the handlers of the sends at the same time, so
+			// they can dispatch out of send order.
+			slices.SortFunc(socketEvents, func(a, b *chat.Event) int {
+				return cmp.Compare(a.Retry.Num, b.Retry.Num)
+			})
 			// Listen waits for its handlers and sends their acks before it
 			// closes the connection, so the fake has every ack after the close.
 			stop()
