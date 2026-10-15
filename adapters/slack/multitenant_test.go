@@ -83,6 +83,36 @@ func TestSlackConstructionModeSelection(t *testing.T) {
 	}
 }
 
+// New needs a transport: a signing secret for Webhook, an app token for
+// Listen, or both.
+func TestSlackConstructionTransportSelection(t *testing.T) {
+	t.Parallel()
+	ctx := t.Context()
+	store := newFakeInstallStore()
+
+	valid := map[string]slack.Options{
+		"signing secret":                  {SigningSecret: "secret", BotToken: "xoxb-test"},
+		"app token":                       {AppToken: "xapp-test", BotToken: "xoxb-test"},
+		"both":                            {SigningSecret: "secret", AppToken: "xapp-test", BotToken: "xoxb-test"},
+		"app token with an install store": {AppToken: "xapp-test", InstallStore: store},
+	}
+	for name, opts := range valid {
+		if _, err := slack.New(ctx, opts); err != nil {
+			t.Errorf("%s: New: %v", name, err)
+		}
+	}
+
+	for name, opts := range map[string]slack.Options{
+		"single install": {BotToken: "xoxb-test"},
+		"multi-tenant":   {InstallStore: store},
+	} {
+		_, err := slack.New(ctx, opts)
+		if err == nil || err.Error() != "slack: signing secret or app token is required" {
+			t.Errorf("%s with no signing secret and no app token: New error = %v, want the transport error", name, err)
+		}
+	}
+}
+
 func newMultiTenantSlackRuntime(t *testing.T, api *slackAPIServer, store chat.InstallStore, now time.Time) *chat.Chat {
 	t.Helper()
 	adapter, err := slack.New(context.Background(), slack.Options{

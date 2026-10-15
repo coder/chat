@@ -19,16 +19,24 @@ import (
 const adapterName = "slack"
 
 type Options struct {
+	// SigningSecret is the signing secret of the Slack app. It enables
+	// Webhook, which checks the signature of each request with it. At least
+	// one of SigningSecret and AppToken is required, and both are allowed.
 	SigningSecret string
-	BotToken      string
-	TeamID        string
-	BotUserID     string
-	BotID         string
+	// AppToken is the app-level token (xapp-) of the Slack app, with the
+	// connections:write scope. It enables Listen, which receives deliveries
+	// over Socket Mode.
+	AppToken  string
+	BotToken  string
+	TeamID    string
+	BotUserID string
+	BotID     string
 	// InstallStore selects Multi-Tenant Adapter mode: per-workspace bot tokens are
-	// resolved per webhook (and per Thread Handle reconstruction) from the store
+	// resolved per delivery (and per Thread Handle reconstruction) from the store
 	// instead of a static BotToken. Supplying both BotToken and InstallStore, or
-	// neither, is a Runtime Construction error. SigningSecret stays required in both
-	// modes: Slack signs with one app-level signing secret, never per-workspace.
+	// neither, is a Runtime Construction error. SigningSecret and AppToken work
+	// the same in both modes: Slack has one of each for each app, never one for
+	// each workspace.
 	InstallStore           chat.InstallStore
 	APIBaseURL             string
 	Client                 *http.Client
@@ -47,9 +55,10 @@ type Options struct {
 }
 
 // SlackInstall is the adapter-specific Install.Credential payload for Slack, a
-// Platform Escape Hatch for credentials. Slack verifies webhooks with one
-// app-level signing secret (kept in Options.SigningSecret), so only the
-// per-workspace bot token rides here; it is used for replies, never verification.
+// Platform Escape Hatch for credentials. Slack has one signing secret and one
+// app-level token for each app (kept in Options.SigningSecret and
+// Options.AppToken), so only the per-workspace bot token rides here; it is used
+// for replies, never to receive deliveries.
 // BotUserID is optional; when set it makes self-filtering tenant-correct for the
 // workspace, and takes second place behind Install.BotActorID.
 type SlackInstall struct {
@@ -59,6 +68,7 @@ type SlackInstall struct {
 
 type Adapter struct {
 	signingSecret          string
+	appToken               string
 	botToken               string
 	teamID                 string
 	botUserID              string
@@ -70,7 +80,7 @@ type Adapter struct {
 	disableNativeEphemeral bool
 }
 
-// slackInstall is the resolved per-event credential the webhook and posting paths
+// slackInstall is the resolved per-event credential the delivery and posting paths
 // share: the bot token used for replies and the bot user id used for tenant-correct
 // self-filtering.
 type slackInstall struct {
@@ -82,12 +92,12 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if opts.SigningSecret == "" {
-		return nil, errors.New("slack: signing secret is required")
+	if opts.SigningSecret == "" && opts.AppToken == "" {
+		return nil, errors.New("slack: signing secret or app token is required")
 	}
 	// Mode selection by capability, validated fail-fast: exactly one of a static bot
-	// token or an install store. Slack's shared signing secret stays in Options for
-	// both modes.
+	// token or an install store. Slack's app-level signing secret and app token stay
+	// in Options for both modes.
 	if opts.BotToken != "" && opts.InstallStore != nil {
 		return nil, errors.New("slack: set either bot token or install store, not both")
 	}
@@ -115,6 +125,7 @@ func New(ctx context.Context, opts Options) (*Adapter, error) {
 	})
 	return &Adapter{
 		signingSecret:          opts.SigningSecret,
+		appToken:               opts.AppToken,
 		botToken:               opts.BotToken,
 		teamID:                 opts.TeamID,
 		botUserID:              opts.BotUserID,
@@ -138,7 +149,7 @@ func (a *Adapter) Name() string {
 }
 
 func (a *Adapter) Init(ctx context.Context) error {
-	// Multi-tenant identity is per-install, resolved per webhook / from each install
+	// Multi-tenant identity is per-install, resolved per delivery / from each install
 	// record, so there is no single auth.test identity to discover at construction.
 	if a.multiTenant() {
 		return nil
@@ -186,14 +197,37 @@ func (a *Adapter) Shutdown(context.Context) error {
 
 // Webhook returns the HTTP transport for the request URLs of the Slack app: the
 // Events API, slash command, and interactivity URLs. It uses the same delivery
-// handler as Listen.
+// handler as Listen. With no Options.SigningSecret, it returns a handler that
+// answers 404 to each request.
 func (a *Adapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
+	if a.signingSecret == "" {
+		return http.NotFoundHandler()
+	}
 	return &slackapi.Webhook{
 		SigningSecret:      a.signingSecret,
 		Handler:            a.deliveryHandler(dispatch),
 		Now:                a.now,
 		SignatureTolerance: a.signatureTolerance,
 	}
+}
+
+var _ chat.Listener = (*Adapter)(nil)
+
+// Listen is the Socket Mode transport. It implements the Listener Optional
+// Capability, which Chat.Listen runs. It connects to Slack with
+// Options.AppToken, and gives each delivery to the same delivery handler as
+// Webhook. It blocks until ctx is done. Then it closes its connections and
+// returns nil.
+//
+// Listen returns an error at once when the adapter has no Options.AppToken. It
+// also returns an error when Slack rejects the app token or turns Socket Mode
+// off (see slackapi.Client.Listen). It logs the errors that it recovers from
+// to Options.Logger.
+func (a *Adapter) Listen(ctx context.Context, dispatch chat.DispatchFunc) error {
+	if a.appToken == "" {
+		return errors.New("slack: app token is required to listen")
+	}
+	return a.api.WithToken(a.appToken).Listen(ctx, a.deliveryHandler(dispatch), slackapi.ListenOptions{})
 }
 
 // deliveryHandler returns the one inbound pipeline of the adapter, for both
@@ -355,12 +389,12 @@ func (a *Adapter) BotActor() chat.Actor {
 	}
 }
 
-// resolveInstall returns the per-tenant credential for an inbound webhook. In
+// resolveInstall returns the per-tenant credential for an inbound delivery. In
 // single-install mode it returns the static token and discovered bot identity. In
 // multi-tenant mode it calls the InstallStore: ErrInstallNotFound (or an empty
 // tenant) signals an Ignored Event (found=false, nil error, caller acks without
 // dispatch); any other store error is a transport failure (found=false, non-nil
-// error, caller returns 5xx). The same resolver serves Thread Handle posting via
+// error, caller does not ack, so Slack can redeliver). The same resolver serves Thread Handle posting via
 // postToken, keyed by the Platform Tenant decoded from the Thread ID.
 func (a *Adapter) resolveInstall(ctx context.Context, tenant string) (slackInstall, bool, error) {
 	if !a.multiTenant() {
@@ -389,7 +423,7 @@ func (a *Adapter) resolveInstall(ctx context.Context, tenant string) (slackInsta
 	}, true, nil
 }
 
-// postToken resolves the per-tenant bot token for an out-of-webhook post (Thread
+// postToken resolves the per-tenant bot token for an out-of-delivery post (Thread
 // Handle reconstruction). ErrInstallNotFound surfaces as a clean error here rather
 // than an Ignored Event: there is no platform request to acknowledge.
 func (a *Adapter) postToken(ctx context.Context, tenant string) (string, error) {
