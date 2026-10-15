@@ -1,6 +1,9 @@
 .clawpatch/
 
-# Example build artifacts (go build in examples/* writes binaries next to main.go)
+# Example build artifacts (go build in examples/* writes binaries next to main.go,
+# and go build ./examples/slack-hello-world at the root writes one there)
+/slack-hello-world
+examples/slack-hello-world/slack-hello-world
 examples/slack-nats-state/slack-nats-state
 examples/slack-postgres-state/slack-postgres-state
 examples/slack-redis-state/slack-redis-state
