@@ -59,6 +59,23 @@
 // ParseEnvelope decodes an Events API payload, and Envelope.MessageEvent
 // decodes its app_mention or message event.
 //
+// # Socket Mode
+//
+// Listen is the Socket Mode transport. The app opens a websocket to Slack, so
+// it needs no public request URL. Call Listen on a Client with the app-level
+// token: api.WithToken(appToken).Listen(ctx, handler, opts). Listen gets the
+// websocket URL with OpenConnection, and opens the websocket with the HTTP
+// client of the Client, so its proxy settings apply. It gives each envelope to
+// its Handler as a Delivery, and acks the envelope on the connection that it
+// came on.
+//
+// Listen keeps a connection up. When Slack asks for a refresh, or stops its
+// pings, Listen opens a new connection before it closes the old one. It retries
+// other errors with backoff, and reports them to ListenOptions.OnError. It
+// returns when ctx is done, or on an error that a retry cannot fix, for example
+// invalid_auth or link_disabled. A connection waits at most 3 seconds for its
+// running handlers, and then closes with a close frame.
+//
 // # Formats
 //
 // MarkdownBlock, ActionsBlock with ButtonElement, and ImageBlock are Block Kit
