@@ -52,12 +52,16 @@ type ListenOptions struct {
 	// replaces a connection. Listen starts to check it after the first ping.
 	// 0 or less uses 30 seconds.
 	PingTimeout time.Duration
-	// MinBackoff is the wait before the first retry. The wait doubles with
-	// each failure in a row, up to MaxBackoff. 0 or less uses 1 second.
+	// MinBackoff is the backoff before the first retry. The backoff doubles
+	// with each failure in a row, up to MaxBackoff. Each wait is a random
+	// value from half the backoff to the full backoff. 0 or less uses 1
+	// second.
 	MinBackoff time.Duration
-	// MaxBackoff is the longest wait before a retry, and the wait after
-	// too_many_websockets. A connection that drops after it was up for at
-	// least MaxBackoff reconnects at once. 0 or less uses 1 minute.
+	// MaxBackoff is the largest backoff, and the backoff after
+	// too_many_websockets. Each wait is a random value from half the backoff
+	// to the full backoff. A connection that was up for at least MaxBackoff
+	// starts the backoff again from MinBackoff, and reconnects at once when
+	// it drops. 0 or less uses 1 minute.
 	MaxBackoff time.Duration
 }
 
@@ -183,16 +187,22 @@ func (c *Client) OpenConnection(ctx context.Context) (string, error) {
 // is done.
 //
 // Listen gives every other error to ListenOptions.OnError, and retries with
-// backoff (see ListenOptions). It returns the error at once, and does not
-// retry, when Slack rejects the token (an *APIError with a code such as
-// invalid_auth or token_revoked) or turns Socket Mode off (a *DisconnectError
-// with the reason link_disabled). When ctx is done, it returns nil. Before it
-// returns, Listen closes every connection and waits for every handler.
+// backoff (see ListenOptions). A rate limit waits at least its Retry-After.
+// Listen does not use the retry policy of c: its own backoff retries
+// apps.connections.open. It returns the error at once, and does not retry,
+// when Slack rejects the token (an *APIError with a code such as invalid_auth
+// or token_revoked) or turns Socket Mode off (a *DisconnectError with the
+// reason link_disabled). When ctx is done, it returns nil. Before it returns,
+// Listen closes every connection and waits for every handler.
 //
 // Listen logs connects, refreshes, and retries to the logger of c.
 func (c *Client) Listen(ctx context.Context, h Handler, opts ListenOptions) error {
+	// The retry policy caps a wait at MaxDelay, so it can retry before the
+	// Retry-After of a rate limit. The backoff of Listen does not.
+	api := *c
+	api.retryPolicy = RetryPolicy{MaxAttempts: 1}.withDefaults()
 	l := &listener{
-		api:     c,
+		api:     &api,
 		handler: h,
 		opts:    opts.withDefaults(),
 		events:  make(chan connEvent),
@@ -262,7 +272,7 @@ func (l *listener) run(ctx context.Context) error {
 		case <-silent:
 			l.api.logger.Warn("slack socket mode ping timeout", "adapter", adapterName, "host", l.active.host)
 			l.opts.OnError(ErrPingTimeout)
-			l.replacing = true
+			l.replace()
 		case ev := <-l.events:
 			if ctx.Err() == nil {
 				err = l.handle(ev)
@@ -299,9 +309,11 @@ func (l *listener) handle(ev connEvent) error {
 		if ev.disconnect != nil {
 			return l.disconnected(ev.disconnect)
 		}
-		healthy := l.settle()
+		// No backoff when a replacement already runs, or when the connection
+		// was healthy.
+		again := l.replacing || l.settle()
 		l.drop()
-		if !healthy {
+		if !again {
 			return l.failed(ev.err)
 		}
 		l.api.logger.Info("slack socket mode reconnect", "adapter", adapterName, "error", ev.err)
@@ -313,7 +325,6 @@ func (l *listener) handle(ev connEvent) error {
 // promote makes the pending connection the active one, and retires the old
 // active connection.
 func (l *listener) promote(h Hello) {
-	l.settle()
 	c := l.pending
 	c.cancelConnect()
 	c.host = h.Host
@@ -330,12 +341,20 @@ func (l *listener) promote(h Hello) {
 // disconnected handles a disconnect message on the active connection.
 func (l *listener) disconnected(err *DisconnectError) error {
 	if fatal(err) || err.Reason == reasonTooManyWebsockets {
+		l.settle()
 		l.drop()
 		return l.failed(err)
 	}
 	l.api.logger.Info("slack socket mode refresh", "adapter", adapterName, "reason", err.Reason, "host", l.active.host)
-	l.replacing = true
+	l.replace()
 	return nil
+}
+
+// replace starts a replacement of the active connection. The active
+// connection keeps reading and acking until the replacement is up.
+func (l *listener) replace() {
+	l.settle()
+	l.replacing = true
 }
 
 func (l *listener) connectFailed(err error) error {
@@ -350,7 +369,6 @@ func (l *listener) failed(err error) error {
 	if fatal(err) {
 		return err
 	}
-	l.settle()
 	l.failures++
 	delay := l.opts.backoff(l.failures, err)
 	l.api.logger.Warn("slack socket mode retry",
@@ -360,11 +378,14 @@ func (l *listener) failed(err error) error {
 	return nil
 }
 
-// settle resets the failure count when the active connection has been up for
-// at least MaxBackoff, so that only a connection that flaps backs off. It
-// reports whether it did.
+// settle resets the failure count when the active connection was up for at
+// least MaxBackoff, so that only a connection that flaps backs off. It runs
+// once for each active connection, when the connection stops being good: it
+// drops, Slack disconnects it, or a replacement starts. During a replacement
+// it does nothing, so the failures of the replacement add up. It reports
+// whether it reset the count.
 func (l *listener) settle() bool {
-	if l.active == nil || time.Since(l.activeSince) < l.opts.MaxBackoff {
+	if l.active == nil || l.replacing || time.Since(l.activeSince) < l.opts.MaxBackoff {
 		return false
 	}
 	l.failures = 0
@@ -443,6 +464,10 @@ func (c *socketConn) dial() (*websocket.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	// When Listen stops during the handshake, the cancel closes the TCP
+	// connection with no close frame. Listen accepts this short window. A
+	// handshake that it cannot cancel could delay its return by up to
+	// connectTimeout.
 	ws, _, err := websocket.Dial(c.connectCtx, wsURL, &websocket.DialOptions{
 		HTTPClient:     api.httpClient,
 		OnPingReceived: c.onPing,

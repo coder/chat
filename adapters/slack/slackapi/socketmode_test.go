@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/http/httputil"
 	"net/url"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -26,9 +27,10 @@ const (
 	socketWait     = 5 * time.Second
 )
 
-// socketClient returns a client for srv that sends the app-level token.
-func socketClient(srv *slackapitest.Server, policy slackapi.RetryPolicy) *slackapi.Client {
-	return coreNewClient(srv, slackapi.Options{Token: socketAppToken, RetryPolicy: policy})
+// socketClient returns a client for srv that sends the app-level token, with
+// the default retry policy.
+func socketClient(srv *slackapitest.Server) *slackapi.Client {
+	return coreNewClient(srv, slackapi.Options{Token: socketAppToken})
 }
 
 // fastListen returns ListenOptions with short backoffs for tests.
@@ -55,7 +57,7 @@ func recv[T any](t *testing.T, ch <-chan T) T {
 	case v := <-ch:
 		return v
 	case <-time.After(socketWait):
-		t.Fatalf("timed out waiting for a %T", *new(T))
+		t.Fatalf("timed out waiting for a %v", reflect.TypeFor[T]())
 		panic("unreachable")
 	}
 }
@@ -163,7 +165,7 @@ func TestOpenConnection(t *testing.T) {
 
 	srv := slackapitest.NewServer(t)
 	srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken})
-	api := socketClient(srv, slackapi.RetryPolicy{})
+	api := socketClient(srv)
 
 	wsURL, err := api.OpenConnection(t.Context())
 	if err != nil {
@@ -194,7 +196,7 @@ func TestOpenConnectionNoURL(t *testing.T) {
 
 	srv := slackapitest.NewServer(t)
 	srv.Respond("apps.connections.open", map[string]any{"ok": true})
-	if _, err := socketClient(srv, slackapi.RetryPolicy{}).OpenConnection(t.Context()); err == nil {
+	if _, err := socketClient(srv).OpenConnection(t.Context()); err == nil {
 		t.Fatal("OpenConnection: err = nil, want an error for a response with no url")
 	}
 }
@@ -207,7 +209,7 @@ func TestListenConnects(t *testing.T) {
 	hellos := make(chan slackapi.Hello, 1)
 	opts := fastListen()
 	opts.OnConnect = sendTo(hellos)
-	l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, opts)
+	l := startListen(t, socketClient(srv), ackAll, opts)
 
 	want := slackapi.Hello{NumConnections: 1, AppID: "A42", Host: "applink-1"}
 	if got := recv(t, hellos); got != want {
@@ -232,7 +234,7 @@ func TestListenAcksOnTheSameConnection(t *testing.T) {
 		}
 		return nil, nil
 	}
-	api := socketClient(srv, slackapi.RetryPolicy{})
+	api := socketClient(srv)
 	hellos := make(chan slackapi.Hello, 2)
 	opts := fastListen()
 	opts.OnConnect = sendTo(hellos)
@@ -303,7 +305,7 @@ func TestListenHandlerErrorSendsNoAck(t *testing.T) {
 		retries <- *d
 		return nil, nil
 	}
-	l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), h, fastListen())
+	l := startListen(t, socketClient(srv), h, fastListen())
 	sm.WaitLive(t, socketWait, 1)
 
 	var ids []string
@@ -356,7 +358,7 @@ func TestListenRefresh(t *testing.T) {
 			errs := make(chan error, 10)
 			opts := fastListen()
 			opts.OnError = sendTo(errs)
-			l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, opts)
+			l := startListen(t, socketClient(srv), ackAll, opts)
 			sm.WaitLive(t, socketWait, 1)
 
 			sm.DisconnectConn(1, reason)
@@ -395,7 +397,7 @@ func TestListenPingTimeout(t *testing.T) {
 	opts := fastListen()
 	opts.PingTimeout = 100 * time.Millisecond
 	opts.OnError = sendTo(errs)
-	l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, opts)
+	l := startListen(t, socketClient(srv), ackAll, opts)
 	sm.WaitLive(t, socketWait, 1)
 	waitFor(t, srv, "a ping on connection 1", func() bool { return sm.Conns()[0].Pings > 0 })
 
@@ -436,7 +438,7 @@ func TestListenFatalErrors(t *testing.T) {
 		errs := make(chan error, 10)
 		opts := fastListen()
 		opts.OnError = sendTo(errs)
-		l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, opts)
+		l := startListen(t, socketClient(srv), ackAll, opts)
 		requireReturns(t, srv, l, errs, "invalid_auth")
 	})
 
@@ -451,7 +453,7 @@ func TestListenFatalErrors(t *testing.T) {
 			errs := make(chan error, 10)
 			opts := fastListen()
 			opts.OnError = sendTo(errs)
-			l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, opts)
+			l := startListen(t, socketClient(srv), ackAll, opts)
 			requireReturns(t, srv, l, errs, code)
 		})
 	}
@@ -463,7 +465,7 @@ func TestListenFatalErrors(t *testing.T) {
 		errs := make(chan error, 10)
 		opts := fastListen()
 		opts.OnError = sendTo(errs)
-		l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, opts)
+		l := startListen(t, socketClient(srv), ackAll, opts)
 		sm.WaitLive(t, socketWait, 1)
 
 		sm.Disconnect("link_disabled")
@@ -505,7 +507,7 @@ func TestListenTooManyWebsockets(t *testing.T) {
 		srv := slackapitest.NewServer(t)
 		sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken, MaxConnections: 1})
 		opens := handleOpens(srv, func(_ int, call slackapitest.Call) any { return sm.Open(call) })
-		api := socketClient(srv, slackapi.RetryPolicy{})
+		api := socketClient(srv)
 		hellos := make(chan slackapi.Hello, 1)
 		holderOpts := fastListen()
 		holderOpts.OnConnect = sendTo(hellos)
@@ -542,6 +544,44 @@ func TestListenTooManyWebsockets(t *testing.T) {
 		requireCloseFrames(t, sm)
 	})
 
+	t.Run("disconnect after hello", func(t *testing.T) {
+		t.Parallel()
+		srv := slackapitest.NewServer(t)
+		sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken})
+		opens := handleOpens(srv, func(_ int, call slackapitest.Call) any { return sm.Open(call) })
+		errs := make(chan stamped, 10)
+		hellos := make(chan slackapi.Hello, 2)
+		l := startListen(t, socketClient(srv), ackAll, slackapi.ListenOptions{
+			MinBackoff: time.Millisecond,
+			MaxBackoff: maxBackoff,
+			OnConnect:  sendTo(hellos),
+			OnError:    stampErrors(errs),
+		})
+		recv(t, hellos)
+
+		sm.DisconnectConn(1, "too_many_websockets")
+		first := recv(t, errs)
+		if got := slackCodeOf(first.err); got != "too_many_websockets" {
+			t.Fatalf("OnError(%v), want too_many_websockets", first.err)
+		}
+		if h := recv(t, hellos); h.Host != "applink-2" {
+			t.Fatalf("OnConnect(%+v), want connection 2", h)
+		}
+		if wait := opens()[1].Sub(first.at); wait < maxBackoff/2 {
+			t.Errorf("reconnect after %s, want at least %s", wait, maxBackoff/2)
+		}
+		// Listen closes connection 1 at once, and does not keep it until
+		// connection 2 is up.
+		if conns := sm.Conns(); conns[0].CloseSeq == 0 || conns[0].CloseSeq > conns[1].HelloSeq {
+			t.Errorf("connections = %+v, want connection 1 closed before connection 2 is up", conns)
+		}
+
+		if err := l.stop(t); err != nil {
+			t.Fatalf("Listen: %v", err)
+		}
+		requireCloseFrames(t, sm)
+	})
+
 	t.Run("api error", func(t *testing.T) {
 		t.Parallel()
 		srv := slackapitest.NewServer(t)
@@ -554,7 +594,7 @@ func TestListenTooManyWebsockets(t *testing.T) {
 		})
 		errs := make(chan stamped, 10)
 		hellos := make(chan slackapi.Hello, 1)
-		l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, slackapi.ListenOptions{
+		l := startListen(t, socketClient(srv), ackAll, slackapi.ListenOptions{
 			MinBackoff: time.Millisecond,
 			MaxBackoff: maxBackoff,
 			OnConnect:  sendTo(hellos),
@@ -578,14 +618,16 @@ func TestListenTooManyWebsockets(t *testing.T) {
 func TestListenHonorsRetryAfter(t *testing.T) {
 	t.Parallel()
 
-	const retryAfter = 300 * time.Millisecond
+	// The Retry-After is longer than the MaxDelay of the default retry policy
+	// (1 second), so a retry of the Client would come too early.
+	const retryAfter = 1500 * time.Millisecond
 	srv := slackapitest.NewServer(t)
 	sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken})
 	opens := handleOpens(srv, func(n int, call slackapitest.Call) any {
 		if n == 1 {
 			return slackapitest.Response{
 				StatusCode: http.StatusTooManyRequests,
-				Header:     http.Header{"Retry-After": {"0.3"}},
+				Header:     http.Header{"Retry-After": {"1.5"}},
 			}
 		}
 		return sm.Open(call)
@@ -595,11 +637,11 @@ func TestListenHonorsRetryAfter(t *testing.T) {
 	opts := fastListen()
 	opts.OnConnect = sendTo(hellos)
 	opts.OnError = sendTo(errs)
-	l := startListen(t, socketClient(srv, slackapi.RetryPolicy{MaxAttempts: 1}), ackAll, opts)
+	l := startListen(t, socketClient(srv), ackAll, opts)
 	recv(t, hellos)
 
-	if rl, ok := errors.AsType[*slackapi.RateLimited](recv(t, errs)); !ok || rl.RetryAfter != retryAfter {
-		t.Errorf("OnError(%v), want *RateLimited with RetryAfter %s", rl, retryAfter)
+	if rl, ok := errors.AsType[*slackapi.RateLimited](recv(t, errs)); !ok || rl.RetryAfter != retryAfter || rl.Attempts != 1 {
+		t.Errorf("OnError(%v), want *RateLimited after 1 attempt with RetryAfter %s", rl, retryAfter)
 	}
 	if times := opens(); times[1].Sub(times[0]) < retryAfter {
 		t.Errorf("retry after %s, want at least the Retry-After of %s", times[1].Sub(times[0]), retryAfter)
@@ -614,38 +656,124 @@ func TestListenHonorsRetryAfter(t *testing.T) {
 func TestListenReconnectsAfterDrop(t *testing.T) {
 	t.Parallel()
 
-	const minBackoff = 100 * time.Millisecond
-	srv := slackapitest.NewServer(t)
-	sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken})
-	opens := handleOpens(srv, func(_ int, call slackapitest.Call) any { return sm.Open(call) })
-	errs := make(chan error, 10)
-	hellos := make(chan slackapi.Hello, 10)
-	l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), ackAll, slackapi.ListenOptions{
-		OnConnect:  sendTo(hellos),
-		OnError:    sendTo(errs),
-		MinBackoff: minBackoff,
-		MaxBackoff: time.Minute,
-	})
-	recv(t, hellos)
+	// MinBackoff and MaxBackoff are the same, so a backoff waits at least
+	// half of it.
+	const backoff = 300 * time.Millisecond
+	tests := []struct {
+		name string
+		// up is the time that connection 1 is up before the drop.
+		up time.Duration
+		// backsOff reports whether the reconnect waits for the backoff.
+		backsOff bool
+	}{
+		// A connection that was up for less than MaxBackoff counts as a
+		// failure, so that a connection that flaps backs off.
+		{name: "short-lived connection", up: 0, backsOff: true},
+		{name: "long-lived connection", up: backoff, backsOff: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := slackapitest.NewServer(t)
+			sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken})
+			opens := handleOpens(srv, func(_ int, call slackapitest.Call) any { return sm.Open(call) })
+			errs := make(chan error, 10)
+			hellos := make(chan slackapi.Hello, 10)
+			l := startListen(t, socketClient(srv), ackAll, slackapi.ListenOptions{
+				OnConnect:  sendTo(hellos),
+				OnError:    sendTo(errs),
+				MinBackoff: backoff,
+				MaxBackoff: backoff,
+			})
+			recv(t, hellos)
+			time.Sleep(tt.up)
 
-	dropped := time.Now()
-	sm.Drop(1)
-	if err := recv(t, errs); err == nil {
-		t.Error("OnError(nil), want the error of the dropped connection")
-	}
-	if h := recv(t, hellos); h.Host != "applink-2" {
-		t.Errorf("OnConnect(%+v), want connection 2", h)
-	}
-	// Connection 1 was up for less than MaxBackoff, so its drop counts as a
-	// failure and the reconnect backs off.
-	if wait := opens()[1].Sub(dropped); wait < minBackoff/2 {
-		t.Errorf("reconnect after %s, want at least %s", wait, minBackoff/2)
-	}
+			dropped := time.Now()
+			sm.Drop(1)
+			if err := recv(t, errs); err == nil {
+				t.Error("OnError(nil), want the error of the dropped connection")
+			}
+			if h := recv(t, hellos); h.Host != "applink-2" {
+				t.Errorf("OnConnect(%+v), want connection 2", h)
+			}
+			wait := opens()[1].Sub(dropped)
+			if tt.backsOff && wait < backoff/2 {
+				t.Errorf("reconnect after %s, want at least %s", wait, backoff/2)
+			}
+			if !tt.backsOff && wait >= backoff/2 {
+				t.Errorf("reconnect after %s, want at once (less than %s)", wait, backoff/2)
+			}
 
-	if err := l.stop(t); err != nil {
-		t.Fatalf("Listen: %v", err)
+			if err := l.stop(t); err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			requireCloseFrames(t, sm)
+		})
 	}
-	requireCloseFrames(t, sm)
+}
+
+func TestListenBacksOffDuringAReplacement(t *testing.T) {
+	t.Parallel()
+
+	const (
+		minBackoff = 20 * time.Millisecond
+		maxBackoff = 300 * time.Millisecond
+		// failing is the number of apps.connections.open calls that fail
+		// after the replacement starts.
+		failing = 4
+	)
+	tests := []struct {
+		name        string
+		pingTimeout time.Duration
+		start       func(sm *slackapitest.SocketMode)
+	}{
+		{name: "refresh", start: func(sm *slackapitest.SocketMode) { sm.DisconnectConn(1, "refresh_requested") }},
+		{name: "ping timeout", pingTimeout: 100 * time.Millisecond, start: func(sm *slackapitest.SocketMode) { sm.StopPings(1) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := slackapitest.NewServer(t)
+			sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken, PingInterval: 10 * time.Millisecond})
+			opens := handleOpens(srv, func(n int, call slackapitest.Call) any {
+				if n > 1 && n <= 1+failing {
+					return map[string]any{"ok": false, "error": "internal_error"}
+				}
+				return sm.Open(call)
+			})
+			hellos := make(chan slackapi.Hello, 2)
+			l := startListen(t, socketClient(srv), ackAll, slackapi.ListenOptions{
+				OnConnect:   sendTo(hellos),
+				PingTimeout: tt.pingTimeout,
+				MinBackoff:  minBackoff,
+				MaxBackoff:  maxBackoff,
+			})
+			recv(t, hellos)
+			// Connection 1 is up for MaxBackoff, so it counts as healthy and
+			// resets the failure count. The reset happens once, when the
+			// replacement starts, and not at each failure.
+			time.Sleep(maxBackoff)
+
+			tt.start(sm)
+			if h := recv(t, hellos); h.Host != "applink-2" {
+				t.Fatalf("OnConnect(%+v), want connection 2", h)
+			}
+			// The old connection stays active during the replacement, but
+			// each failure in a row doubles the wait.
+			times := opens()
+			for n := 1; n <= failing; n++ {
+				wait := times[n+1].Sub(times[n])
+				if want := (minBackoff << (n - 1)) / 2; wait < want {
+					t.Errorf("wait after failure %d = %s, want at least %s", n, wait, want)
+				}
+			}
+
+			if err := l.stop(t); err != nil {
+				t.Fatalf("Listen: %v", err)
+			}
+			requireCloseFrames(t, sm)
+		})
+	}
 }
 
 func TestListenStopDrainsHandlers(t *testing.T) {
@@ -664,7 +792,7 @@ func TestListenStopDrainsHandlers(t *testing.T) {
 		}
 		return nil, nil
 	}
-	l := startListen(t, socketClient(srv, slackapi.RetryPolicy{}), h, fastListen())
+	l := startListen(t, socketClient(srv), h, fastListen())
 	sm.WaitLive(t, socketWait, 1)
 	slow := sm.Send("events_api", json.RawMessage(`{"n":"slow"}`))
 	handlerCtx := recv(t, started)
