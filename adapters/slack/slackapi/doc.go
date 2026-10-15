@@ -4,7 +4,7 @@
 // portable chat.Adapter surface. It holds Slack protocol and data formats only.
 // It has no runtime, state, dispatch, or policy; the application brings those.
 // The Slack adapter (package slack) uses it for its Web API calls, rate-limit
-// retry, signature check, and history reads. See ADR 0016.
+// retry, history reads, and both inbound transports. See ADR 0016 and ADR 0017.
 //
 // The package is experimental. Its exported API may change before promotion.
 // RetryPolicy and RateLimited keep the Slack adapter's supported tier because
@@ -75,6 +75,11 @@
 // returns when ctx is done, or on an error that a retry cannot fix, for example
 // invalid_auth or link_disabled. A connection waits at most 3 seconds for its
 // running handlers, and then closes with a close frame.
+//
+// The app-level token (xapp-) needs the connections:write scope, and Socket
+// Mode must be on in the app settings. Webhook and Listen take the same
+// Handler, so an app can use one transport or both. The Slack adapter runs
+// Listen when the app calls Chat.Listen.
 //
 // # Formats
 //
