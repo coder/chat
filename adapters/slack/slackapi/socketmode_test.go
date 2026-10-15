@@ -221,7 +221,7 @@ func TestListenConnects(t *testing.T) {
 	requireCloseFrames(t, sm)
 }
 
-func TestListenAcksOnTheSameConnection(t *testing.T) {
+func TestListenAcks(t *testing.T) {
 	t.Parallel()
 
 	srv := slackapitest.NewServer(t)
@@ -234,14 +234,8 @@ func TestListenAcksOnTheSameConnection(t *testing.T) {
 		}
 		return nil, nil
 	}
-	api := socketClient(srv)
-	hellos := make(chan slackapi.Hello, 2)
-	opts := fastListen()
-	opts.OnConnect = sendTo(hellos)
-	first := startListen(t, api, h, opts)
-	second := startListen(t, api, h, opts)
-	recv(t, hellos)
-	recv(t, hellos)
+	l := startListen(t, socketClient(srv), h, fastListen())
+	sm.WaitLive(t, socketWait, 1)
 
 	tests := []struct {
 		typ     string
@@ -265,18 +259,62 @@ func TestListenAcksOnTheSameConnection(t *testing.T) {
 		if len(env.Acks) != 1 {
 			t.Fatalf("%s: acks = %+v, want 1", id, env.Acks)
 		}
-		if ack, delivery := env.Acks[0], env.Deliveries[0]; ack.Conn != delivery.Conn {
-			t.Errorf("%s: ack on connection %d, delivery on connection %d", id, ack.Conn, delivery.Conn)
-		}
 		if got := string(env.Acks[0].Payload); got != tt.wantAck {
 			t.Errorf("%s: ack payload = %s, want %q", id, got, tt.wantAck)
 		}
 	}
 
-	for _, l := range []*listening{first, second} {
-		if err := l.stop(t); err != nil {
-			t.Fatalf("Listen: %v", err)
+	if err := l.stop(t); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	requireCloseFrames(t, sm)
+}
+
+func TestListenAcksOnTheSameConnection(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken, ResendAfter: -1})
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	h := func(ctx context.Context, _ *slackapi.Delivery) (any, error) {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-ctx.Done():
 		}
+		return nil, nil
+	}
+	hellos := make(chan slackapi.Hello, 2)
+	opts := fastListen()
+	opts.OnConnect = sendTo(hellos)
+	l := startListen(t, socketClient(srv), h, opts)
+	recv(t, hellos)
+	id := sm.Send("events_api", map[string]string{"n": "slow"})
+	recv(t, started)
+
+	// Listen calls OnConnect after it makes connection 2 the active
+	// connection. The ack must still go on connection 1.
+	sm.DisconnectConn(1, "refresh_requested")
+	if h := recv(t, hellos); h.Host != "applink-2" {
+		t.Fatalf("OnConnect(%+v), want connection 2", h)
+	}
+	if c := sm.Conns()[0]; c.CloseSeq != 0 {
+		t.Fatalf("connection 1 = %+v, want it open while its handler runs", c)
+	}
+	close(release)
+
+	ack := sm.WaitAcked(t, socketWait, id).Acks[0]
+	old := sm.WaitClosed(t, socketWait, 1)
+	if ack.Conn != 1 || ack.Seq > old.CloseSeq {
+		t.Errorf("ack = %+v, connection 1 closed at seq %d: want the ack on connection 1 before it closed", ack, old.CloseSeq)
+	}
+	if conns := sm.Conns(); conns[1].HelloSeq == 0 || conns[1].HelloSeq > old.CloseSeq {
+		t.Errorf("connections = %+v, want connection 2 up before connection 1 closed", conns)
+	}
+
+	if err := l.stop(t); err != nil {
+		t.Fatalf("Listen: %v", err)
 	}
 	requireCloseFrames(t, sm)
 }
@@ -349,7 +387,7 @@ func TestListenRefresh(t *testing.T) {
 			gate := make(chan struct{})
 			release := sync.OnceFunc(func() { close(gate) })
 			t.Cleanup(release)
-			opens := handleOpens(srv, func(n int, call slackapitest.Call) any {
+			handleOpens(srv, func(n int, call slackapitest.Call) any {
 				if n == 2 {
 					<-gate
 				}
@@ -362,7 +400,9 @@ func TestListenRefresh(t *testing.T) {
 			sm.WaitLive(t, socketWait, 1)
 
 			sm.DisconnectConn(1, reason)
-			waitFor(t, srv, "the replacement connect", func() bool { return len(opens()) == 2 })
+			// The Handle function of the call blocks, so wait for the call
+			// that the Server records.
+			waitFor(t, srv, "the replacement connect", func() bool { return len(srv.Calls("apps.connections.open")) == 2 })
 			during := sm.Send("events_api", map[string]string{"n": "during"})
 			if env := sm.WaitAcked(t, socketWait, during); env.Acks[0].Conn != 1 {
 				t.Errorf("envelope during the refresh acked on connection %d, want 1", env.Acks[0].Conn)
@@ -409,6 +449,31 @@ func TestListenPingTimeout(t *testing.T) {
 	if conns := sm.Conns(); len(conns) < 2 || conns[1].HelloSeq == 0 || conns[1].HelloSeq > old.CloseSeq {
 		t.Fatalf("connections = %+v, want connection 2 up before connection 1 closed", conns)
 	}
+
+	if err := l.stop(t); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	requireCloseFrames(t, sm)
+}
+
+func TestListenPingTimeoutStartsAfterTheFirstPing(t *testing.T) {
+	t.Parallel()
+
+	const pingTimeout = 50 * time.Millisecond
+	srv := slackapitest.NewServer(t)
+	sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken, PingInterval: -1})
+	errs := make(chan error, 10)
+	opts := fastListen()
+	opts.PingTimeout = pingTimeout
+	opts.OnError = sendTo(errs)
+	l := startListen(t, socketClient(srv), ackAll, opts)
+	sm.WaitLive(t, socketWait, 1)
+
+	time.Sleep(4 * pingTimeout)
+	if conns := sm.Conns(); len(conns) != 1 || !conns[0].Live() {
+		t.Errorf("connections = %+v, want only connection 1, and live", conns)
+	}
+	requireNoError(t, errs)
 
 	if err := l.stop(t); err != nil {
 		t.Fatalf("Listen: %v", err)
@@ -819,6 +884,43 @@ func TestListenStopDrainsHandlers(t *testing.T) {
 	closed := sm.WaitClosed(t, socketWait, 1)
 	if env := sm.Envelope(slow); len(env.Acks) != 1 || env.Acks[0].Seq > closed.CloseSeq {
 		t.Errorf("slow envelope acks = %+v, close seq %d: want an ack before the close", env.Acks, closed.CloseSeq)
+	}
+	requireCloseFrames(t, sm)
+}
+
+func TestListenStopDrainTimeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for the drain timeout of 3 seconds")
+	}
+	t.Parallel()
+
+	const drainTimeout = 3 * time.Second
+	srv := slackapitest.NewServer(t)
+	sm := srv.SocketMode(slackapitest.SocketModeOptions{AppToken: socketAppToken, ResendAfter: -1})
+	started := make(chan struct{}, 1)
+	h := func(ctx context.Context, _ *slackapi.Delivery) (any, error) {
+		started <- struct{}{}
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	l := startListen(t, socketClient(srv), h, fastListen())
+	sm.WaitLive(t, socketWait, 1)
+	stuck := sm.Send("events_api", map[string]string{"n": "stuck"})
+	recv(t, started)
+
+	stopped := time.Now()
+	l.cancel()
+	sm.WaitClosed(t, socketWait, 1)
+	if wait := time.Since(stopped); wait < drainTimeout || wait > drainTimeout+time.Second {
+		t.Errorf("connection 1 closed %s after the stop, want after the drain timeout of %s", wait, drainTimeout)
+	}
+	// The handler returns only when its context is cancelled, and Listen
+	// waits for it.
+	if err := l.wait(t); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	if env := sm.Envelope(stuck); len(env.Acks) != 0 {
+		t.Errorf("stuck envelope acks = %+v, want none", env.Acks)
 	}
 	requireCloseFrames(t, sm)
 }
