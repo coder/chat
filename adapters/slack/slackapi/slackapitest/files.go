@@ -90,6 +90,7 @@ func (s *Server) serveFile(w http.ResponseWriter, r *http.Request) {
 	s.fileRequests[req.Path] = append(s.fileRequests[req.Path], req)
 	fn := s.fileHandlers[req.Path]
 	s.mu.Unlock()
+	s.changes.notify()
 
 	if fn == nil {
 		s.t.Errorf("slackapitest: no file at path %q", req.Path)

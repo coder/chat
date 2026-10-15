@@ -1,6 +1,7 @@
 package slackapitest
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"mime"
@@ -26,11 +27,14 @@ type Server struct {
 	srv   *httptest.Server
 	files *httptest.Server
 
+	changes notifier
+
 	mu           sync.Mutex
 	handlers     map[string]func(Call) any
 	calls        map[string][]Call
 	fileHandlers map[string]func(FileRequest) any
 	fileRequests map[string][]FileRequest
+	socketMode   *SocketMode
 }
 
 // Call is one request that the Server received.
@@ -107,7 +111,34 @@ func (s *Server) Calls(method string) []Call {
 	return slices.Clone(s.calls[method])
 }
 
+// Wait waits until cond returns true. It calls cond at the start and again
+// after each change in the Server: a Web API call, a file request, or a Socket
+// Mode change. It returns nil when cond returns true, and the error of ctx when
+// ctx is done first. cond must not block.
+func (s *Server) Wait(ctx context.Context, cond func() bool) error {
+	for {
+		changed := s.changes.next()
+		if cond() {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == socketModePath {
+		s.mu.Lock()
+		m := s.socketMode
+		s.mu.Unlock()
+		if m != nil {
+			m.serve(w, r)
+			return
+		}
+	}
 	method, ok := strings.CutPrefix(r.URL.Path, apiPrefix)
 	if !ok || method == "" {
 		s.t.Errorf("slackapitest: unexpected request path %q", r.URL.Path)
@@ -135,6 +166,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 	s.calls[method] = append(s.calls[method], call)
 	fn := s.handlers[method]
 	s.mu.Unlock()
+	s.changes.notify()
 
 	if fn == nil {
 		s.t.Errorf("slackapitest: no response for method %q", method)
@@ -195,4 +227,29 @@ func statusOrOK(status int) int {
 func isForm(contentType string) bool {
 	mediaType, _, err := mime.ParseMediaType(contentType)
 	return err == nil && mediaType == "application/x-www-form-urlencoded"
+}
+
+// notifier wakes the goroutines in Server.Wait when the Server changes.
+type notifier struct {
+	mu      sync.Mutex
+	changed chan struct{}
+}
+
+// next returns a channel that is closed at the next change.
+func (n *notifier) next() <-chan struct{} {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.changed == nil {
+		n.changed = make(chan struct{})
+	}
+	return n.changed
+}
+
+func (n *notifier) notify() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.changed != nil {
+		close(n.changed)
+		n.changed = nil
+	}
 }

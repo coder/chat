@@ -71,6 +71,6 @@
 //
 // # Tests
 //
-// Package slackapitest provides a fake Slack Web API server and a request
-// signer for tests of code that uses this package.
+// Package slackapitest provides a fake Slack Web API server with a fake Socket
+// Mode, and a request signer, for tests of code that uses this package.
 package slackapi
