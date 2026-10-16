@@ -26,7 +26,7 @@ This ADR reopens one documented non-goal, surfaced explicitly per `docs/agents/d
 
 Expand **Concurrency Strategy** to the upstream-aligned set, keeping `drop` the default and unchanged:
 
-- **`drop`** (default): on a **Lock Conflict** the new **Webhook Event** is acknowledged and recorded as unhandled contention. Today's behavior.
+- **`drop`** (default): on a **Lock Conflict** the new **Delivery** is acknowledged and recorded as unhandled contention. Today's behavior.
 - **`queue`**: the new event waits for the in-flight handler to finish, then dispatches within the same lock scope. Only the most recent queued event for a scope is dispatched; superseded events are surfaced as skipped through **Runtime Observation**. This is the companion to `DispatchDeferred`.
 - **`debounce`**: each new event resets a timer (`debounceMs`); only the final event in a quiet-period dispatches. For rapid edits/typing.
 - **`burst`**: waits `debounceMs` on an idle scope, then dispatches the collected batch. A batch-oriented sibling of `queue`/`debounce`.

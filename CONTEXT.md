@@ -17,7 +17,7 @@ A single-install OAuth credential pair that lets a platform app act as itself ra
 _Avoid_: Personal API key, user OAuth token, marketplace installation
 
 **Runtime Shutdown**:
-The idempotent cleanup step that asks adapters and runtime state to release resources.
+The idempotent cleanup step that closes dispatch admission, drains deferred work, stops running **Listeners**, and then asks adapters and runtime state to release resources.
 _Avoid_: Best-effort silent cleanup
 
 **Handler Registration**:
@@ -93,8 +93,16 @@ An optional observe-only metrics and tracing surface beyond structured-log **Run
 _Avoid_: Metrics framework, middleware, bundled exporter
 
 **Webhook Handler**:
-An `http.Handler` entrypoint exposed by the runtime for one **Platform Adapter**.
+An `http.Handler` entrypoint exposed by the runtime for one **Platform Adapter**; it receives **Deliveries** that the platform sends over HTTP.
 _Avoid_: Built-in server, router integration
+
+**Listener**:
+An **Optional Capability** of a **Platform Adapter** that opens an outbound connection to the platform and receives **Deliveries** over it until the context ends; the application runs it with `Chat.Listen`.
+_Avoid_: Server, poller, background goroutine the runtime starts on its own
+
+**Socket Mode**:
+Slack's websocket transport: the app opens the connection with an app-level token, and Slack sends **Deliveries** over it, so the app needs no public URL.
+_Avoid_: RTM API, websocket server
 
 **Webhook Mount**:
 The application step that asks the runtime for a **Webhook Handler** for a named adapter.
@@ -105,7 +113,7 @@ A platform-specific webhook setup request that an adapter must answer without ru
 _Avoid_: Application event, user handler
 
 **Runtime State**:
-The required persistent state used by the runtime for thread subscriptions, webhook dedupe, locks, and runtime cache.
+The required persistent state used by the runtime for thread subscriptions, **Delivery** dedupe, locks, and runtime cache.
 _Avoid_: Optional state, default memory
 
 **Thread Application State**:
@@ -113,7 +121,7 @@ Product-specific state that an application associates with a **Thread** outside 
 _Avoid_: Runtime state, thread.state
 
 **Message History**:
-Past messages in a **Thread** fetched from the platform after their original webhook delivery.
+Past messages in a **Thread** fetched from the platform after their original **Delivery**.
 _Avoid_: Current event, application context store
 
 **History Reader**:
@@ -138,16 +146,16 @@ A production **Runtime State** implementation for deployments standardized on
 NATS JetStream as their coordination store.
 _Avoid_: Core NATS pub/sub, message bus, per-key TTL
 
-**Webhook Event**:
-A single inbound delivery from a platform adapter before runtime dedupe and handler routing.
-_Avoid_: Message, request
+**Delivery**:
+One inbound payload that a platform sends to an adapter, over a **Webhook Handler** or a **Listener**, before runtime dedupe and handler routing.
+_Avoid_: Message, request, Webhook Event
 
 **Event Identity**:
 The stable adapter-scoped identifier used to deduplicate a platform event across deliveries.
 _Avoid_: Retry number, request id
 
 **Retry Metadata**:
-Platform delivery metadata that explains a repeated webhook attempt without changing the event's identity.
+Platform delivery metadata that explains a repeated **Delivery** attempt without changing the event's identity.
 _Avoid_: Dedupe key
 
 **Runtime Options**:
@@ -171,11 +179,11 @@ A token-owned **Thread Lock** record that can only be released or extended by it
 _Avoid_: Untokened lock, delete-only lock
 
 **Lock Conflict**:
-A runtime condition where a **Webhook Event** is accepted but not handled because its **Thread** is already locked.
+A runtime condition where a **Delivery** is accepted but not handled because its **Thread** is already locked.
 _Avoid_: Duplicate, handler failure
 
 **Runtime Dispatch**:
-The runtime-owned step that routes a normalized **Webhook Event** to the appropriate application handler.
+The runtime-owned step that routes a normalized **Delivery** to the appropriate application handler.
 _Avoid_: Adapter dispatch, job processing
 
 **Dispatch Context**:
@@ -191,7 +199,7 @@ The deferred-dispatch contract where the adapter acknowledges within the platfor
 _Avoid_: Synchronous handler, fire-and-forget goroutine
 
 **Detached Work Context**:
-A runtime-derived context that outlives the inbound request so a deferred handler keeps working after acknowledgement; bounded by a detach timeout and cancelled by **Runtime Shutdown**.
+A runtime-derived context that outlives the inbound request or **Delivery** so a deferred handler keeps working after acknowledgement; bounded by a detach timeout and cancelled by **Runtime Shutdown**.
 _Avoid_: Request context, context.Background()
 
 **Admission Bound**:
@@ -207,7 +215,7 @@ A valid platform event that the adapter acknowledges without handing to runtime 
 _Avoid_: Rejected webhook, accepted event
 
 **Platform Adapter**:
-The platform-specific boundary that verifies inbound webhooks, normalizes events, and renders outbound posts for one chat platform.
+The platform-specific boundary that receives and verifies inbound **Deliveries** over a **Webhook Handler** or a **Listener**, normalizes events, and renders outbound posts for one chat platform.
 _Avoid_: Runtime router, app handler
 
 **Adapter Initialization**:
@@ -235,7 +243,7 @@ An explicit typed helper path for retrieving a registered **Platform Adapter** w
 _Avoid_: Unchecked type assertion in examples
 
 **Slack API Package**:
-The low-level `slackapi` package of Slack Web API calls, request verification, Events API parsing, and Slack data formats on raw Slack IDs, for applications that own their runtime; the Slack **Platform Adapter** uses it, and it has no runtime, state, dispatch, or policy.
+The low-level `slackapi` package of Slack Web API calls, request verification, Events API parsing, both inbound transports (an HTTP webhook handler and a **Socket Mode** client), and Slack data formats on raw Slack IDs, for applications that own their runtime; the Slack **Platform Adapter** uses it, and it has no runtime, state, dispatch, or policy.
 _Avoid_: Slack adapter, portable surface, complete Slack SDK
 
 **Agent Activity Thought**:
@@ -343,7 +351,7 @@ A **Platform Adapter** configured for one **Platform Tenant** without runtime OA
 _Avoid_: Multi-workspace adapter
 
 **Multi-Tenant Adapter**:
-A **Platform Adapter** that resolves per-**Platform Tenant** credentials at webhook time via an app-owned **Install Store**, instead of the **Single-Install Adapter** default.
+A **Platform Adapter** that resolves per-**Platform Tenant** credentials for each **Delivery** via an app-owned **Install Store**, instead of the **Single-Install Adapter** default.
 _Avoid_: Default adapter mode, runtime-owned install database
 
 **Install Store**:
@@ -351,7 +359,7 @@ An app-owned **Optional Capability** the runtime defines and the application imp
 _Avoid_: Runtime credential database, account linking, OAuth web flow
 
 **Supported Platform Shape**:
-The subset of a platform webhook payload that an adapter explicitly understands and normalizes.
+The subset of a platform **Delivery** payload that an adapter explicitly understands and normalizes.
 _Avoid_: Full platform schema, strict external SDK model
 
 ## Relationships
@@ -363,8 +371,9 @@ _Avoid_: Full platform schema, strict external SDK model
 - **App-Actor Client Credentials** access tokens are cached in the Linear adapter process for MVP; **Runtime State** is not expanded to store adapter credential caches.
 - **App-Actor Client Credentials** tokens are refreshed lazily before Linear API calls when near expiry; the MVP does not run a background token refresher.
 - **App-Actor Client Credentials** are resolved during **Adapter Initialization**; invalid credentials or missing app actor identity fail startup before webhooks are served.
-- **Runtime Construction** returns configuration and initialization errors instead of deferring them to the first webhook.
-- **Runtime Shutdown** attempts all adapter cleanup hooks before state cleanup and returns joined cleanup errors.
+- **Runtime Construction** returns configuration and initialization errors instead of deferring them to the first **Delivery**.
+- **Runtime Shutdown** closes dispatch admission, drains deferred work, and stops running **Listeners**, in that order; then it attempts all adapter cleanup hooks before state cleanup and returns joined cleanup errors.
+- **Runtime Shutdown** stops **Listeners** only after it closes admission, so a **Delivery** that a **Listener** receives during shutdown gets the same overload outcome as one that arrives at a **Webhook Handler**.
 - **Runtime Construction** does not require application handlers; missing **Handler Registration** is a no-op for that route.
 - **Handler Registration** may happen through methods on the constructed runtime.
 - **Handler Registration** installs or atomically replaces one **Routing Hook** handler; it does not append to a handler chain.
@@ -411,6 +420,9 @@ _Avoid_: Full platform schema, strict external SDK model
 - **Runtime Observation** defaults to structured logging, not middleware or a metrics framework; an optional **Observation Hook** adds an observe-only metrics and tracing seam with no hard telemetry dependency in the core.
 - The runtime exposes **Webhook Handlers** and does not own HTTP server, router, TLS, or graceful-shutdown concerns.
 - A **Webhook Mount** fails immediately when the named adapter is not registered.
+- The runtime runs a **Listener** only when the application calls `Chat.Listen`; `Chat.Listen` fails immediately when the named adapter is not registered or does not implement **Listener**.
+- A **Platform Adapter** sends each **Delivery** through one inbound pipeline, so a **Webhook Handler** and a **Listener** produce the same **Event** for the same payload.
+- The Slack **Platform Adapter** implements **Listener** with **Socket Mode** when it has an app-level token; it can serve a **Webhook Handler** and a **Listener** at the same time.
 - A **Platform Adapter** handles its own **Platform Handshake** requests before runtime dispatch.
 - A **Go Chat Runtime** requires **Runtime State**; it must not silently create **Memory State** for production-facing construction.
 - **Runtime State** is coordination state, not **Thread Application State**.
@@ -421,7 +433,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - The **Linear App-Actor Slice** includes one memory-backed hello-world example for local dogfooding; production deployments should choose Redis or Postgres **Runtime State** separately.
 - **Memory State** is suitable for tests and local development, not horizontally scaled deployment.
 - The MVP includes **Redis State** so the **Slack-First Slice** can run across multiple instances.
-- The runtime deduplicates **Webhook Events** and serializes handler execution with a **Thread Lock**.
+- The runtime deduplicates **Deliveries** and serializes handler execution with a **Thread Lock**.
 - In the **Linear App-Actor Slice**, **Event Identity** follows the Linear source comment identity for the logical user message rather than the webhook delivery identity.
 - **Event Identity** is the dedupe key; **Retry Metadata** is recorded for observation only.
 - Dedupe TTL and lock TTL belong in **Runtime Options**.
@@ -432,14 +444,14 @@ _Avoid_: Full platform schema, strict external SDK model
 - Debounce coalesces on a configured quiet period and requires deferred **Dispatch Mode**; concurrent takes no **Thread Lock** and is bounded by a configured maximum; skipped (superseded) events are always observable, never silent.
 - Burst batches routed events per lock scope during a fixed collection window (anchored at the first member, optionally sealed early by a batch cap) and dispatches the batch in join order under one **Thread Lock** hold, each member with its own detach budget; batch shaping is delivery-preserving (an accepted member is never dropped), parked members count against the **Admission Bound**, batches for one scope dispatch in seal order, and batching is per runtime instance.
 - A deferred handler whose **Lock Lease** is lost mid-run is cancelled rather than left running unserialized.
-- A **Thread Lock** coordinates processing of distinct **Webhook Events** for the same **Thread**; it never deduplicates them, and what happens to a conflicting event is decided by the **Concurrency Strategy** (drop acknowledges and drops it; queue coalesces waiters per process and runs the most recent after the lock releases).
+- A **Thread Lock** coordinates processing of distinct **Deliveries** for the same **Thread**; it never deduplicates them, and what happens to a conflicting event is decided by the **Concurrency Strategy** (drop acknowledges and drops it; queue coalesces waiters per process and runs the most recent after the lock releases).
 - A **Thread Lock** is represented as a **Lock Lease** with an ownership token.
 - Releasing or extending a **Lock Lease** must verify the ownership token so an expired holder cannot affect a newer holder.
 - A **Lock Conflict** is acknowledged to the platform by default and recorded as unhandled runtime contention.
-- An adapter accepts and normalizes a **Webhook Event**, but **Runtime Dispatch** decides which handler runs.
+- An adapter accepts and normalizes a **Delivery**, but **Runtime Dispatch** decides which handler runs.
 - The **Linear App-Actor Slice** preserves synchronous **Runtime Dispatch** for MVP; long-running Linear agent work should post an early **Agent Activity Thought** and enqueue follow-up work in application code.
 - **Runtime Dispatch** defaults to synchronous (**Dispatch Mode** sync); a deferred **Dispatch Mode** (**Ack-Then-Work**) is available opt-in and runs the handler on the **Detached Work Context** after acknowledgement.
-- The synchronous **Dispatch Context** comes from the inbound webhook request; under deferred **Dispatch Mode** the **Thread Lock** is held across the detached work and refreshed before its lease expires.
+- The synchronous **Dispatch Context** comes from the inbound webhook request, or from the handler context of a **Delivery** that a **Listener** receives; under deferred **Dispatch Mode** the **Thread Lock** is held across the detached work and refreshed before its lease expires.
 - Runtime locks must be released when **Dispatch Context** is cancelled or handler execution exits.
 - **Runtime State** mutations performed during synchronous dispatch respect the caller's **Dispatch Context** and fail when it is cancelled.
 - Outbound rate-limit retry is **Platform Adapter**-owned via a per-adapter **Retry Policy**: bounded by an attempt cap and cumulative ceiling, never sleeping past the caller's deadline, surfacing exhaustion as a typed **Rate Limited** error, visible through **Runtime Observation** and the **Observation Hook**; long throttles move to **Ack-Then-Work** rather than longer synchronous sleeps.
@@ -447,11 +459,11 @@ _Avoid_: Full platform schema, strict external SDK model
 - Invalid verification or invalid platform payloads are not **Accepted Events**.
 - An **Ignored Event** is acknowledged to the platform without runtime handler dispatch.
 - Invalid signatures and malformed requests are rejected rather than treated as **Ignored Events**.
-- A **Platform Adapter** owns platform webhook verification and message rendering, but **Runtime Dispatch** owns handler routing.
+- A **Platform Adapter** owns its platform transports (webhook verification and any **Listener** connection) and message rendering, but **Runtime Dispatch** owns handler routing.
 - A **Platform Adapter** should not expose normal app paths that bypass runtime dedupe, locking, or subscription checks.
-- **Adapter Initialization** must fail before serving webhooks when required credentials or bot identity are missing.
+- **Adapter Initialization** must fail before the adapter receives **Deliveries** when required credentials or bot identity are missing.
 - Tests may inject **Adapter Initialization** facts that production discovers from the platform.
-- A **Webhook Event** is adapter input; an **Event** is the normalized runtime input derived from it.
+- A **Delivery** is adapter input; an **Event** is the normalized runtime input derived from it.
 - A **Message** may be part of an **Event**, but not every **Event** is a **Message**.
 - Message **Routing Hooks** receive a **Message Event** so handlers can use both event-level context and message-specific fields.
 - A **Platform Escape Hatch** supports platform-specific needs, but common flows should use normalized **Event**, **Message**, and **Thread** fields.
@@ -559,6 +571,9 @@ _Avoid_: Full platform schema, strict external SDK model
 > **Dev:** "Should the SDK start its own HTTP server?"
 > **Domain expert:** "No, expose a **Webhook Handler** so applications can mount it in their existing server or router."
 
+> **Dev:** "Does a local Slack bot need a public URL or a tunnel?"
+> **Domain expert:** "No, give the Slack adapter an app-level token and call `Chat.Listen`; **Socket Mode** opens an outbound connection, and its **Deliveries** go through the same pipeline as the **Webhook Handler**."
+
 > **Dev:** "If the app asks for the Slack webhook with a misspelled adapter name, should production requests discover that?"
 > **Domain expert:** "No, the **Webhook Mount** should fail immediately."
 
@@ -578,7 +593,7 @@ _Avoid_: Full platform schema, strict external SDK model
 > **Domain expert:** "No, the MVP needs **Redis State** for cross-instance subscriptions, dedupe, and locks."
 
 > **Dev:** "Two different Slack messages arrive in the same **Thread**. Are they duplicates?"
-> **Domain expert:** "No, they are separate **Webhook Events**; dedupe keeps both, while the **Thread Lock** serializes their handlers."
+> **Domain expert:** "No, they are separate **Deliveries**; dedupe keeps both, while the **Thread Lock** serializes their handlers."
 
 > **Dev:** "Should Slack retry number be part of the dedupe key?"
 > **Domain expert:** "No, use **Event Identity** for dedupe and record retry headers as **Retry Metadata**."
@@ -599,7 +614,7 @@ _Avoid_: Full platform schema, strict external SDK model
 > **Domain expert:** "No, a **Lock Lease** is token-owned; release and extension only affect the current owner's token."
 
 > **Dev:** "Should the Slack adapter call user handlers directly?"
-> **Domain expert:** "No, it should normalize the **Webhook Event** and hand it to **Runtime Dispatch**."
+> **Domain expert:** "No, it should normalize the **Delivery** and hand it to **Runtime Dispatch**."
 
 > **Dev:** "Should long-running work keep using the webhook request's **Dispatch Context** after the platform times out?"
 > **Domain expert:** "No, long-running work needs an explicit app-owned detach or queue path; synchronous dispatch uses the request context."
@@ -703,6 +718,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - "Middleware" could mean observability or user-controlled dispatch mutation; resolved: **Middleware** is dispatch mutation and is deferred.
 - "Observability" could mean middleware, metrics, or logs; resolved: **Runtime Observation** starts as structured logging.
 - "HTTP integration" could mean a built-in server or a mountable handler; resolved: the runtime exposes **Webhook Handlers** only.
+- "Transport" could mean an HTTP server the runtime owns or a way for **Deliveries** to reach an adapter; resolved: a transport is a **Webhook Handler** that the application mounts, or a **Listener** that the application runs with `Chat.Listen`.
 - "Webhook lookup" could mean dynamic runtime routing or startup mount validation; resolved: **Webhook Mount** is fallible.
 - "Platform handshake" could mean a user event or adapter setup request; resolved: **Platform Handshake** is adapter-owned and does not dispatch.
 - "State" could mean optional app convenience storage or required runtime coordination; resolved: **Runtime State** is required, while **Memory State** is explicitly dev/test only.
@@ -712,11 +728,11 @@ _Avoid_: Full platform schema, strict external SDK model
 - "Event identity" could mean delivery attempt or platform event; resolved: **Event Identity** excludes **Retry Metadata**.
 - "Runtime options" could mean many unrelated one-off settings; resolved: **Runtime Options** groups coordination timing such as dedupe and lock TTLs.
 - "Concurrency" could mean a full queueing system or a lock-conflict policy; resolved: **Concurrency Strategy** starts with drop only.
-- "Locking" could mean event dedupe, adapter-wide exclusion, or handler coordination; resolved: dedupe applies to **Webhook Events**, while **Thread Lock** applies per **Thread**.
+- "Locking" could mean event dedupe, adapter-wide exclusion, or handler coordination; resolved: dedupe applies to **Deliveries**, while **Thread Lock** applies per **Thread**.
 - "Lock release" could mean deleting a key by thread id or releasing an owned lease; resolved: **Lock Lease** release and extension are token-checked.
 - "Lock conflict" could mean a duplicate event or handler failure; resolved: **Lock Conflict** is accepted-but-unhandled thread contention.
 - "Dispatch" could mean adapter-specific webhook handling or runtime handler routing; resolved: **Runtime Dispatch** is owned by the **Go Chat Runtime**.
-- "Context" could mean webhook request lifetime or background job lifetime; resolved: **Dispatch Context** is the synchronous request context.
+- "Context" could mean webhook request lifetime or background job lifetime; resolved: **Dispatch Context** is the synchronous request context, or the handler context of a **Delivery** from a **Listener**.
 - "Accepted event" could mean successful handler execution; resolved: **Accepted Event** means verified and normalized event ownership by the runtime.
 - "Ignored event" could mean invalid input or irrelevant valid input; resolved: **Ignored Event** is valid platform input acknowledged without dispatch.
 - "Adapter" could mean a full mini-framework or a platform boundary; resolved: **Platform Adapter** does platform conversion and transport, not application routing.

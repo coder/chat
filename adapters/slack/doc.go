@@ -1,5 +1,29 @@
 // Package slack provides the Slack adapter for the chat runtime.
 //
+// # Transports (ADR 0017)
+//
+// The adapter receives deliveries from Slack over HTTP, over Socket Mode, or
+// over both at the same time. Options.SigningSecret enables the HTTP
+// transport: Webhook returns an http.Handler for the request URLs of the
+// Slack app (Events API, slash commands, and interactivity), and it checks
+// the signature of each request. Options.AppToken, an app-level token (xapp-)
+// with the connections:write scope, enables the Socket Mode transport: Listen
+// opens a websocket to Slack, so the app needs no public URL. Listen
+// implements the chat.Listener Optional Capability, and the application runs
+// it with Chat.Listen. At least one of SigningSecret and AppToken is
+// required. Without a SigningSecret, Webhook answers 404 to each request.
+// Without an AppToken, Listen returns an error.
+//
+// Both transports give each delivery to one delivery handler, so a payload
+// becomes the same chat.Event over HTTP and over Socket Mode. When the runtime
+// rejects a delivery at its Admission Bound or after Runtime Shutdown starts,
+// the adapter acks a slash command with a busy reply that Slack shows to the
+// user, because Slack does not send a slash command again. It does not ack an
+// Events API or interactivity delivery, so Slack can send an Events API
+// delivery again. Listen logs the errors that it recovers from to
+// Options.Logger, and returns when Slack rejects the app token or turns Socket
+// Mode off.
+//
 // # Multi-tenant installs (ADR 0006)
 //
 // Multi-tenant is opt-in. By default the adapter is a Single-Install Adapter with
@@ -14,13 +38,14 @@
 // button, authorize redirect, callback, and token exchange) and account linking /
 // Application Identity stay app-owned and out of the adapter.
 //
-// During webhook handling the adapter verifies the signature with the shared
-// app-level Options.SigningSecret (Slack signs per app, never per workspace), then
-// resolves the per-workspace install via InstallStore.Lookup keyed by the
-// team_id Platform Tenant. The install-record bot token is used only for the
-// reply. A chat.ErrInstallNotFound from Lookup is an Ignored Event (acknowledged,
-// not dispatched); any other Lookup error is a transport failure the platform may
-// retry. Lookup runs per webhook; the adapter does not cache install records.
+// Both transports work the same in this mode. Options.SigningSecret and
+// Options.AppToken are app-level (Slack has one of each per app, never one per
+// workspace). For each delivery, the adapter resolves the per-workspace install
+// via InstallStore.Lookup keyed by the team_id Platform Tenant. The
+// install-record bot token is used only for the reply. A chat.ErrInstallNotFound
+// from Lookup is an Ignored Event (acknowledged, not dispatched); any other
+// Lookup error is a transport failure the platform may retry. Lookup runs per
+// delivery; the adapter does not cache install records.
 //
 // The install credential rides as the adapter-specific slack.SlackInstall payload
 // on chat.Install.Credential (a Platform Escape Hatch for credentials): the

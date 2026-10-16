@@ -2,13 +2,13 @@
 
 By default an adapter serves one Slack workspace or one Linear organization,
 with credentials passed in its options. Multi-tenant mode lets one deployment
-serve many: the adapter looks up each tenant's credentials when a webhook
+serve many: the adapter looks up each tenant's credentials when a delivery
 arrives ([ADR 0006](../adr/0006-multi-tenant-install.md)).
 
 The split of work is deliberate:
 
 - **The adapter looks up credentials.** You implement a `chat.InstallStore`;
-  the adapter calls it with the tenant from each webhook (the Slack team ID
+  the adapter calls it with the tenant from each delivery (the Slack team ID
   or the Linear organization ID).
 - **You own the OAuth flow.** The install redirect, the callback route, the
   token exchange, and the install database are ordinary routes and storage in
@@ -97,9 +97,10 @@ linearAdapter, err := linear.New(ctx, linear.Options{
 
 The two adapters verify requests at different times:
 
-- **Slack** has one signing secret for the whole app. The adapter verifies
-  the signature before it calls your store, so the tenant your store sees
-  came from a verified request.
+- **Slack** has one signing secret and one app-level token for the whole
+  app. Over HTTP, the adapter verifies the signature before it calls your
+  store. Over Socket Mode, the deliveries come over a connection that the
+  app-level token opened. So the tenant your store sees came from Slack.
 - **Linear** has a webhook secret per install. The adapter must read the
   organization ID from the **unverified** body and call `Lookup` to get the
   secret it verifies with.

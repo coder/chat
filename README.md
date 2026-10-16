@@ -5,15 +5,16 @@
 [![Latest release](https://img.shields.io/github/v/release/coder/chat)](https://github.com/coder/chat/releases/latest)
 
 Build Slack and Linear bots in Go. You write handlers for mentions and
-thread replies; the runtime verifies webhooks, dedupes redeliveries,
-serializes work per thread, and retries rate-limited API calls.
+thread replies; the runtime receives events over verified webhooks or Slack
+Socket Mode, dedupes redeliveries, serializes work per thread, and retries
+rate-limited API calls.
 
 - **Plain Go.** `context.Context`, `net/http`, small interfaces, and returned
   errors. It is a library, not a framework.
 - **Scales out.** Replicas share state on Redis, Postgres, or NATS JetStream,
   so they dedupe redeliveries and serialize work per thread.
 - **Handles slow work.** Opt in to deferred dispatch to acknowledge the
-  webhook first, then run LLM calls and other long handlers on a detached
+  event first, then run LLM calls and other long handlers on a detached
   context.
 
 ## Hello, Slack
@@ -27,8 +28,8 @@ package main
 import (
 	"context"
 	"log"
-	"net/http"
 	"os"
+	"os/signal"
 
 	"github.com/coder/chat"
 	"github.com/coder/chat/adapters/slack"
@@ -39,8 +40,8 @@ func main() {
 	ctx := context.Background()
 
 	slackAdapter, err := slack.New(ctx, slack.Options{
-		SigningSecret: os.Getenv("SLACK_SIGNING_SECRET"),
-		BotToken:      os.Getenv("SLACK_BOT_TOKEN"),
+		AppToken: os.Getenv("SLACK_APP_TOKEN"), // Socket Mode: no public URL needed
+		BotToken: os.Getenv("SLACK_BOT_TOKEN"),
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -59,26 +60,39 @@ func main() {
 		return err
 	})
 
-	webhook, err := bot.Webhook("slack")
-	if err != nil {
+	// Listen runs until Shutdown stops it.
+	go func() {
+		if err := bot.Listen(ctx, "slack"); err != nil {
+			log.Fatal(err)
+		}
+	}()
+
+	// On Ctrl-C, Shutdown stops acking new events, and then closes the connection.
+	interrupted, stop := signal.NotifyContext(ctx, os.Interrupt)
+	defer stop()
+	<-interrupted.Done()
+	if err := bot.Shutdown(ctx); err != nil {
 		log.Fatal(err)
 	}
-	http.Handle("/webhooks/slack", webhook)
-	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 ```
 
-Point your Slack app's Event Subscriptions request URL at
-`https://YOUR_HOST/webhooks/slack`, mention the bot, and it replies in a
-thread. The [tutorial](docs/tutorials/slack-bot.md) walks through the Slack
-app setup in under 30 minutes using
+Turn on Socket Mode in your Slack app and create an app-level token with the
+`connections:write` scope. Run the bot, mention it, and it replies in a
+thread. The bot opens a websocket to Slack, so it needs no public URL. To
+receive events over HTTP instead, set `SigningSecret` and serve
+`bot.Webhook("slack")` at your app's Event Subscriptions request URL. The
+[tutorial](docs/tutorials/slack-bot.md) walks through the Slack app setup in
+under 30 minutes using
 [`examples/slack-hello-world`](examples/slack-hello-world/), the same bot
-with server timeouts and environment checks.
+with both transports, server timeouts, graceful shutdown, and environment
+checks.
 
 ## Install
 
 Chat SDK Go requires Go 1.26.3 or newer. The core module contains the
-runtime, the Slack and Linear adapters, and the memory state backend:
+runtime, the Slack and Linear adapters, and the memory state backend. Its
+one dependency is `github.com/coder/websocket`, for Slack Socket Mode:
 
 ```sh
 go get github.com/coder/chat
@@ -101,8 +115,13 @@ go get github.com/coder/chat/state/nats
 - **Shared state you already run.** Memory for development; Redis, Postgres,
   or NATS JetStream in production, all tested by one conformance suite —
   [choose a state backend](docs/how-to/choose-a-state-backend.md).
+- **Two Slack transports.** Socket Mode needs no public URL; the Events API
+  over HTTP suits apps on a hosting service and Slack Marketplace apps. Both
+  use one adapter pipeline, so handlers get the same events. `Chat.Listen`
+  runs Socket Mode, `Chat.Webhook` serves HTTP, and a bot can use both. See
+  [receiving deliveries](docs/reference.md#receiving-deliveries).
 - **Ack-then-work dispatch.** Handlers run synchronously by default; opt in
-  to `DispatchDeferred` to run them after the webhook is acknowledged, with
+  to `DispatchDeferred` to run them after the event is acknowledged, with
   lock renewal and an admission cap. Five concurrency strategies (drop,
   queue, debounce, concurrent, burst) decide what happens when events
   overlap on one thread; debounce and burst require deferred dispatch —

@@ -6,6 +6,10 @@ Accepted (the admission bound and the per-instance burst revival are implemented
 
 This is a decision-level document: it fixes decisions, invariants, and non-goals. Implementation mechanics — slot bookkeeping, timer and shutdown lifecycles, counter management — are deliberately not specified here; they are decided in the implementing PRs, where code and hardening tests can actually verify them against the invariants below.
 
+ADR 0017 (Slack Socket Mode) adds one rule for synchronous dispatch:
+
+- After Runtime Shutdown starts, a dispatch in the synchronous **Dispatch Mode** returns `ErrAdmissionRejected`. This closes admission only at Shutdown. The non-goal below stands: synchronous dispatch has no capacity cap.
+
 ## Context
 
 ADR 0002 made `DispatchDeferred` the opt-in **Ack-Then-Work** mode: the adapter acknowledges after the synchronous prelude and the handler runs on the **Detached Work Context**, bounded by `DetachTimeout`. ADR 0012 expanded the **Concurrency Strategy** set; the reduced implementation on main ships `drop`, `queue`, `debounce`, and `concurrent` plus **Lock Scope** and universal lease-loss cancellation, with `burst` and force/steerability staged on PR #53 pending this design track.

@@ -4,6 +4,10 @@
 
 Accepted
 
+One statement of this ADR is superseded by ADR 0017 (Slack Socket Mode):
+
+- The module no longer has zero dependencies. It depends on `github.com/coder/websocket` for the Socket Mode transport. The rejection of `slack-go/slack` stands.
+
 ## Context
 
 The **Go Chat Runtime** reaches Slack only through the Slack **Platform Adapter**. Before this ADR, the adapter kept its Web API calls, its bounded rate-limit retry (ADR 0005), and its request signature check private. It exposes Slack behavior through the portable surface and through **Adapter Access** on a registered adapter. Both paths assume that the application runs the runtime.

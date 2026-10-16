@@ -247,10 +247,18 @@ type Chat struct {
 	burstMu     sync.Mutex
 	burstScopes map[string]*burstScope
 
-	// admission is the deferred-dispatch Admission Bound (ADR 0015); nil under
-	// DispatchSync.
+	// admission admits every delivery, and Runtime Shutdown closes it. Under
+	// DispatchDeferred it is also the Admission Bound (ADR 0015).
 	admission *admissionGate
 
+	// stopListeners cancels listenCtx, and that cancels the context of every
+	// Listen call. listeners counts the Listen calls that run.
+	listenCtx     context.Context
+	stopListeners context.CancelFunc
+	listeners     sync.WaitGroup
+
+	// shutdownMu guards shutdown, and orders listeners.Add before the
+	// listeners.Wait in Shutdown.
 	shutdownMu   sync.Mutex
 	shutdown     bool
 	shutdownDone chan struct{}
@@ -289,7 +297,6 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		return nil, err
 	}
 
-	baseCtx, baseCancel := context.WithCancel(context.Background())
 	chat := &Chat{
 		state:            cfg.state,
 		adapters:         map[string]Adapter{},
@@ -297,8 +304,6 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		observer:         cfg.observer,
 		options:          cfg.options,
 		eventAcceptances: map[string]*eventAcceptance{},
-		baseCtx:          baseCtx,
-		baseCancel:       baseCancel,
 		pending:          map[string]*pendingWaiter{},
 		burstScopes:      map[string]*burstScope{},
 	}
@@ -307,30 +312,30 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 	}
 	if cfg.options.Dispatch == DispatchDeferred {
 		chat.admission = newAdmissionGate(cfg.options.MaxDetached, cfg.options.MaxDetachedPerTenant)
+	} else {
+		chat.admission = newAdmissionGate(0, 0)
 	}
 	for _, adapter := range cfg.adapters {
 		if adapter == nil {
-			baseCancel()
 			return nil, errors.New("chat: nil adapter")
 		}
 		name := adapter.Name()
 		if name == "" {
-			baseCancel()
 			return nil, errors.New("chat: adapter name is required")
 		}
 		if _, exists := chat.adapters[name]; exists {
-			baseCancel()
 			return nil, fmt.Errorf("chat: adapter %q registered more than once", name)
 		}
 		chat.adapters[name] = adapter
 		if err := adapter.Init(ctx); err != nil {
-			baseCancel()
 			return nil, errors.Join(
 				fmt.Errorf("chat: initialize adapter %q: %w", name, err),
 				shutdownAdapters(ctx, chat.adapters),
 			)
 		}
 	}
+	chat.baseCtx, chat.baseCancel = context.WithCancel(context.Background())
+	chat.listenCtx, chat.stopListeners = context.WithCancel(context.Background())
 	return chat, nil
 }
 
@@ -443,6 +448,50 @@ func (c *Chat) Webhook(adapterName string) (http.Handler, error) {
 	return adapter.Webhook(c.dispatch), nil
 }
 
+// Listen runs the Listener of the named adapter. It blocks until ctx is done
+// or Runtime Shutdown stops listeners, and then returns nil. If the adapter
+// cannot continue to listen, Listen returns the adapter's error.
+//
+// Listen returns an error at once if the adapter is not registered, or if it
+// does not implement Listener (ErrUnsupportedCapability). After Runtime
+// Shutdown has started, Listen returns nil at once and does not call the
+// adapter. Concurrent calls are allowed.
+//
+// Shutdown stops listeners only after it closes admission and drains deferred
+// work. So while Shutdown runs, new deliveries from a listener get
+// ErrAdmissionRejected before the listener closes its connections, and the
+// platform can deliver them again. To get this order, stop Listen with
+// Shutdown. When ctx ends first, the listener closes its connections while
+// admission is still open.
+func (c *Chat) Listen(ctx context.Context, adapterName string) error {
+	assert(c != nil, "Listen called on nil runtime")
+	adapter, ok := c.adapters[adapterName]
+	if !ok {
+		return fmt.Errorf("chat: adapter %q is not registered", adapterName)
+	}
+	listener, ok := adapter.(Listener)
+	if !ok {
+		return fmt.Errorf("chat: adapter %q cannot listen: %w", adapterName, ErrUnsupportedCapability)
+	}
+
+	c.shutdownMu.Lock()
+	if c.shutdown {
+		c.shutdownMu.Unlock()
+		return nil
+	}
+	c.listeners.Add(1)
+	c.shutdownMu.Unlock()
+	defer c.listeners.Done()
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	defer context.AfterFunc(c.listenCtx, cancel)()
+	if err := listener.Listen(ctx, c.dispatch); err != nil {
+		return fmt.Errorf("chat: listen on adapter %q: %w", adapterName, err)
+	}
+	return nil
+}
+
 func (c *Chat) Thread(ctx context.Context, id ThreadID) (*Thread, error) {
 	assert(c != nil, "Thread called on nil runtime")
 	if err := ctx.Err(); err != nil {
@@ -476,6 +525,17 @@ func AdapterAs[T any](c *Chat, adapterName string) (T, bool) {
 	return typed, ok
 }
 
+// Shutdown stops the runtime in this order:
+//
+//  1. It closes admission: every new delivery, in both Dispatch Modes, gets
+//     ErrAdmissionRejected.
+//  2. It cancels deferred work and waits for it to finish.
+//  3. It cancels every Listen call and waits for it to return.
+//  4. It shuts down every adapter, then the State.
+//
+// ctx bounds the waits in steps 2 and 3. Shutdown returns the joined errors of
+// the steps. It is idempotent: a later call waits for the first call to
+// finish, bounded by its own ctx, and then returns nil.
 func (c *Chat) Shutdown(ctx context.Context) error {
 	assert(c != nil, "Shutdown called on nil runtime")
 	c.shutdownMu.Lock()
@@ -495,10 +555,11 @@ func (c *Chat) Shutdown(ctx context.Context) error {
 	c.shutdownMu.Unlock()
 	defer close(done)
 
-	// Close admission first so a delivery racing Shutdown is rejected with
-	// ErrAdmissionRejected (the platform's retry covers it) instead of being
-	// admitted into a runtime about to cancel its work. Then cancel detached
-	// tails and drain (bounded by ctx) before shutting down adapters and state.
+	// Close admission first so a delivery racing Shutdown, in either Dispatch
+	// Mode, is rejected with ErrAdmissionRejected (the platform's retry covers
+	// it) instead of being admitted into a runtime about to cancel its work.
+	// Then cancel detached tails and drain (bounded by ctx), then stop
+	// listeners (bounded by ctx), before shutting down adapters and state.
 	//
 	// The drain waits on admission slots before the tail WaitGroup: a delivery
 	// that won the admission race is retained from admit until its tail
@@ -506,31 +567,39 @@ func (c *Chat) Shutdown(ctx context.Context) error {
 	// their synchronous prelude — which hold no WaitGroup count yet — and
 	// guarantees no tail is spawned (and no WaitGroup Add happens) after the
 	// slot drain completes.
-	var admissionDrained <-chan struct{}
-	if c.admission != nil {
-		admissionDrained = c.admission.close()
-	}
+	admissionDrained := c.admission.close()
 	c.baseCancel()
-	var drainErr error
-	drained := make(chan struct{})
-	go func() {
-		if admissionDrained != nil {
-			<-admissionDrained
-		}
+	err := waitBounded(ctx, func() {
+		<-admissionDrained
 		c.inflight.Wait()
-		close(drained)
-	}()
-	select {
-	case <-drained:
-	case <-ctx.Done():
-		drainErr = ctx.Err()
+	})
+	c.stopListeners()
+	// A drain error means that ctx is done, so there is no time to wait.
+	if err == nil {
+		err = waitBounded(ctx, c.listeners.Wait)
 	}
 
-	err := errors.Join(drainErr, shutdownAdapters(ctx, c.adapters))
+	err = errors.Join(err, shutdownAdapters(ctx, c.adapters))
 	if stateErr := c.state.Shutdown(ctx); stateErr != nil {
 		return errors.Join(err, fmt.Errorf("shutdown state: %w", stateErr))
 	}
 	return err
+}
+
+// waitBounded runs wait and returns nil when it returns, or ctx.Err() if ctx
+// is done first. On ctx done, wait keeps running in its goroutine.
+func waitBounded(ctx context.Context, wait func()) error {
+	done := make(chan struct{})
+	go func() {
+		wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func shutdownAdapters(ctx context.Context, adapters map[string]Adapter) error {
@@ -548,9 +617,29 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 	// registration can order deliveries by admission: a delivery delayed in
 	// validation/dedupe/routing can never displace a newer waiter.
 	seq := c.dispatchSeq.Add(1)
-	if c.options.Dispatch == DispatchDeferred {
-		return c.dispatchDeferred(ctx, event, seq)
+	if err := validateEvent(event); err != nil {
+		return err
 	}
+	// The admission gate runs before any acknowledgement and before dedupe
+	// marking: a rejected delivery fails fast with ErrAdmissionRejected, is
+	// never marked in Event Identity (so a platform retry is not deduped
+	// away), and does no State work at all. Under saturation even a
+	// redelivered duplicate receives the overload response, converging to the
+	// ordinary duplicate acknowledgement once capacity frees (ADR 0015).
+	release, admitted := c.admission.admit(event.Adapter, event.Tenant)
+	if !admitted {
+		spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
+		c.logger.Warn("chat dispatch admission rejected", "adapter", event.Adapter, "tenant", event.Tenant, "event_id", event.ID)
+		c.safeEvent(spanCtx, ObsAdmissionRejected, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
+		c.safeEnd(span, OutcomeAdmissionRejected)
+		return fmt.Errorf("chat: dispatch admission rejected for adapter %q: %w", event.Adapter, ErrAdmissionRejected)
+	}
+	if c.options.Dispatch == DispatchDeferred {
+		return c.dispatchDeferred(ctx, event, seq, release)
+	}
+	// A sync delivery retains no work for Shutdown to drain: its caller (an
+	// HTTP server or a Listener) owns its lifetime.
+	release()
 	return c.dispatchSync(ctx, event, seq)
 }
 
@@ -595,26 +684,8 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64) error
 
 // dispatchDeferred runs the prelude under the request context and, on a routed
 // event, launches the detached tail and returns so the adapter can acknowledge
-// the platform (ack-then-work). The Admission Bound gate runs first, before
-// any acknowledgement and before dedupe marking: a delivery rejected at the
-// cap fails fast with ErrAdmissionRejected, is never marked in Event Identity
-// (so a platform retry is not deduped away), and does no State work at all —
-// under saturation even a redelivered duplicate receives the overload
-// response, converging to the ordinary duplicate acknowledgement once
-// capacity frees (ADR 0015).
-func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64) error {
-	if err := validateEvent(event); err != nil {
-		return err
-	}
-	assert(c.admission != nil, "deferred dispatch requires the admission gate")
-	release, admitted := c.admission.admit(event.Adapter, event.Tenant)
-	if !admitted {
-		spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
-		c.logger.Warn("chat deferred dispatch admission rejected", "adapter", event.Adapter, "tenant", event.Tenant, "event_id", event.ID)
-		c.safeEvent(spanCtx, ObsAdmissionRejected, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
-		c.safeEnd(span, OutcomeAdmissionRejected)
-		return fmt.Errorf("chat: deferred dispatch admission rejected for adapter %q: %w", event.Adapter, ErrAdmissionRejected)
-	}
+// the platform (ack-then-work). release frees the delivery's admission slot.
+func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64, release func()) error {
 	work, resolved, err := c.prelude(ctx, event, seq)
 	if err != nil || resolved {
 		// The delivery retains nothing past the prelude: an errored or
@@ -680,13 +751,13 @@ type preludeWork struct {
 	span DispatchSpan
 }
 
-// prelude runs the synchronous portion of dispatch before ack: open the dispatch
-// span, validate, dedupe, acquire the Thread Lock, validate the thread id, filter
-// nil/self events, and route. A resolved event (duplicate, dropped Lock Conflict,
-// ignored, unrouted) returns resolved=true with no work and closes the span with
-// its terminal outcome. A failed prelude returns the error and, as today, leaves
-// the event un-marked so a retry is not deduped away; its span is closed with the
-// error outcome.
+// prelude runs the synchronous portion of dispatch before ack, after dispatch
+// validated and admitted the event: open the dispatch span, dedupe, acquire the
+// Thread Lock, validate the thread id, filter nil/self events, and route. A
+// resolved event (duplicate, dropped Lock Conflict, ignored, unrouted) returns
+// resolved=true with no work and closes the span with its terminal outcome. A
+// failed prelude returns the error and, as today, leaves the event un-marked so
+// a retry is not deduped away; its span is closed with the error outcome.
 //
 // Routing precedence: command-ness and interaction-ness are Event kinds and take
 // precedence over subscription state, so a command/interaction in a Subscribed
@@ -697,10 +768,6 @@ type preludeWork struct {
 // event is registered as pending (no lease) and returned with needsLock=true so
 // the tail acquires the lock, keeping ack prompt under DispatchDeferred.
 func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64) (preludeWork, bool, error) {
-	if err := validateEvent(event); err != nil {
-		return preludeWork{}, true, err
-	}
-
 	spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
 	ctx = spanCtx
 

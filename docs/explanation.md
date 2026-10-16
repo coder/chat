@@ -10,17 +10,18 @@ The full record is in [`CONTEXT.md`](../CONTEXT.md) and the
 ## The Short Version
 
 **The runtime coordinates conversations; it does not own your product.**
-`chat.Chat` verifies webhooks through adapters, normalizes platform payloads
-into events, dedupes them, serializes work per thread with token-owned lock
+`chat.Chat` receives deliveries through adapters, over webhooks or over a
+listener such as Slack Socket Mode. It normalizes platform payloads into
+events, dedupes them, serializes work per thread with token-owned lock
 leases, and routes to your single-slot handlers. Everything your product
 stores — transcripts, user records, workflow state — lives in your database,
 keyed by the opaque `ThreadID`.
 
-**Adapters own the platform boundary.** Signature verification, payload
-normalization, outbound rendering, rate-limit retries, and platform quirks
-live inside the adapter. Platform-specific power is reached deliberately via
-typed adapter access (`chat.AdapterAs`), never by making raw platform structs
-the normal API.
+**Adapters own the platform boundary.** Transports, signature verification,
+payload normalization, outbound rendering, rate-limit retries, and platform
+quirks live inside the adapter. Platform-specific power is reached
+deliberately via typed adapter access (`chat.AdapterAs`), never by making raw
+platform structs the normal API.
 
 **State is required and small.** Subscriptions, dedupe marks, and locks —
 that is all. Memory for development; Redis, Postgres, or NATS for production.
@@ -39,6 +40,10 @@ diverges and documents the divergence.
 - Go-native API built around `context.Context`, `net/http`, small
   interfaces, and explicit errors.
 - Slack-first vertical slice before claiming multi-platform portability.
+- One inbound pipeline for each adapter, whatever the transport: a Slack
+  payload gives the same event over HTTP and over Socket Mode, and Socket
+  Mode lets a bot run with no public URL
+  ([ADR 0017](adr/0017-slack-socket-mode.md)).
 - Required runtime state for subscriptions, dedupe, and locks: memory for
   tests and local development; Redis, Postgres, or NATS JetStream for
   horizontally scaled production deployments.
@@ -171,7 +176,8 @@ Operations:
 - no built-in OAuth web flow: authorize/callback/token-exchange routes and
   install storage are application-owned
   ([ADR 0006](adr/0006-multi-tenant-install.md))
-- no built-in HTTP server or router integrations
+- no built-in HTTP server or router integrations: the application mounts
+  each webhook handler, and runs each listener with `Chat.Listen`
 - no bundled metrics framework, exporters, or scrape endpoint (an optional
   no-op `Observer` seam is provided; OpenTelemetry stays out of the core
   import graph)
@@ -208,3 +214,4 @@ Operations:
 | [0014](adr/0014-nats-state-adapter.md) | NATS JetStream state adapter | Accepted |
 | [0015](adr/0015-runtime-coordination.md) | Deferred-dispatch admission bound; cross-instance coalescing rejected for now | Accepted |
 | [0016](adr/0016-slack-api-package.md) | Low-level `slackapi` package for applications that own their runtime; the Slack adapter builds on it and the portable surface does not grow | Accepted |
+| [0017](adr/0017-slack-socket-mode.md) | Slack Socket Mode next to HTTP: one transport-neutral delivery and handler, one adapter pipeline, the `Listener` capability, and the first dependency (`github.com/coder/websocket`) | Accepted |
