@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -490,10 +491,22 @@ func (c *socketConn) dial() (*websocket.Conn, error) {
 		OnPingReceived: c.onPing,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("slack: socket mode dial: %w", err)
+		return nil, fmt.Errorf("slack: socket mode dial: %w", withoutTicket(err))
 	}
 	ws.SetReadLimit(maxPayloadBytes)
 	return ws, nil
+}
+
+// withoutTicket removes the query of the connection URL from a dial error,
+// because the query holds the ticket of the connection. The URL is in the
+// *url.Error from the http.Client, and in the messages that wrap it.
+func withoutTicket(err error) error {
+	ue, ok := errors.AsType[*url.Error](err)
+	if !ok {
+		return err
+	}
+	u, _, _ := strings.Cut(ue.URL, "?")
+	return &url.Error{Op: ue.Op, URL: u, Err: ue.Err}
 }
 
 // socketMessage holds the fields of every message that Slack sends over

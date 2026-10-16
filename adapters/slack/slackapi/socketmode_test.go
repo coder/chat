@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -1053,6 +1054,34 @@ func TestListenStopDuringTheHandshake(t *testing.T) {
 		t.Fatalf("connections = %+v, want 1", conns)
 	}
 	requireCloseFrames(t, sm)
+}
+
+func TestListenDialErrorHidesTheTicket(t *testing.T) {
+	t.Parallel()
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ln.Addr().String()
+	ln.Close()
+	srv := slackapitest.NewServer(t)
+	srv.Respond("apps.connections.open", map[string]any{"ok": true, "url": "ws://" + closed + "/link/?ticket=secret-ticket"})
+	errs := make(chan error, 10)
+	opts := fastListen()
+	opts.OnError = sendTo(errs)
+	l := startListen(t, socketClient(srv), ackAll, opts)
+
+	err = recv(t, errs)
+	if strings.Contains(err.Error(), "secret-ticket") {
+		t.Errorf("OnError(%v), want no ticket", err)
+	}
+	if _, ok := errors.AsType[*net.OpError](err); !ok {
+		t.Errorf("OnError(%v), want the *net.OpError of the dial", err)
+	}
+	if err := l.stop(t); err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
 }
 
 func TestListenUsesTheProxyOfTheHTTPClient(t *testing.T) {
