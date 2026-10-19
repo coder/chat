@@ -716,12 +716,14 @@ The client methods and how each one sends its request:
 | Method | Slack call | Request |
 | --- | --- | --- |
 | `AuthTest` | `auth.test` | JSON |
-| `PostMessage`, `UpdateMessage`, `DeleteMessage` | `chat.postMessage`, `chat.update`, `chat.delete` | JSON |
+| `PostMessage`, `PostEphemeral`, `UpdateMessage`, `DeleteMessage` | `chat.postMessage`, `chat.postEphemeral`, `chat.update`, `chat.delete` | JSON |
 | `SetAssistantThreadStatus` | `assistant.threads.setStatus` | JSON |
+| `SetAgentSessionStatus` | `agents.sessions.setStatus` | JSON |
 | `AddReaction`, `RemoveReaction` | `reactions.add`, `reactions.remove` | JSON |
 | `UserInfo` | `users.info` | form |
 | `ConversationInfo` | `conversations.info` | form |
 | `ConversationHistory`, `ConversationReplies` | `conversations.history`, `conversations.replies` | form; one `MessagePage` per call, send `NextCursor` as `Cursor` for the next page |
+| `FileInfo` | `files.info` | form; returns the file with its `Shares` and `HasMoreShares` |
 | `GetUploadURLExternal` | `files.getUploadURLExternal` | form |
 | `UploadToURL` | the `upload_url` from `GetUploadURLExternal` | raw bytes, no token |
 | `CompleteUploadExternal` | `files.completeUploadExternal` | JSON |
@@ -729,11 +731,17 @@ The client methods and how each one sends its request:
 | `DownloadFile` | a file URL such as `url_private_download` | GET, no retry |
 | `Call` | any Web API method (the escape hatch) | form for a `url.Values` payload, else JSON |
 | `PostResponseURL` | the `response_url` of a command or an interaction | JSON, no token |
+| `OAuthV2Access` | `oauth.v2.access` | form with the client ID and the client secret, no token |
+| `CreateApp`, `DeleteApp` | `apps.manifest.create`, `apps.manifest.delete` | form, with an app configuration token; `CreateApp` sends the `Manifest` as a JSON string |
 
 Requests are POSTs with the bearer token unless the table says otherwise.
 Slack documents `users.info`, `conversations.info`, `conversations.history`,
-`conversations.replies`, and `files.getUploadURLExternal` as GET or form-only
-methods, so the client sends them form encoded. Every method except
+`conversations.replies`, `files.info`, and `files.getUploadURLExternal` as GET
+or form-only methods, so the client sends them form encoded. Call `CreateApp`
+and `DeleteApp` on a client with an app configuration token (`xoxe.xoxp-`),
+for example `client.WithToken(configToken).CreateApp(ctx, req)`.
+`SetAgentSessionStatus` fails with the `APIError` code `feature_disabled` in a
+workspace without the Slack agent feature. Every method except
 `DownloadFile` retries Slack throttling (HTTP 429, or the error code
 `ratelimited` or `rate_limited`) within the `RetryPolicy`. It honors
 `Retry-After` up to `MaxDelay` and never sleeps past the context deadline
@@ -800,6 +808,10 @@ Inbound deliveries:
   with any subtype, and returns false for other envelopes and events. For
   `message_changed` and `message_deleted`, `NewMessage` and
   `PreviousMessage` hold the changed message.
+- `(*Envelope).AgentSessionStoppedEvent()` decodes an `agent_session_stopped`
+  event (a click on Stop in an agent session), and
+  `(*Envelope).ChannelSharedEvent()` decodes a `channel_shared` event. Each
+  returns false for other envelopes and events, as `MessageEvent` does.
 
 Socket Mode:
 
@@ -855,7 +867,8 @@ Formats:
 - `UserMentions(text)` returns the user IDs of `<@U123>` and `<@U123|label>`
   mentions. `ReplaceUserMentions(text, name)` replaces each mention with `@`
   and the name that `name` returns.
-- `Manifest` and its section types encode a Slack app manifest for a bot app.
+- `Manifest` and its section types encode a Slack app manifest for a bot app,
+  with its OAuth redirect URLs and the agent feature (`features.agent_view`).
 
 ### Testing With slackapitest
 

@@ -14,19 +14,27 @@
 //
 // New returns a Client for Options; the fields of Options document the
 // defaults. The typed methods cover the calls that a bot needs: AuthTest,
-// PostMessage, UpdateMessage, DeleteMessage, SetAssistantThreadStatus,
-// AddReaction, RemoveReaction, UserInfo, ConversationInfo, ConversationHistory,
-// and ConversationReplies. Call is the escape hatch for other methods.
-// PostResponseURL posts JSON without a token to the response_url of a slash
-// command or an interaction. WithToken returns a copy of a Client that sends
-// another token.
+// PostMessage, PostEphemeral, UpdateMessage, DeleteMessage,
+// SetAssistantThreadStatus, SetAgentSessionStatus, AddReaction,
+// RemoveReaction, UserInfo, ConversationInfo, ConversationHistory,
+// ConversationReplies, and FileInfo. Call is the escape hatch for other
+// methods. PostResponseURL posts JSON without a token to the response_url of a
+// slash command or an interaction. WithToken returns a copy of a Client that
+// sends another token.
+//
+// The setup of a bot needs three more methods. OAuthV2Access exchanges the code
+// of an install for a bot token, with the client ID and the client secret of
+// the app and no bearer token. CreateApp and DeleteApp create and delete an
+// app from a Manifest. Call them on a Client with an app configuration token:
+// api.WithToken(configToken).CreateApp(ctx, req).
 //
 // Web API calls are POSTs with the bearer token and a JSON body. Slack
 // documents users.info, conversations.info, conversations.history,
-// conversations.replies, and files.getUploadURLExternal as GET or form-only
-// methods, so the client sends them with a form-encoded body. Call sends a
-// url.Values payload form encoded and any other payload as JSON, so it reaches
-// form-only methods too.
+// conversations.replies, files.info, and files.getUploadURLExternal as GET or
+// form-only methods, so the client sends them with a form-encoded body.
+// OAuthV2Access, CreateApp, and DeleteApp send a form-encoded body too. Call
+// sends a url.Values payload form encoded and any other payload as JSON, so it
+// reaches form-only methods too.
 //
 // An ok:false response or a non-2xx status returns *APIError. Every method
 // except DownloadFile retries Slack throttling (HTTP 429, or the ratelimited or
@@ -56,8 +64,10 @@
 // url_verification request, and gives each other request to its Handler as a
 // Delivery.
 //
-// ParseEnvelope decodes an Events API payload, and Envelope.MessageEvent
-// decodes its app_mention or message event.
+// ParseEnvelope decodes an Events API payload. Envelope.MessageEvent decodes
+// its app_mention or message event, Envelope.AgentSessionStoppedEvent its
+// agent_session_stopped event, and Envelope.ChannelSharedEvent its
+// channel_shared event.
 //
 // # Socket Mode
 //

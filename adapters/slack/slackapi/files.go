@@ -97,6 +97,55 @@ type UploadFileRequest struct {
 	InitialComment string
 }
 
+// FileInfoRequest is the request of files.info.
+type FileInfoRequest struct {
+	// File is the file ID.
+	File string
+}
+
+// FileInfoResponse is the file that files.info returns, with its shares.
+type FileInfoResponse struct {
+	File
+	// Shares are the messages that share the file, by channel.
+	Shares FileShares `json:"shares,omitzero"`
+	// HasMoreShares is true when Shares does not hold every share of the
+	// file.
+	HasMoreShares bool `json:"has_more_shares,omitzero"`
+}
+
+// FileShares are the shares of a File, by channel ID.
+type FileShares struct {
+	// Public are the shares in public channels.
+	Public map[string][]FileShare `json:"public,omitempty"`
+	// Private are the shares in private channels, DMs, and group DMs.
+	Private map[string][]FileShare `json:"private,omitempty"`
+}
+
+// FileShare is one message that shares a File.
+type FileShare struct {
+	// TS is the ts of the message that shares the file.
+	TS string `json:"ts,omitempty"`
+	// ThreadTS is the ts of the thread root of the message that shares the
+	// file, as in Message.ThreadTS. It is empty when the message is not in a
+	// thread.
+	ThreadTS string `json:"thread_ts,omitempty"`
+}
+
+// FileInfo calls files.info and returns the file with its shares. It sends a
+// form-encoded body. Slack returns the error code "file_not_found" for an
+// unknown file.
+func (c *Client) FileInfo(ctx context.Context, req FileInfoRequest) (*FileInfoResponse, error) {
+	values := url.Values{}
+	setFormString(values, "file", req.File)
+	var resp struct {
+		File FileInfoResponse `json:"file"`
+	}
+	if err := c.Call(ctx, "files.info", values, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.File, nil
+}
+
 // GetUploadURLExternal calls files.getUploadURLExternal to get an upload URL
 // and an ID for a new file. It sends a form-encoded body.
 func (c *Client) GetUploadURLExternal(ctx context.Context, req GetUploadURLExternalRequest) (*GetUploadURLExternalResponse, error) {

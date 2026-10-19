@@ -129,6 +129,24 @@ func TestMethodsReturnAPIError(t *testing.T) {
 		{"files.completeUploadExternal", func(ctx context.Context, c *slackapi.Client) (any, error) {
 			return c.CompleteUploadExternal(ctx, slackapi.CompleteUploadExternalRequest{})
 		}},
+		{"oauth.v2.access", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.OAuthV2Access(ctx, slackapi.OAuthV2AccessRequest{})
+		}},
+		{"chat.postEphemeral", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.PostEphemeral(ctx, slackapi.PostEphemeralRequest{})
+		}},
+		{"files.info", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.FileInfo(ctx, slackapi.FileInfoRequest{})
+		}},
+		{"agents.sessions.setStatus", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return nil, c.SetAgentSessionStatus(ctx, slackapi.SetAgentSessionStatusRequest{})
+		}},
+		{"apps.manifest.create", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.CreateApp(ctx, slackapi.CreateAppRequest{})
+		}},
+		{"apps.manifest.delete", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return nil, c.DeleteApp(ctx, slackapi.DeleteAppRequest{})
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method, func(t *testing.T) {

@@ -766,3 +766,62 @@ func TestDownloadFile(t *testing.T) {
 		}
 	})
 }
+
+func TestFileInfo(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	srv.Respond("files.info", json.RawMessage(`{
+		"ok": true,
+		"file": {
+			"id": "F1",
+			"name": "report.txt",
+			"mimetype": "text/plain",
+			"size": 3,
+			"url_private_download": "https://files.slack.com/files-pri/T1-F1/download/report.txt",
+			"shares": {
+				"public": {
+					"C1": [
+						{"reply_users": ["U1"], "reply_count": 1, "ts": "1700000000.000200", "thread_ts": "1700000000.000001", "channel_name": "general", "team_id": "T1"},
+						{"reply_users": [], "reply_count": 0, "ts": "1700000000.000300"}
+					]
+				},
+				"private": {
+					"D1": [{"reply_users": [], "reply_count": 0, "ts": "1700000000.000400"}]
+				}
+			},
+			"channels": ["C1"],
+			"ims": ["D1"],
+			"has_more_shares": true
+		},
+		"comments": [],
+		"response_metadata": {"next_cursor": ""}
+	}`))
+
+	got, err := methodsNewClient(srv).FileInfo(t.Context(), slackapi.FileInfoRequest{File: "F1"})
+	if err != nil {
+		t.Fatalf("FileInfo: %v", err)
+	}
+	methodsCheckForm(t, srv, "files.info", url.Values{"file": {"F1"}})
+	methodsCheckEqual(t, "file", got, &slackapi.FileInfoResponse{
+		File: slackapi.File{
+			ID:                 "F1",
+			Name:               "report.txt",
+			MIMEType:           "text/plain",
+			Size:               3,
+			URLPrivateDownload: "https://files.slack.com/files-pri/T1-F1/download/report.txt",
+		},
+		Shares: slackapi.FileShares{
+			Public: map[string][]slackapi.FileShare{
+				"C1": {
+					{TS: "1700000000.000200", ThreadTS: "1700000000.000001"},
+					{TS: "1700000000.000300"},
+				},
+			},
+			Private: map[string][]slackapi.FileShare{
+				"D1": {{TS: "1700000000.000400"}},
+			},
+		},
+		HasMoreShares: true,
+	})
+}

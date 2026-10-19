@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 )
 
 // Envelope types of a Slack Events API request.
@@ -16,7 +17,7 @@ const (
 	EnvelopeEventCallback = "event_callback"
 )
 
-// Event types that MessageEvent decodes.
+// Event types that the event methods of Envelope decode.
 const (
 	// EventTypeAppMention is the type of an event for a message that
 	// mentions the app.
@@ -24,6 +25,12 @@ const (
 	// EventTypeMessage is the type of an event for a message in a
 	// conversation that the app is a member of.
 	EventTypeMessage = "message"
+	// EventTypeAgentSessionStopped is the type of an event for a click on the
+	// Stop button of an agent session.
+	EventTypeAgentSessionStopped = "agent_session_stopped"
+	// EventTypeChannelShared is the type of an event for a channel that is
+	// shared with another workspace or organization.
+	EventTypeChannelShared = "channel_shared"
 )
 
 // Message subtypes of Message.Subtype.
@@ -108,6 +115,56 @@ type MessageEvent struct {
 // another type. It returns an error if the event is missing or is not valid
 // JSON for its type.
 func (e *Envelope) MessageEvent() (*MessageEvent, bool, error) {
+	return decodeEvent[MessageEvent](e, EventTypeAppMention, EventTypeMessage)
+}
+
+// AgentSessionStoppedEvent is an agent_session_stopped event. Slack sends it
+// when a user clicks Stop on an agent session in the processing status. Slack
+// does not change the status of the session.
+type AgentSessionStoppedEvent struct {
+	// Channel is the ID of the channel of the session.
+	Channel string `json:"channel,omitempty"`
+	// ThreadTS is the ts of the parent message of the thread of the session.
+	ThreadTS string `json:"thread_ts,omitempty"`
+	// User is the ID of the user who clicked Stop.
+	User string `json:"user,omitempty"`
+	// EventTS is the timestamp of the event.
+	EventTS string `json:"event_ts,omitempty"`
+}
+
+// AgentSessionStoppedEvent decodes the inner event of an EnvelopeEventCallback
+// envelope when its type is EventTypeAgentSessionStopped. It returns false and
+// errors as MessageEvent does.
+func (e *Envelope) AgentSessionStoppedEvent() (*AgentSessionStoppedEvent, bool, error) {
+	return decodeEvent[AgentSessionStoppedEvent](e, EventTypeAgentSessionStopped)
+}
+
+// ChannelSharedEvent is a channel_shared event. Slack sends it when a channel
+// becomes shared, and when another workspace or organization joins a shared
+// channel. Slack also sends it for a share between the workspaces of one
+// Enterprise Grid organization.
+type ChannelSharedEvent struct {
+	// Channel is the ID of the channel.
+	Channel string `json:"channel,omitempty"`
+	// ConnectedTeamID is the ID of the workspace (T) or the organization (E)
+	// that the channel is now shared with.
+	ConnectedTeamID string `json:"connected_team_id,omitempty"`
+	// EventTS is the timestamp of the event.
+	EventTS string `json:"event_ts,omitempty"`
+}
+
+// ChannelSharedEvent decodes the inner event of an EnvelopeEventCallback
+// envelope when its type is EventTypeChannelShared. It returns false and
+// errors as MessageEvent does.
+func (e *Envelope) ChannelSharedEvent() (*ChannelSharedEvent, bool, error) {
+	return decodeEvent[ChannelSharedEvent](e, EventTypeChannelShared)
+}
+
+// decodeEvent decodes the inner event of an EnvelopeEventCallback envelope
+// into T when the event has one of types. It returns false for an envelope of
+// another type and for an event of another type, and an error if the event is
+// missing or is not valid JSON for T.
+func decodeEvent[T any](e *Envelope, types ...string) (*T, bool, error) {
 	if e.Type != EnvelopeEventCallback {
 		return nil, false, nil
 	}
@@ -120,12 +177,12 @@ func (e *Envelope) MessageEvent() (*MessageEvent, bool, error) {
 	if err := json.Unmarshal(e.Event, &head); err != nil {
 		return nil, false, fmt.Errorf("slack: invalid event: %w", err)
 	}
-	if head.Type != EventTypeAppMention && head.Type != EventTypeMessage {
+	if !slices.Contains(types, head.Type) {
 		// Other event types can reuse field names with other shapes, for
 		// example an object in "channel", so they are not decoded further.
 		return nil, false, nil
 	}
-	var ev MessageEvent
+	var ev T
 	if err := json.Unmarshal(e.Event, &ev); err != nil {
 		return nil, false, fmt.Errorf("slack: invalid %s event: %w", head.Type, err)
 	}

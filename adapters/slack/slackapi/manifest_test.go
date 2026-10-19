@@ -18,9 +18,11 @@ const formatsManifestJSON = `{
   },
   "features": {
     "app_home": {"home_tab_enabled": false, "messages_tab_enabled": false, "messages_tab_read_only_enabled": false},
-    "bot_user": {"display_name": "coder", "always_online": true}
+    "bot_user": {"display_name": "coder", "always_online": true},
+    "agent_view": {"agent_description": "Mention me in a channel to start a Coder Agents chat."}
   },
   "oauth_config": {
+    "redirect_urls": ["https://coder.example.com/api/v2/slack/callback"],
     "scopes": {"bot": ["app_mentions:read", "chat:write", "users:read"]}
   },
   "settings": {
@@ -50,9 +52,13 @@ func formatsManifest() slackapi.Manifest {
 		Features: &slackapi.ManifestFeatures{
 			AppHome: &slackapi.ManifestAppHome{},
 			BotUser: &slackapi.ManifestBotUser{DisplayName: "coder", AlwaysOnline: true},
+			AgentView: &slackapi.ManifestAgentView{
+				AgentDescription: "Mention me in a channel to start a Coder Agents chat.",
+			},
 		},
 		OAuthConfig: &slackapi.ManifestOAuthConfig{
-			Scopes: &slackapi.ManifestScopes{Bot: []string{"app_mentions:read", "chat:write", "users:read"}},
+			RedirectURLs: []string{"https://coder.example.com/api/v2/slack/callback"},
+			Scopes:       &slackapi.ManifestScopes{Bot: []string{"app_mentions:read", "chat:write", "users:read"}},
 		},
 		Settings: &slackapi.ManifestSettings{
 			EventSubscriptions: &slackapi.ManifestEventSubscriptions{
@@ -102,15 +108,18 @@ func TestManifestMinimal(t *testing.T) {
 			manifest: slackapi.Manifest{
 				Metadata:           &slackapi.ManifestMetadata{},
 				DisplayInformation: slackapi.ManifestDisplayInformation{Name: "bot"},
-				Features:           &slackapi.ManifestFeatures{BotUser: &slackapi.ManifestBotUser{DisplayName: "bot"}},
-				OAuthConfig:        &slackapi.ManifestOAuthConfig{Scopes: &slackapi.ManifestScopes{}},
+				Features: &slackapi.ManifestFeatures{
+					BotUser:   &slackapi.ManifestBotUser{DisplayName: "bot"},
+					AgentView: &slackapi.ManifestAgentView{},
+				},
+				OAuthConfig: &slackapi.ManifestOAuthConfig{Scopes: &slackapi.ManifestScopes{}},
 				Settings: &slackapi.ManifestSettings{
 					EventSubscriptions: &slackapi.ManifestEventSubscriptions{},
 					Interactivity:      &slackapi.ManifestInteractivity{},
 				},
 			},
 			want: `{"_metadata":{},"display_information":{"name":"bot"},` +
-				`"features":{"bot_user":{"display_name":"bot","always_online":false}},` +
+				`"features":{"bot_user":{"display_name":"bot","always_online":false},"agent_view":{"agent_description":""}},` +
 				`"oauth_config":{"scopes":{}},` +
 				`"settings":{"event_subscriptions":{},"interactivity":{"is_enabled":false},` +
 				`"org_deploy_enabled":false,"socket_mode_enabled":false,"token_rotation_enabled":false}}`,
