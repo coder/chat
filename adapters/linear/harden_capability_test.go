@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -184,9 +187,11 @@ func TestRateLimitDeadlineReturnsTypedRateLimited(t *testing.T) {
 	api := newLinearAPIServer(t, 3600)
 	api.rateLimit = 100 // always throttle
 	now := func() time.Time { return time.Now() }
+	outcomes := &retryOutcomeRecorder{}
 	bot, adapter := newLinearRuntime(t, api, linear.Options{
 		WebhookSecret: "whsec",
 		Now:           now,
+		Logger:        slog.New(outcomes),
 		// Backoff far larger than the deadline so the pre-sleep deadline check fires
 		// on the first retry rather than the attempt cap or MaxElapsed.
 		RetryPolicy: linear.RetryPolicy{MaxAttempts: 5, MaxElapsed: time.Hour, BaseDelay: time.Hour, MaxDelay: time.Hour},
@@ -215,12 +220,57 @@ func TestRateLimitDeadlineReturnsTypedRateLimited(t *testing.T) {
 		if _, ok := errors.AsType[*linear.RateLimited](err); !ok {
 			t.Fatalf("err = %v, want *linear.RateLimited (deadline-bounded, not slept off)", err)
 		}
+		// The typed error alone does not show which branch returned it: the
+		// attempt cap or the MaxElapsed ceiling also return *RateLimited. The
+		// retry log names the branch, so require exactly one "deadline" outcome
+		// and no other retry decision.
+		if got, want := outcomes.all(), []string{"deadline"}; !slices.Equal(got, want) {
+			t.Fatalf("retry outcomes = %q, want %q (the deadline branch must return the error)", got, want)
+		}
 	case <-time.After(5 * time.Second):
 		// A correct adapter returns after two roundtrips with no sleep. A broken
 		// one blocks at least until the 10s ctx deadline, or the full one-hour
 		// backoff, so 5s cleanly separates the two without racing the transport.
 		t.Fatal("PostThought slept past its caller deadline: a long backoff was not deadline-bounded")
 	}
+}
+
+// retryOutcomeRecorder is a slog.Handler that keeps the "outcome" attribute of
+// each "linear rate limited" record, so a test can tell which retry branch
+// (retry, exhausted, ceiling, deadline) the adapter took.
+type retryOutcomeRecorder struct {
+	mu       sync.Mutex
+	outcomes []string
+}
+
+func (*retryOutcomeRecorder) Enabled(context.Context, slog.Level) bool { return true }
+
+func (r *retryOutcomeRecorder) Handle(_ context.Context, rec slog.Record) error {
+	if rec.Message != "linear rate limited" {
+		return nil
+	}
+	rec.Attrs(func(a slog.Attr) bool {
+		if a.Key != "outcome" {
+			return true
+		}
+		r.mu.Lock()
+		r.outcomes = append(r.outcomes, a.Value.String())
+		r.mu.Unlock()
+		return false
+	})
+	return nil
+}
+
+// WithAttrs and WithGroup return the receiver: the adapter logs retry records
+// on its root logger, so no derived logger needs its own state.
+func (r *retryOutcomeRecorder) WithAttrs([]slog.Attr) slog.Handler { return r }
+
+func (r *retryOutcomeRecorder) WithGroup(string) slog.Handler { return r }
+
+func (r *retryOutcomeRecorder) all() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.outcomes)
 }
 
 // TestRateLimitRetryStopsAtContextCancel verifies bounded retry never sleeps past
