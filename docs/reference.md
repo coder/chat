@@ -740,7 +740,8 @@ Slack documents `users.info`, `conversations.info`, `conversations.history`,
 or form-only methods, so the client sends them form encoded. Call `CreateApp`
 and `DeleteApp` on a client with an app configuration token (`xoxe.xoxp-`),
 for example `client.WithToken(configToken).CreateApp(ctx, req)`.
-`SetAgentSessionStatus` fails with the `APIError` code `feature_disabled` in a
+`SetAgentSessionStatus` fails with the `APIError` code `not_authorized` when
+the app manifest has no `features.agent_view`, and with `feature_disabled` in a
 workspace without the Slack agent feature. Every method except
 `DownloadFile` retries Slack throttling (HTTP 429, or the error code
 `ratelimited` or `rate_limited`) within the `RetryPolicy`. It honors

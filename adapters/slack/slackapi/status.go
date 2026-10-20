@@ -47,8 +47,9 @@ type SetAgentSessionStatusRequest struct {
 
 // SetAgentSessionStatus calls agents.sessions.setStatus. Slack creates the
 // session when the thread has none. The app must be a member of the channel.
-// In a workspace without the agent feature, Slack returns the error code
-// "feature_disabled".
+// The app manifest must have ManifestFeatures.AgentView. Without it, Slack
+// returns the error code "not_authorized". In a workspace without the agent
+// feature, Slack returns the error code "feature_disabled".
 func (c *Client) SetAgentSessionStatus(ctx context.Context, req SetAgentSessionStatusRequest) error {
 	return c.Call(ctx, "agents.sessions.setStatus", req, nil)
 }
