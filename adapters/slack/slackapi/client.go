@@ -27,7 +27,8 @@ var defaultFileOrigins = []string{"https://files.slack.com", "https://slack.com"
 // Options configures a Client.
 type Options struct {
 	// Token is the bot or user token. Call, the typed methods, and DownloadFile
-	// send it as a bearer token. UploadToURL and PostResponseURL never send it.
+	// send it as a bearer token. UploadToURL, PostResponseURL, and
+	// OAuthV2Access never send it.
 	Token string
 	// BaseURL is the Web API base URL. Empty uses DefaultBaseURL. New removes a
 	// trailing slash.

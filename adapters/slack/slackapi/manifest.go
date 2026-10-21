@@ -45,6 +45,9 @@ type ManifestFeatures struct {
 	AppHome *ManifestAppHome `json:"app_home,omitempty"`
 	// BotUser is the optional bot_user section.
 	BotUser *ManifestBotUser `json:"bot_user,omitempty"`
+	// AgentView is the optional agent_view section. It turns on the agent
+	// feature of the app.
+	AgentView *ManifestAgentView `json:"agent_view,omitempty"`
 }
 
 // ManifestAppHome is the features.app_home section of a Manifest.
@@ -67,8 +70,18 @@ type ManifestBotUser struct {
 	AlwaysOnline bool `json:"always_online"`
 }
 
+// ManifestAgentView is the features.agent_view section of a Manifest.
+type ManifestAgentView struct {
+	// AgentDescription is the required description of the agent. Slack
+	// accepts at most 300 characters.
+	AgentDescription string `json:"agent_description"`
+}
+
 // ManifestOAuthConfig is the oauth_config section of a Manifest.
 type ManifestOAuthConfig struct {
+	// RedirectURLs are the optional OAuth redirect URLs of the app. Slack
+	// accepts at most 1000.
+	RedirectURLs []string `json:"redirect_urls,omitempty"`
 	// Scopes is the optional scopes section.
 	Scopes *ManifestScopes `json:"scopes,omitempty"`
 }

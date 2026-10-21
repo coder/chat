@@ -141,3 +141,27 @@ func TestDeleteMessage(t *testing.T) {
 		methodsCheckJSONBody(t, srv, "chat.delete", `{"channel":"C1","ts":"1700000000.000100"}`)
 	})
 }
+
+func TestPostEphemeral(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	srv.Respond("chat.postEphemeral", json.RawMessage(`{"ok":true,"message_ts":"1700000000.000200"}`))
+
+	resp, err := methodsNewClient(srv).PostEphemeral(t.Context(), slackapi.PostEphemeralRequest{
+		Channel:  "C1",
+		User:     "U1",
+		ThreadTS: "1700000000.000001",
+		Text:     "I only answer members of this workspace.",
+	})
+	if err != nil {
+		t.Fatalf("PostEphemeral: %v", err)
+	}
+	methodsCheckJSONBody(t, srv, "chat.postEphemeral", `{
+		"channel": "C1",
+		"user": "U1",
+		"thread_ts": "1700000000.000001",
+		"text": "I only answer members of this workspace."
+	}`)
+	methodsCheckEqual(t, "response", resp, &slackapi.PostEphemeralResponse{MessageTS: "1700000000.000200"})
+}

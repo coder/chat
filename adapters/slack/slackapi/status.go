@@ -23,3 +23,33 @@ type SetAssistantThreadStatusRequest struct {
 func (c *Client) SetAssistantThreadStatus(ctx context.Context, req SetAssistantThreadStatusRequest) error {
 	return c.Call(ctx, "assistant.threads.setStatus", req, nil)
 }
+
+// Agent session statuses for SetAgentSessionStatusRequest.Status.
+const (
+	// AgentSessionActive marks an open session where the agent does not work.
+	AgentSessionActive = "active"
+	// AgentSessionProcessing shows that the agent works, with a Stop button.
+	// A click on Stop sends an agent_session_stopped event.
+	AgentSessionProcessing = "processing"
+)
+
+// SetAgentSessionStatusRequest is the request of agents.sessions.setStatus.
+type SetAgentSessionStatusRequest struct {
+	// ChannelID is the ID of the channel of the session.
+	ChannelID string `json:"channel_id"`
+	// ThreadTS is the ts of the parent message of the thread of the session.
+	// Leave it empty only for a session channel, which has no thread.
+	ThreadTS string `json:"thread_ts,omitempty"`
+	// Status is the new status, for example AgentSessionProcessing. Slack also
+	// accepts "suspended" and "closed".
+	Status string `json:"status"`
+}
+
+// SetAgentSessionStatus calls agents.sessions.setStatus. Slack creates the
+// session when the thread has none. The app must be a member of the channel.
+// The app manifest must have ManifestFeatures.AgentView. Without it, Slack
+// returns the error code "not_authorized". In a workspace without the agent
+// feature, Slack returns the error code "feature_disabled".
+func (c *Client) SetAgentSessionStatus(ctx context.Context, req SetAgentSessionStatusRequest) error {
+	return c.Call(ctx, "agents.sessions.setStatus", req, nil)
+}

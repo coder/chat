@@ -24,6 +24,28 @@
 // scopes chat:write and channels:history. Run it with:
 //
 //	SLACKAPI_LIVE_TOKEN=xoxb-... SLACKAPI_LIVE_APP_TOKEN=xapp-... SLACKAPI_LIVE_CHANNEL=C... go test -run TestLiveSocketMode -v -count=1 -timeout 3m ./adapters/slack/slackapi/
+//
+// TestLiveApp creates an app from a manifest and deletes it. It needs only:
+//
+//	SLACKAPI_LIVE_CONFIG_TOKEN  app configuration token (xoxe.xoxp-...)
+//
+// Get the token on https://api.slack.com/apps. It expires after 12 hours. Run it with:
+//
+//	SLACKAPI_LIVE_CONFIG_TOKEN=xoxe.xoxp-... go test -run TestLiveApp -v -count=1 ./adapters/slack/slackapi/
+//
+// TestLiveOAuth exchanges an OAuth code for a bot token. Slack gives a code
+// only after a user installs the app in a browser, so the test needs:
+//
+//	SLACKAPI_LIVE_OAUTH_CLIENT_ID      client ID of an app with a redirect URL
+//	SLACKAPI_LIVE_OAUTH_CLIENT_SECRET  client secret of the app
+//	SLACKAPI_LIVE_OAUTH_REDIRECT_URI   the redirect URL, if the authorize URL has one
+//	SLACKAPI_LIVE_OAUTH_CODE           the code parameter of the redirect
+//
+// Open https://slack.com/oauth/v2/authorize?client_id=...&scope=chat:write&redirect_uri=...
+// in a browser and click Allow. The browser goes to the redirect URL with the
+// code. The code works once and expires after 10 minutes. Then run:
+//
+//	SLACKAPI_LIVE_OAUTH_CLIENT_ID=... SLACKAPI_LIVE_OAUTH_CLIENT_SECRET=... SLACKAPI_LIVE_OAUTH_REDIRECT_URI=https://... SLACKAPI_LIVE_OAUTH_CODE=... go test -run TestLiveOAuth -v -count=1 ./adapters/slack/slackapi/
 
 package slackapi_test
 
@@ -246,6 +268,130 @@ func TestLive(t *testing.T) {
 		t.Fatalf("step 10 DownloadFile: got %q, want %q", downloaded.Bytes(), content)
 	}
 	t.Logf("step 10 DownloadFile: %d bytes match the upload, %d redirects %v", n, len(redirects), redirects)
+
+	info, err := client.FileInfo(ctx, slackapi.FileInfoRequest{File: uploaded.ID})
+	if err != nil {
+		t.Fatalf("step 11 FileInfo: %s", liveErr(err))
+	}
+	shares := info.Shares.Public[channel]
+	if found && !slices.Contains(shares, slackapi.FileShare{TS: shareTS, ThreadTS: parent.TS}) {
+		t.Fatalf("step 11 FileInfo: shares in %s are %+v, want the message %s in the thread %s", channel, shares, shareTS, parent.TS)
+	}
+	t.Logf("step 11 FileInfo: file %s, shares in %s %+v, has more shares %t", info.ID, channel, shares, info.HasMoreShares)
+
+	ephemeral, err := client.PostEphemeral(ctx, slackapi.PostEphemeralRequest{
+		Channel:      channel,
+		User:         auth.UserID,
+		ThreadTS:     parent.TS,
+		MarkdownText: "Ephemeral reply sent with **markdown_text**. Only the bot user sees it.",
+	})
+	if err != nil {
+		t.Fatalf("step 12 PostEphemeral: %s", liveErr(err))
+	}
+	t.Logf("step 12 PostEphemeral to the bot user: message ts %s", ephemeral.MessageTS)
+}
+
+func TestLiveApp(t *testing.T) {
+	t.Parallel()
+
+	configToken := os.Getenv("SLACKAPI_LIVE_CONFIG_TOKEN")
+	if configToken == "" {
+		t.Skip("set SLACKAPI_LIVE_CONFIG_TOKEN to run the live app smoke test")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	client := slackapi.New(slackapi.Options{Token: configToken})
+
+	scopes := &slackapi.ManifestScopes{Bot: []string{"chat:write", "channels:read"}}
+	manifest := slackapi.Manifest{
+		DisplayInformation: slackapi.ManifestDisplayInformation{Name: fmt.Sprintf("slackapi live %d", time.Now().Unix())},
+		Features: &slackapi.ManifestFeatures{
+			BotUser:   &slackapi.ManifestBotUser{DisplayName: "slackapi-live"},
+			AgentView: &slackapi.ManifestAgentView{AgentDescription: "Smoke test of slackapi."},
+		},
+		OAuthConfig: &slackapi.ManifestOAuthConfig{
+			RedirectURLs: []string{"https://localhost/slack/oauth/callback"},
+			Scopes:       scopes,
+		},
+		Settings: &slackapi.ManifestSettings{
+			EventSubscriptions: &slackapi.ManifestEventSubscriptions{BotEvents: []string{"agent_session_stopped", "app_mention", "channel_shared"}},
+			SocketModeEnabled:  true,
+		},
+	}
+
+	created, err := client.CreateApp(ctx, slackapi.CreateAppRequest{Manifest: manifest})
+	if err == nil {
+		liveDeleteAppOnCleanup(t, client, created.AppID)
+		t.Fatalf("step 1 CreateApp without app_mentions:read: created the app %s, want invalid_manifest", created.AppID)
+	}
+	type manifestError struct {
+		Code    string `json:"code"`
+		Pointer string `json:"pointer"`
+	}
+	var invalid struct {
+		Errors []manifestError `json:"errors"`
+	}
+	if apiErr, ok := errors.AsType[*slackapi.APIError](err); ok && apiErr.Code == "invalid_manifest" {
+		_ = json.Unmarshal(apiErr.Raw, &invalid)
+	}
+	if !slices.ContainsFunc(invalid.Errors, func(e manifestError) bool { return e.Code == "app_mention_event_missing_scope" }) {
+		t.Fatalf("step 1 CreateApp without app_mentions:read: %s, errors %+v, want invalid_manifest with app_mention_event_missing_scope", liveErr(err), invalid.Errors)
+	}
+	t.Logf("step 1 CreateApp without app_mentions:read: invalid_manifest, errors %+v", invalid.Errors)
+
+	scopes.Bot = append(scopes.Bot, "app_mentions:read")
+	created, err = client.CreateApp(ctx, slackapi.CreateAppRequest{Manifest: manifest})
+	if err != nil {
+		t.Fatalf("step 2 CreateApp: %s", liveErr(err))
+	}
+	liveDeleteAppOnCleanup(t, client, created.AppID)
+	creds := created.Credentials
+	if created.AppID == "" || creds.ClientID == "" || creds.ClientSecret == "" || creds.SigningSecret == "" {
+		t.Fatalf("step 2 CreateApp: app ID %q, client ID %q, client secret set %t, signing secret set %t, want all set", created.AppID, creds.ClientID, creds.ClientSecret != "", creds.SigningSecret != "")
+	}
+	t.Logf("step 2 CreateApp: app %s, client ID %s, client secret and signing secret set", created.AppID, creds.ClientID)
+}
+
+func TestLiveOAuth(t *testing.T) {
+	t.Parallel()
+
+	req := slackapi.OAuthV2AccessRequest{
+		ClientID:     os.Getenv("SLACKAPI_LIVE_OAUTH_CLIENT_ID"),
+		ClientSecret: os.Getenv("SLACKAPI_LIVE_OAUTH_CLIENT_SECRET"),
+		Code:         os.Getenv("SLACKAPI_LIVE_OAUTH_CODE"),
+		RedirectURI:  os.Getenv("SLACKAPI_LIVE_OAUTH_REDIRECT_URI"),
+	}
+	if req.ClientID == "" || req.ClientSecret == "" || req.Code == "" {
+		t.Skip("set SLACKAPI_LIVE_OAUTH_CLIENT_ID, SLACKAPI_LIVE_OAUTH_CLIENT_SECRET, and SLACKAPI_LIVE_OAUTH_CODE to run the live OAuth smoke test")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
+	defer cancel()
+	client := slackapi.New(slackapi.Options{})
+
+	resp, err := client.OAuthV2Access(ctx, req)
+	if err != nil {
+		t.Fatalf("step 1 OAuthV2Access: %s", liveErr(err))
+	}
+	if resp.AccessToken == "" || resp.TokenType != "bot" || resp.BotUserID == "" || resp.AppID == "" || resp.Team.ID == "" && resp.Enterprise.ID == "" {
+		t.Fatalf("step 1 OAuthV2Access: access token set %t, token type %q, bot user %q, app %q, team %q, enterprise %q, want all set", resp.AccessToken != "", resp.TokenType, resp.BotUserID, resp.AppID, resp.Team.ID, resp.Enterprise.ID)
+	}
+	t.Logf("step 1 OAuthV2Access: token type %q, scope %q, bot user %s, app %s, team %s %q, enterprise %q, enterprise install %t, refresh token set %t, expires in %d s",
+		resp.TokenType, resp.Scope, resp.BotUserID, resp.AppID, resp.Team.ID, resp.Team.Name, resp.Enterprise.ID, resp.IsEnterpriseInstall, resp.RefreshToken != "", resp.ExpiresIn)
+
+	auth, err := client.WithToken(resp.AccessToken).AuthTest(ctx)
+	if err != nil {
+		t.Fatalf("step 2 AuthTest with the new token: %s", liveErr(err))
+	}
+	if auth.UserID != resp.BotUserID {
+		t.Fatalf("step 2 AuthTest with the new token: user %s, want the bot user %s", auth.UserID, resp.BotUserID)
+	}
+	t.Logf("step 2 AuthTest with the new token: user %s, team %s", auth.UserID, auth.TeamID)
+
+	_, err = client.OAuthV2Access(ctx, req)
+	if apiErr, ok := errors.AsType[*slackapi.APIError](err); !ok || apiErr.Code != "invalid_code" {
+		t.Fatalf("step 3 OAuthV2Access with the used code: got %v, want invalid_code", err)
+	}
+	t.Logf("step 3 OAuthV2Access with the used code: invalid_code")
 }
 
 func TestLiveSocketMode(t *testing.T) {
@@ -539,6 +685,13 @@ func liveDeleteFileOnCleanup(t *testing.T, client *slackapi.Client, fileID strin
 			return nil
 		}
 		return err
+	})
+}
+
+func liveDeleteAppOnCleanup(t *testing.T, client *slackapi.Client, appID string) {
+	t.Helper()
+	liveCleanup(t, "DeleteApp "+appID, func(ctx context.Context) error {
+		return client.DeleteApp(ctx, slackapi.DeleteAppRequest{AppID: appID})
 	})
 }
 

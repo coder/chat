@@ -460,3 +460,90 @@ func TestEnvelopeMessageEventErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestEnvelopeAgentSessionStoppedEvent(t *testing.T) {
+	t.Parallel()
+
+	env := inboundParse(t, inboundEventBody(`{
+		"type": "agent_session_stopped",
+		"channel": "C0CHANNEL1",
+		"thread_ts": "1700000100.000200",
+		"user": "U061F7AUR",
+		"event_ts": "1700000900.001000",
+		"streaming_message_ts": ["1700000800.000900"]
+	}`))
+	got, ok, err := env.AgentSessionStoppedEvent()
+	if err != nil || !ok {
+		t.Fatalf("AgentSessionStoppedEvent() = %+v, %t, %v, want an event", got, ok, err)
+	}
+	want := &slackapi.AgentSessionStoppedEvent{
+		Channel:  "C0CHANNEL1",
+		ThreadTS: "1700000100.000200",
+		User:     "U061F7AUR",
+		EventTS:  "1700000900.001000",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("event mismatch\ngot:  %+v\nwant: %+v", got, want)
+	}
+	if ev, ok, err := env.MessageEvent(); ev != nil || ok || err != nil {
+		t.Errorf("MessageEvent() = %+v, %t, %v, want no event", ev, ok, err)
+	}
+}
+
+func TestEnvelopeChannelSharedEvent(t *testing.T) {
+	t.Parallel()
+
+	env := inboundParse(t, inboundEventBody(`{
+		"type": "channel_shared",
+		"connected_team_id": "E163Q94DX",
+		"channel": "C0CHANNEL1",
+		"event_ts": "1700000900.001000"
+	}`))
+	got, ok, err := env.ChannelSharedEvent()
+	if err != nil || !ok {
+		t.Fatalf("ChannelSharedEvent() = %+v, %t, %v, want an event", got, ok, err)
+	}
+	want := &slackapi.ChannelSharedEvent{
+		Channel:         "C0CHANNEL1",
+		ConnectedTeamID: "E163Q94DX",
+		EventTS:         "1700000900.001000",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("event mismatch\ngot:  %+v\nwant: %+v", got, want)
+	}
+	if ev, ok, err := env.AgentSessionStoppedEvent(); ev != nil || ok || err != nil {
+		t.Errorf("AgentSessionStoppedEvent() = %+v, %t, %v, want no event", ev, ok, err)
+	}
+}
+
+func TestEnvelopeEventDecodersSkipAndReject(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		eventType string
+		decode    func(*slackapi.Envelope) (any, bool, error)
+	}{
+		{"AgentSessionStoppedEvent", slackapi.EventTypeAgentSessionStopped, func(e *slackapi.Envelope) (any, bool, error) { return e.AgentSessionStoppedEvent() }},
+		{"ChannelSharedEvent", slackapi.EventTypeChannelShared, func(e *slackapi.Envelope) (any, bool, error) { return e.ChannelSharedEvent() }},
+	}
+	skipped := []string{
+		inboundEventBody(`{"type":"message","channel":"C0CHANNEL1","user":"U061F7AUR","text":"hi","ts":"1700000200.000300"}`),
+		`{"type":"app_rate_limited","team_id":"T0001","minute_rate_limited":1700001060,"api_app_id":"A0APP1234"}`,
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, body := range skipped {
+				env := inboundParse(t, body)
+				if got, ok, err := tt.decode(env); !reflect.ValueOf(got).IsNil() || ok || err != nil {
+					t.Errorf("%s() of %s = %+v, %t, %v, want no event", tt.name, env.Type, got, ok, err)
+				}
+			}
+			env := inboundParse(t, inboundEventBody(`{"type":"`+tt.eventType+`","channel":{"id":"C0CHANNEL1"}}`))
+			if got, ok, err := tt.decode(env); err == nil || ok || !reflect.ValueOf(got).IsNil() {
+				t.Errorf("%s() of an object channel = %+v, %t, %v, want an error", tt.name, got, ok, err)
+			}
+		})
+	}
+}
