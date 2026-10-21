@@ -8,15 +8,19 @@ Slack is the only adapter with slash commands.
 ## Configure Slack
 
 In your Slack app dashboard, under **Slash Commands**, create the command
-(for example `/deploy`) and set its **Request URL** to the same webhook you
-already mounted:
+(for example `/deploy`). Over HTTP, set its **Request URL** to the same
+webhook you already mounted:
 
 ```text
 https://YOUR_PUBLIC_HOST/webhooks/slack
 ```
 
-The Slack adapter acknowledges each command with an empty 2xx. Under the
-default synchronous dispatch, that happens after your handler returns; see
+Over Socket Mode, Slack sends the command over the bot's connection, so the
+command needs no Request URL.
+
+The Slack adapter acknowledges each command with an empty 2xx over HTTP, or
+an empty ack over Socket Mode. Under the default synchronous dispatch, that
+happens after your handler returns; see
 [Long-running commands](#long-running-commands) to stay inside Slack's
 3-second budget.
 

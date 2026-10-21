@@ -226,3 +226,14 @@ type HistoryQuery struct {
 type HistoryReader interface {
 	ReadHistory(context.Context, ThreadID, HistoryQuery) ([]Message, error)
 }
+
+// Listener is the Optional Capability of an adapter that opens its own
+// connections to the platform, as an alternative to a Webhook Handler. Run it
+// with Chat.Listen.
+//
+// Listen dispatches each inbound payload through dispatch. It blocks until ctx
+// is done. Then it drains, closes its connections, and returns nil. A non-nil
+// error means that Listen cannot continue.
+type Listener interface {
+	Listen(ctx context.Context, dispatch DispatchFunc) error
+}

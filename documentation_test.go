@@ -1,12 +1,16 @@
 package chat_test
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/coder/chat/adapters/slack/slackapi"
 )
 
 // TestDocumentationCoversIntentionalVercelDifferences pins each documented
@@ -210,6 +214,46 @@ func TestLinearHowToSnippetsAreExtractedFromBuildableSource(t *testing.T) {
 		}
 		if !strings.Contains(normalizedSource, normalizedSnippet) {
 			t.Fatalf("doc snippet drifted from %s:\n%s", path, snippet)
+		}
+	}
+}
+
+// TestDocumentationTutorialManifestIsSlackManifest keeps the app manifest of
+// the Slack tutorial in the format of slackapi.Manifest, with Socket Mode on,
+// no request URL, and the scopes and events that the hello-world bot needs.
+func TestDocumentationTutorialManifestIsSlackManifest(t *testing.T) {
+	t.Parallel()
+
+	doc, err := os.ReadFile("docs/tutorials/slack-bot.md")
+	if err != nil {
+		t.Fatalf("read tutorial: %v", err)
+	}
+	match := regexp.MustCompile("(?s)```json\n(.*?)```").FindStringSubmatch(string(doc))
+	if match == nil {
+		t.Fatal("tutorial has no JSON manifest")
+	}
+	dec := json.NewDecoder(strings.NewReader(match[1]))
+	dec.DisallowUnknownFields()
+	var manifest slackapi.Manifest
+	if err := dec.Decode(&manifest); err != nil {
+		t.Fatalf("decode tutorial manifest: %v", err)
+	}
+
+	settings := manifest.Settings
+	if settings == nil || !settings.SocketModeEnabled {
+		t.Fatal("tutorial manifest does not turn on Socket Mode")
+	}
+	if settings.EventSubscriptions == nil || settings.EventSubscriptions.RequestURL != "" {
+		t.Errorf("tutorial manifest event subscriptions = %+v, want bot events and no request URL", settings.EventSubscriptions)
+	} else if !slices.Contains(settings.EventSubscriptions.BotEvents, "app_mention") {
+		t.Errorf("tutorial manifest bot events = %v, want app_mention", settings.EventSubscriptions.BotEvents)
+	}
+	if manifest.OAuthConfig == nil || manifest.OAuthConfig.Scopes == nil {
+		t.Fatal("tutorial manifest has no bot scopes")
+	}
+	for _, scope := range []string{"chat:write", "app_mentions:read"} {
+		if !slices.Contains(manifest.OAuthConfig.Scopes.Bot, scope) {
+			t.Errorf("tutorial manifest bot scopes = %v, want %s", manifest.OAuthConfig.Scopes.Bot, scope)
 		}
 	}
 }

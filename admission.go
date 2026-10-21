@@ -11,15 +11,16 @@ type tenantKey struct {
 	tenant  string
 }
 
-// admissionGate is the deferred-dispatch admission bound (ADR 0015): a
-// per-instance cap on admitted-but-incomplete deferred deliveries, with an
-// optional per-installation ceiling through the same rejection path. It is
-// constructed only under DispatchDeferred and closed by Runtime Shutdown so
-// a shutting-down instance sheds new deliveries to the platform's retry
-// instead of admitting work it is about to cancel.
+// admissionGate admits every delivery into Runtime Dispatch. Runtime Shutdown
+// closes it, so a shutting-down instance sheds new deliveries to the
+// platform's retry in both Dispatch Modes, instead of admitting work it is
+// about to cancel. Under DispatchDeferred it is also the Admission Bound (ADR
+// 0015): a per-instance cap on admitted-but-incomplete deferred deliveries,
+// with an optional per-installation ceiling through the same rejection path.
 type admissionGate struct {
 	mu sync.Mutex
-	// capacity is MaxDetached; perTenant is MaxDetachedPerTenant (0 = disabled).
+	// capacity is MaxDetached and perTenant is MaxDetachedPerTenant. Zero
+	// disables each bound; under DispatchSync both are zero.
 	capacity  int
 	perTenant int
 	inUse     int
@@ -35,7 +36,7 @@ type admissionGate struct {
 }
 
 func newAdmissionGate(capacity, perTenant int) *admissionGate {
-	assert(capacity > 0, "admission gate capacity must be positive")
+	assert(capacity >= 0, "admission gate capacity must not be negative")
 	assert(perTenant >= 0, "admission per-tenant ceiling must not be negative")
 	gate := &admissionGate{capacity: capacity, perTenant: perTenant}
 	if perTenant > 0 {
@@ -44,16 +45,16 @@ func newAdmissionGate(capacity, perTenant int) *admissionGate {
 	return gate
 }
 
-// admit reserves one admission slot for a deferred delivery. It reports false
-// when the gate is closed (Runtime Shutdown), the instance is at capacity, or
-// the delivery's installation is at its per-tenant ceiling. The returned
-// release is idempotent and must be called exactly when the delivery stops
-// retaining work: when its prelude resolves or fails, or when its detached
-// tail goroutine returns.
+// admit reserves one admission slot for a delivery. It reports false when the
+// gate is closed (Runtime Shutdown), the instance is at capacity, or the
+// delivery's installation is at its per-tenant ceiling. The returned release
+// is idempotent and must be called exactly when the delivery stops retaining
+// work: at once for a sync delivery; for a deferred delivery, when its
+// prelude resolves or fails, or when its detached tail goroutine returns.
 func (g *admissionGate) admit(adapter, tenant string) (release func(), ok bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.closed || g.inUse >= g.capacity {
+	if g.closed || (g.capacity > 0 && g.inUse >= g.capacity) {
 		return nil, false
 	}
 	key := tenantKey{adapter: adapter, tenant: tenant}

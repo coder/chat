@@ -135,6 +135,9 @@ A code spike of the adapter exists on the `spike/msteams-adapter` branch
   `golang-jwt`/`jwx` proved unnecessary. The Decision above records this stdlib-only
   choice, which preserves the repo's zero-dependency, stdlib-direct stance (Slack/Linear
   precedent).
+  [ADR 0017](0017-slack-socket-mode.md) later ended the zero-dependency rule: the module
+  now depends on `github.com/coder/websocket` for Slack Socket Mode. The stdlib-only JWT
+  choice stands.
 
 Q9's remaining verification steps are superseded rather than resolved: with
 `msbotbuilder-go` rejected, exercising *its* auth against a real Teams-issued token is

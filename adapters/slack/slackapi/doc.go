@@ -4,7 +4,7 @@
 // portable chat.Adapter surface. It holds Slack protocol and data formats only.
 // It has no runtime, state, dispatch, or policy; the application brings those.
 // The Slack adapter (package slack) uses it for its Web API calls, rate-limit
-// retry, signature check, and history reads. See ADR 0016.
+// retry, history reads, and both inbound transports. See ADR 0016 and ADR 0017.
 //
 // The package is experimental. Its exported API may change before promotion.
 // RetryPolicy and RateLimited keep the Slack adapter's supported tier because
@@ -44,11 +44,42 @@
 // in Options.FileOrigins, and both check every redirect too, so a URL from an
 // untrusted payload cannot send the token or file content to another host.
 //
-// # Inbound requests
+// # Inbound payloads
 //
-// VerifyRequest checks the Slack v0 signature of a webhook request.
-// ParseEnvelope decodes an Events API request body, and Envelope.MessageEvent
+// A Delivery is one inbound payload from Slack: an Events API payload, a slash
+// command, or an interactivity payload. A Handler handles a Delivery and gives
+// the acknowledgement. Its error tells the transport how to answer Slack:
+// ErrBusy, ErrInvalidPayload, or another error.
+//
+// Webhook is the HTTP transport. It is an http.Handler for the request URLs of
+// the app. It checks the signature with VerifyRequest, answers the
+// url_verification request, and gives each other request to its Handler as a
+// Delivery.
+//
+// ParseEnvelope decodes an Events API payload, and Envelope.MessageEvent
 // decodes its app_mention or message event.
+//
+// # Socket Mode
+//
+// Listen is the Socket Mode transport. The app opens a websocket to Slack, so
+// it needs no public request URL. Call Listen on a Client with the app-level
+// token: api.WithToken(appToken).Listen(ctx, handler, opts). Listen gets the
+// websocket URL with OpenConnection, and opens the websocket with the HTTP
+// client of the Client, so its proxy settings apply. It gives each envelope to
+// its Handler as a Delivery, and acks the envelope on the connection that it
+// came on.
+//
+// Listen keeps a connection up. When Slack asks for a refresh, or stops its
+// pings, Listen opens a new connection before it closes the old one. It retries
+// other errors with backoff, and reports them to ListenOptions.OnError. It
+// returns when ctx is done, or on an error that a retry cannot fix, for example
+// invalid_auth or link_disabled. A connection waits at most 3 seconds for its
+// running handlers, and then closes with a close frame.
+//
+// The app-level token (xapp-) needs the connections:write scope, and Socket
+// Mode must be on in the app settings. Webhook and Listen take the same
+// Handler, so an app can use one transport or both. The Slack adapter runs
+// Listen when the app calls Chat.Listen.
 //
 // # Formats
 //
@@ -62,6 +93,6 @@
 //
 // # Tests
 //
-// Package slackapitest provides a fake Slack Web API server and a request
-// signer for tests of code that uses this package.
+// Package slackapitest provides a fake Slack Web API server with a fake Socket
+// Mode, and a request signer, for tests of code that uses this package.
 package slackapi

@@ -9,7 +9,7 @@ explanation to understand the design.
 Start here if you are new to the SDK.
 
 - [Your first Slack bot](tutorials/slack-bot.md) — zero to a running Slack bot
-  in under 30 minutes.
+  in under 30 minutes, over Socket Mode with no public URL.
 
 ## How-To Guides
 
@@ -18,7 +18,7 @@ For people who already have a bot running.
 - [Choose a state backend](how-to/choose-a-state-backend.md) — memory, Redis,
   Postgres, or NATS JetStream.
 - [Defer long-running work (ack-then-work)](how-to/deferred-dispatch.md) —
-  acknowledge webhooks fast and run handlers on a detached context.
+  acknowledge deliveries fast and run handlers on a detached context.
 - [Handle slash commands](how-to/slash-commands.md) — route Slack slash
   commands through `OnCommand`.
 - [Handle interactive components](how-to/interactive-components.md) — buttons,
@@ -31,9 +31,9 @@ For people who already have a bot running.
 ## Reference
 
 - [Reference](reference.md) — modules and packages, how the runtime behaves
-  (routing, dispatch, state, concurrency, messages, history), what each
-  adapter supports, and the runnable examples. The API itself is in the
-  [GoDoc](https://pkg.go.dev/github.com/coder/chat).
+  (deliveries, routing, dispatch, state, concurrency, messages, history),
+  what each adapter supports, and the runnable examples. The API itself is
+  in the [GoDoc](https://pkg.go.dev/github.com/coder/chat).
 - [Linear agent capabilities](linear-agent-capabilities.md) — what the Linear
   adapter supports today and what it does not wrap yet.
 
