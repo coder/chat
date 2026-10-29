@@ -17,3 +17,12 @@ func BurstScopeCount(c *Chat) int {
 	defer c.burstMu.Unlock()
 	return len(c.burstScopes)
 }
+
+// QueueTurnCount reports the number of live queue turn records, for hardening
+// tests proving an idle scope retains no record (ADR 0015 bounded retention).
+func QueueTurnCount(c *Chat) int {
+	assert(c != nil, "QueueTurnCount called on nil runtime")
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	return len(c.queueTurns)
+}
