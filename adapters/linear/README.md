@@ -92,7 +92,7 @@ The adapter owns its own rate-limit retry (`RetryPolicy`) and Linear-specific ex
 ### Tokens and tenants
 
 - The adapter refreshes a token when it is empty or within 1 hour of expiry. [linear.go:ensureToken,tokenRefreshBuffer]
-- A token response without a positive `expires_in` gets no expiry, so the adapter never refreshes that token. This holds for the single-install token and for cached per-tenant tokens. [linear.go:exchangeClientCredentials,ensureToken,tenantToken]
+- A token response without a positive `expires_in` gets Linear's documented 30-day lifetime, so the adapter refreshes it 1 hour before 30 days pass. This holds for the single-install token and for cached per-tenant tokens. The adapter does not refresh a token after a 401. [linear.go:exchangeClientCredentials,defaultTokenLifetime,ensureToken,tenantToken]
 - A client-credentials response must contain `access_token` and grant every requested scope. [linear.go:exchangeClientCredentials,verifyGrantedScopes]
 - An install credential must be a `LinearInstall` or a non-nil `*LinearInstall`. A multi-tenant install needs a webhook secret. A pre-supplied `AccessToken` is used as is. [linear.go:linearCredential,resolveWebhookInstall,tenantToken]
 - `GraphQL`, `CreateSessionOnIssue`, and `CreateSessionOnComment` fail in multi-tenant mode. Use the `ForTenant` forms. [session.go:GraphQL,CreateSessionOnIssue,CreateSessionOnComment]

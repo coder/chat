@@ -40,6 +40,7 @@ const (
 	defaultSignatureTolerance = time.Minute
 	maxWebhookBodyBytes       = 1 << 20
 	tokenRefreshBuffer        = time.Hour
+	defaultTokenLifetime      = 30 * 24 * time.Hour
 )
 
 // ClientCredentials configures Linear app-actor authentication.
@@ -638,7 +639,7 @@ func (a *Adapter) verifyTimestamp(timestamp int64) error {
 
 func (a *Adapter) ensureToken(ctx context.Context) error {
 	a.mu.Lock()
-	needsRefresh := a.accessToken == "" || (!a.tokenExpiry.IsZero() && a.now().After(a.tokenExpiry.Add(-tokenRefreshBuffer)))
+	needsRefresh := a.accessToken == "" || a.now().After(a.tokenExpiry.Add(-tokenRefreshBuffer))
 	a.mu.Unlock()
 	if !needsRefresh {
 		return nil
@@ -686,11 +687,13 @@ func (a *Adapter) exchangeClientCredentials(ctx context.Context, creds ClientCre
 	if err := verifyGrantedScopes(scopes, resp.Scope); err != nil {
 		return "", time.Time{}, err
 	}
-	var expiry time.Time
+	// expires_in is optional (RFC 6749 section 5.1), so fall back to Linear's
+	// documented lifetime: https://linear.app/developers/oauth-2-0-authentication
+	lifetime := defaultTokenLifetime
 	if resp.ExpiresIn > 0 {
-		expiry = a.now().Add(time.Duration(resp.ExpiresIn) * time.Second)
+		lifetime = time.Duration(resp.ExpiresIn) * time.Second
 	}
-	return resp.AccessToken, expiry, nil
+	return resp.AccessToken, a.now().Add(lifetime), nil
 }
 
 // tenantToken resolves the access token for one Platform Tenant in multi-tenant
@@ -706,7 +709,7 @@ func (a *Adapter) tenantToken(ctx context.Context, tenant string, cred LinearIns
 	}
 	a.tenantTokensMu.Lock()
 	cached := a.tenantTokens[tenant]
-	if cached != nil && cached.accessToken != "" && (cached.expiry.IsZero() || a.now().Before(cached.expiry.Add(-tokenRefreshBuffer))) {
+	if cached != nil && cached.accessToken != "" && a.now().Before(cached.expiry.Add(-tokenRefreshBuffer)) {
 		token := cached.accessToken
 		a.tenantTokensMu.Unlock()
 		return token, nil
