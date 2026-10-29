@@ -158,8 +158,8 @@ func (a *Adapter) Init(ctx context.Context) error {
 		return nil
 	}
 
-	var resp authTestResponse
-	if err := a.call(ctx, "auth.test", map[string]any{}, &resp); err != nil {
+	resp, err := a.api.AuthTest(ctx)
+	if err != nil {
 		return err
 	}
 	if err := requireMatchingAuthField("team_id", a.teamID, resp.TeamID); err != nil {
@@ -324,7 +324,7 @@ func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg ch
 	if err != nil {
 		return nil, err
 	}
-	payload := postMessagePayload{
+	payload := slackapi.PostMessageRequest{
 		Channel:      thread.Channel,
 		Text:         messageFields.Text,
 		MarkdownText: messageFields.MarkdownText,
@@ -334,8 +334,8 @@ func (a *Adapter) PostMessage(ctx context.Context, thread chat.ThreadRef, msg ch
 		payload.ThreadTS = thread.Root
 	}
 
-	var resp postMessageResponse
-	if err := a.callWithToken(ctx, token, "chat.postMessage", payload, &resp); err != nil {
+	resp, err := a.api.WithToken(token).PostMessage(ctx, payload)
+	if err != nil {
 		return nil, err
 	}
 	return &chat.SentMessage{ID: resp.TS, ThreadID: thread.ID, Raw: resp}, nil
@@ -351,7 +351,7 @@ func (a *Adapter) PostEphemeralMessage(ctx context.Context, thread chat.ThreadRe
 		return nil, err
 	}
 	if !a.disableNativeEphemeral {
-		payload := postEphemeralPayload{
+		payload := slackapi.PostEphemeralRequest{
 			Channel:      thread.Channel,
 			User:         actor.ID,
 			Text:         messageFields.Text,
@@ -362,8 +362,7 @@ func (a *Adapter) PostEphemeralMessage(ctx context.Context, thread chat.ThreadRe
 			payload.ThreadTS = thread.Root
 		}
 
-		var resp postEphemeralResponse
-		err := a.callWithToken(ctx, token, "chat.postEphemeral", payload, &resp)
+		resp, err := a.api.WithToken(token).PostEphemeral(ctx, payload)
 		if err == nil {
 			return &chat.SentMessage{ID: resp.MessageTS, ThreadID: thread.ID, Raw: resp}, nil
 		}
@@ -593,25 +592,26 @@ func (a *Adapter) postEphemeralFallback(ctx context.Context, token string, tenan
 	if err != nil {
 		return nil, err
 	}
-	var openResp openConversationResponse
-	if err := a.callWithToken(ctx, token, "conversations.open", openConversationPayload{Users: actor.ID}, &openResp); err != nil {
-		return nil, err
-	}
-	if openResp.Channel.ID == "" {
-		return nil, errors.New("slack: conversations.open did not return channel id")
-	}
-
-	threadID, err := encodeThreadID(threadPayload{Team: tenant, Channel: openResp.Channel.ID, Direct: true})
+	api := a.api.WithToken(token)
+	conv, err := api.OpenConversation(ctx, slackapi.OpenConversationRequest{Users: actor.ID})
 	if err != nil {
 		return nil, err
 	}
-	var postResp postMessageResponse
-	if err := a.callWithToken(ctx, token, "chat.postMessage", postMessagePayload{
-		Channel:      openResp.Channel.ID,
+	if conv.ID == "" {
+		return nil, errors.New("slack: conversations.open did not return channel id")
+	}
+
+	threadID, err := encodeThreadID(threadPayload{Team: tenant, Channel: conv.ID, Direct: true})
+	if err != nil {
+		return nil, err
+	}
+	postResp, err := api.PostMessage(ctx, slackapi.PostMessageRequest{
+		Channel:      conv.ID,
 		Text:         messageFields.Text,
 		MarkdownText: messageFields.MarkdownText,
 		Mrkdwn:       messageFields.Mrkdwn,
-	}, &postResp); err != nil {
+	})
+	if err != nil {
 		if apiErr, rejected := apiRejection(err); rejected {
 			return nil, fmt.Errorf("slack: fallback chat.postMessage failed: %s", apiErr.Code)
 		}
@@ -636,22 +636,6 @@ func slackMessageFields(msg chat.PostableMessage) (slackMessage, error) {
 	default:
 		return slackMessage{}, fmt.Errorf("slack: unsupported message format %d", msg.Format)
 	}
-}
-
-// call posts to the Slack Web API with the single-install bot token. Multi-tenant
-// callers resolve a per-workspace token and use callWithToken instead.
-func (a *Adapter) call(ctx context.Context, method string, payload any, dest any) error {
-	return a.callWithToken(ctx, a.botToken, method, payload, dest)
-}
-
-// callWithToken posts to the Slack Web API authorizing with the given per-workspace
-// bot token. It is the single outbound seam both modes share. Bounded rate-limit
-// retry lives in slackapi (ADR 0005): a transient Slack 429, ratelimited, or
-// rate_limited response is retried within the per-adapter RetryPolicy and the
-// caller's context deadline, then surfaced as a typed *RateLimited on exhaustion.
-// An ok:false response returns a *slackapi.APIError.
-func (a *Adapter) callWithToken(ctx context.Context, token string, method string, payload any, dest any) error {
-	return a.api.WithToken(token).Call(ctx, method, payload, dest)
 }
 
 // apiRejection reports whether err is an ok:false Web API response, as opposed to
@@ -730,57 +714,6 @@ func decodeThreadID(id chat.ThreadID) (threadPayload, error) {
 		return threadPayload{}, fmt.Errorf("slack: invalid thread id %q", id)
 	}
 	return payload, nil
-}
-
-type authTestResponse struct {
-	OK     bool   `json:"ok"`
-	Error  string `json:"error"`
-	TeamID string `json:"team_id"`
-	UserID string `json:"user_id"`
-	BotID  string `json:"bot_id"`
-}
-
-type postMessagePayload struct {
-	Channel      string `json:"channel"`
-	ThreadTS     string `json:"thread_ts,omitempty"`
-	Text         string `json:"text,omitempty"`
-	MarkdownText string `json:"markdown_text,omitempty"`
-	Mrkdwn       *bool  `json:"mrkdwn,omitempty"`
-	Blocks       any    `json:"blocks,omitempty"`
-}
-
-type postMessageResponse struct {
-	OK      bool   `json:"ok"`
-	Error   string `json:"error"`
-	Channel string `json:"channel"`
-	TS      string `json:"ts"`
-}
-
-type postEphemeralPayload struct {
-	Channel      string `json:"channel"`
-	ThreadTS     string `json:"thread_ts,omitempty"`
-	User         string `json:"user"`
-	Text         string `json:"text,omitempty"`
-	MarkdownText string `json:"markdown_text,omitempty"`
-	Mrkdwn       *bool  `json:"mrkdwn,omitempty"`
-}
-
-type postEphemeralResponse struct {
-	OK        bool   `json:"ok"`
-	Error     string `json:"error"`
-	MessageTS string `json:"message_ts"`
-}
-
-type openConversationPayload struct {
-	Users string `json:"users"`
-}
-
-type openConversationResponse struct {
-	OK      bool   `json:"ok"`
-	Error   string `json:"error"`
-	Channel struct {
-		ID string `json:"id"`
-	} `json:"channel"`
 }
 
 func firstNonEmpty(values ...string) string {

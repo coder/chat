@@ -70,6 +70,26 @@ func TestPostMessage(t *testing.T) {
 			"unfurl_media": true
 		}`)
 	})
+
+	t.Run("Mrkdwn", func(t *testing.T) {
+		t.Parallel()
+		srv := slackapitest.NewServer(t)
+		srv.Respond("chat.postMessage", json.RawMessage(`{"ok":true,"channel":"C1","ts":"1700000000.000100"}`))
+
+		_, err := methodsNewClient(srv).PostMessage(t.Context(), slackapi.PostMessageRequest{
+			Channel: "C1",
+			Text:    "*not bold*",
+			Mrkdwn:  new(false),
+		})
+		if err != nil {
+			t.Fatalf("PostMessage: %v", err)
+		}
+		methodsCheckJSONBody(t, srv, "chat.postMessage", `{
+			"channel": "C1",
+			"text": "*not bold*",
+			"mrkdwn": false
+		}`)
+	})
 }
 
 func TestUpdateMessage(t *testing.T) {
@@ -164,4 +184,27 @@ func TestPostEphemeral(t *testing.T) {
 		"text": "I only answer members of this workspace."
 	}`)
 	methodsCheckEqual(t, "response", resp, &slackapi.PostEphemeralResponse{MessageTS: "1700000000.000200"})
+}
+
+func TestPostEphemeralMrkdwn(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	srv.Respond("chat.postEphemeral", json.RawMessage(`{"ok":true,"message_ts":"1700000000.000200"}`))
+
+	_, err := methodsNewClient(srv).PostEphemeral(t.Context(), slackapi.PostEphemeralRequest{
+		Channel: "C1",
+		User:    "U1",
+		Text:    "*not bold*",
+		Mrkdwn:  new(false),
+	})
+	if err != nil {
+		t.Fatalf("PostEphemeral: %v", err)
+	}
+	methodsCheckJSONBody(t, srv, "chat.postEphemeral", `{
+		"channel": "C1",
+		"user": "U1",
+		"text": "*not bold*",
+		"mrkdwn": false
+	}`)
 }

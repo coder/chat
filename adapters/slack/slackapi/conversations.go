@@ -64,6 +64,26 @@ func (c *Client) ConversationInfo(ctx context.Context, req ConversationInfoReque
 	return &resp.Channel, nil
 }
 
+// OpenConversationRequest is the request of conversations.open.
+type OpenConversationRequest struct {
+	// Users is a comma-separated list of 1 to 8 user IDs, without the user of
+	// the token. One ID opens a DM, and more open a group DM.
+	Users string `json:"users"`
+}
+
+// OpenConversation calls conversations.open and returns the DM or group DM
+// with the users. Slack creates the conversation when it does not exist yet.
+// The returned Conversation has only its ID set.
+func (c *Client) OpenConversation(ctx context.Context, req OpenConversationRequest) (*Conversation, error) {
+	var resp struct {
+		Channel Conversation `json:"channel"`
+	}
+	if err := c.Call(ctx, "conversations.open", req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Channel, nil
+}
+
 // ConversationHistoryRequest is the request of conversations.history.
 type ConversationHistoryRequest struct {
 	// Channel is the conversation ID.

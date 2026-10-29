@@ -108,6 +108,9 @@ func TestMethodsReturnAPIError(t *testing.T) {
 		{"conversations.info", func(ctx context.Context, c *slackapi.Client) (any, error) {
 			return c.ConversationInfo(ctx, slackapi.ConversationInfoRequest{})
 		}},
+		{"conversations.open", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.OpenConversation(ctx, slackapi.OpenConversationRequest{})
+		}},
 		{"conversations.history", func(ctx context.Context, c *slackapi.Client) (any, error) {
 			return c.ConversationHistory(ctx, slackapi.ConversationHistoryRequest{})
 		}},

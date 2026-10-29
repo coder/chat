@@ -57,6 +57,20 @@ func TestConversationInfo(t *testing.T) {
 	})
 }
 
+func TestOpenConversation(t *testing.T) {
+	t.Parallel()
+
+	srv := slackapitest.NewServer(t)
+	srv.Respond("conversations.open", json.RawMessage(`{"ok":true,"channel":{"id":"D1"}}`))
+
+	conv, err := methodsNewClient(srv).OpenConversation(t.Context(), slackapi.OpenConversationRequest{Users: "U1"})
+	if err != nil {
+		t.Fatalf("OpenConversation: %v", err)
+	}
+	methodsCheckJSONBody(t, srv, "conversations.open", `{"users":"U1"}`)
+	methodsCheckEqual(t, "conversation", conv, &slackapi.Conversation{ID: "D1"})
+}
+
 const (
 	methodsPageFirst  = `{"type": "message", "user": "U1", "text": "first", "ts": "1700000000.000001", "reactions": [{"name": "wave", "count": 1}]}`
 	methodsPageSecond = `{"type": "message", "bot_id": "B1", "text": "second", "ts": "1700000000.000002", "thread_ts": "1700000000.000001"}`

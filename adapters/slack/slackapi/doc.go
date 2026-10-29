@@ -16,11 +16,11 @@
 // defaults. The typed methods cover the calls that a bot needs: AuthTest,
 // PostMessage, PostEphemeral, UpdateMessage, DeleteMessage,
 // SetAssistantThreadStatus, SetAgentSessionStatus, AddReaction,
-// RemoveReaction, UserInfo, ConversationInfo, ConversationHistory,
-// ConversationReplies, and FileInfo. Call is the escape hatch for other
-// methods. PostResponseURL posts JSON without a token to the response_url of a
-// slash command or an interaction. WithToken returns a copy of a Client that
-// sends another token.
+// RemoveReaction, UserInfo, ConversationInfo, OpenConversation,
+// ConversationHistory, ConversationReplies, and FileInfo. Call is the escape
+// hatch for other methods. PostResponseURL posts JSON without a token to the
+// response_url of a slash command or an interaction. WithToken returns a copy
+// of a Client that sends another token.
 //
 // The setup of a bot needs three more methods. OAuthV2Access exchanges the code
 // of an install for a bot token, with the client ID and the client secret of

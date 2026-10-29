@@ -17,6 +17,9 @@ type PostMessageRequest struct {
 	// MarkdownText is the message text in standard Markdown. It cannot be
 	// combined with Text or Blocks and holds at most 12,000 characters.
 	MarkdownText string `json:"markdown_text,omitempty"`
+	// Mrkdwn set to false turns off Slack mrkdwn parsing of Text. Nil uses
+	// the Slack default, which parses it.
+	Mrkdwn *bool `json:"mrkdwn,omitempty"`
 	// UnfurlLinks turns the unfurl of text links on or off. Nil uses the
 	// Slack default.
 	UnfurlLinks *bool `json:"unfurl_links,omitempty"`
@@ -64,6 +67,9 @@ type PostEphemeralRequest struct {
 	// MarkdownText is the message text in standard Markdown. It cannot be
 	// combined with Text or Blocks and holds at most 12,000 characters.
 	MarkdownText string `json:"markdown_text,omitempty"`
+	// Mrkdwn set to false turns off Slack mrkdwn parsing of Text, as for
+	// PostMessageRequest. Nil uses the Slack default.
+	Mrkdwn *bool `json:"mrkdwn,omitempty"`
 }
 
 // PostEphemeralResponse is the response of chat.postEphemeral.
