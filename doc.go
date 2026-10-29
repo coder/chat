@@ -77,10 +77,10 @@
 //   - [DispatchSync], the default, runs the handler on the webhook request
 //     context and acknowledges after it returns. Use it for fast handlers.
 //   - [DispatchDeferred] (ack-then-work) runs dedupe before the
-//     acknowledgement, then starts the handler on a detached context bounded
-//     by [RuntimeOptions].DetachTimeout, which must be positive, and returns
-//     to the adapter without waiting for it. The acknowledgement and the
-//     handler run at the same time. Under every strategy except
+//     acknowledgement and returns to the adapter without waiting for the
+//     handler. The handler runs on a detached context bounded by
+//     [RuntimeOptions].DetachTimeout, which must be positive, and can act
+//     before the acknowledgement is written. Under every strategy except
 //     [ConcurrencyConcurrent], which takes no lock, the runtime renews the
 //     thread lock while the handler runs; if the lease is lost, it cancels
 //     the handler's context with [ErrPreempted] as the cause.

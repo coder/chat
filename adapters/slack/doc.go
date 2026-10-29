@@ -81,8 +81,8 @@
 // invariant is that in-line synchronous retry never sleeps past the caller's
 // context deadline. The deadline check and MaxElapsed bound only the sleep
 // between attempts, not the HTTP attempts. Retry under the default DispatchSync
-// stays inside Slack's 3-second ack window only when the request context or
-// Options.Client bounds those attempts.
+// stays inside Slack's 3-second ack window only when the caller's context
+// deadline or an Options.Client timeout also limits those attempts.
 //
 // The RetryPolicy is per-adapter platform config in Options, never Runtime
 // Options. RetryPolicy and RateLimited are type aliases of slackapi.RetryPolicy
