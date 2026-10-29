@@ -15,7 +15,11 @@ func TestQueueIdleScopeRetainsNoTurnRecord(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			const bFirstPoll = 3 // after the prelude acquires of A and B
+			const (
+				aPreludeAcquire = 1 + iota
+				bPreludeAcquire
+				bFirstPoll
+			)
 			state := newGatedAcquireState(0)
 			run := newGatedQueueRun(t, state, tc.mode, "A")
 
@@ -67,8 +71,6 @@ type recoveredPost struct {
 	panicked any
 }
 
-// postRecovering posts id to the queue thread and recovers a panic from
-// dispatch, as net/http does for a handler.
 func (r *gatedQueueRun) postRecovering(id string) <-chan recoveredPost {
 	done := make(chan recoveredPost, 1)
 	go func() {
@@ -97,9 +99,11 @@ func TestQueueStatePanicWhileWaiterPollsLeavesNoStaleWaiter(t *testing.T) {
 	t.Parallel()
 
 	const (
-		bFirstPoll = 3 // after the prelude acquires of A and B
-		statePanic = "state AcquireLock panicked"
+		aPreludeAcquire = 1 + iota
+		bPreludeAcquire
+		bFirstPoll
 	)
+	const statePanic = "state AcquireLock panicked"
 	state := newGatedAcquireState(bFirstPoll)
 	state.gatePanic = statePanic
 	run := newGatedQueueRun(t, state, chat.DispatchSync, "A")

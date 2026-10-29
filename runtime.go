@@ -659,9 +659,6 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 	return c.dispatchSync(ctx, event, seq, entry)
 }
 
-// deferredRelease returns the release a deferred delivery calls at its outcome:
-// it leaves the delivery's queue scope and frees its admission slot. Like the
-// release admit returns, it is idempotent.
 func (c *Chat) deferredRelease(entry *queueEntry, release func()) func() {
 	return sync.OnceFunc(func() {
 		c.leaveQueueScope(entry)
@@ -1450,8 +1447,7 @@ func (c *Chat) isPending(scope string, event *Event) bool {
 // in-flight handler releases. It returns acquireSuperseded if a newer follow-up
 // displaced this waiter, acquireAbandoned if ctx ended, acquireFailed on an
 // AcquireLock error, or the lease (acquireHeld) once acquired. label names the
-// coordination mode in the wait observations. It clears the waiter's pending
-// entry on every exit, including a panic from State.
+// coordination mode in the wait observations.
 func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, label string) (LockLease, acquireOutcome) {
 	defer c.clearPending(scope, event)
 	superseded := func() bool {
