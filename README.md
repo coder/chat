@@ -193,6 +193,235 @@ These are left out on purpose, each by a recorded decision
   subscriptions, dedupe marks, and locks.
 - **App-user auth and OAuth web flows.** Your application owns these.
 
+## System Overview
+
+This section and the five after it form the repository blueprint: a map of
+the code for contributors and coding agents. Each code directory has its own
+`README.md` contract with Interface, Invariants, Side Effects, and
+Verification sections. Citations use the form `[file:symbol]`.
+
+The root package `chat` is the runtime. It imports no other package from
+this repository. A platform adapter in `adapters/` receives a delivery over
+`Chat.Webhook` or `Chat.Listen`, normalizes it to a `chat.Event`, and calls
+the runtime's `DispatchFunc` [types.go:DispatchFunc]. The runtime then
+works through these steps [runtime.go:Chat.dispatch, runtime.go:Chat.prelude]:
+
+1. **Check.** The event must carry an `ID`, an `Adapter`, and a `ThreadID`
+   [runtime.go:validateEvent].
+2. **Admit.** The admission gate rejects the delivery once `Shutdown` has
+   started. Under `DispatchDeferred` it also rejects the delivery when
+   `MaxDetached` deliveries, or `MaxDetachedPerTenant` for its tenant, are
+   already admitted [admission.go:admissionGate.admit].
+3. **Join duplicates.** A concurrent delivery of an event ID that is already
+   in the prelude waits for that delivery's outcome
+   [runtime.go:Chat.beginEventAcceptance].
+4. **Validate.** The adapter validates the Thread ID before any lock is
+   taken [runtime.go:Chat.prelude].
+5. **Lock.** Under `ConcurrencyDrop` and `ConcurrencyQueue`,
+   `State.AcquireLock` takes the Thread Lock here. `ConcurrencyDebounce` and
+   `ConcurrencyBurst` take it later, and `ConcurrencyConcurrent` takes none
+   [runtime.go:Chat.prelude].
+6. **Route.** Commands go to `OnCommand` and interactions to `OnInteraction`.
+   A message goes to `OnSubscribedMessage` when its thread is subscribed,
+   else to `OnNewMention` when it is a mention or a direct message
+   [runtime.go:Chat.route].
+7. **Mark.** When the prelude knows the outcome (dropped on a lock conflict,
+   ignored, or routed), `State.MarkEvent` records the event ID for
+   `DedupeTTL`. A duplicate stops here [runtime.go:Chat.prelude,
+   runtime.go:Chat.routedWork, runtime.go:Chat.markAcceptedEvent].
+8. **Run.** `DispatchSync` runs the handler before the adapter acknowledges.
+   `DispatchDeferred` acknowledges first and runs the handler on a detached
+   context bounded by `DetachTimeout` [runtime.go:Chat.startDetachedTail].
+
+Handlers reply through `Thread.Post`, which calls `Adapter.PostMessage`
+[thread.go:Thread.Post]. The runtime keeps its coordination data in a
+`chat.State` backend from `state/` [state.go:State].
+
+## Local Interface & Invariants
+
+The root directory holds package `chat`. Exported symbols by file:
+
+| File | Symbols |
+| --- | --- |
+| `runtime.go` | `New`, `Option`, `WithState`, `WithAdapter`, `WithLogger`, `WithRuntimeOptions`, `RuntimeOptions`, `DefaultRuntimeOptions`, `ConcurrencyStrategy` (`ConcurrencyDrop`, `ConcurrencyQueue`, `ConcurrencyDebounce`, `ConcurrencyConcurrent`, `ConcurrencyBurst`), `LockScope` (`LockScopeThread`, `LockScopeChannel`), `DispatchMode` (`DispatchSync`, `DispatchDeferred`), `Chat` (`OnNewMention`, `OnSubscribedMessage`, `OnCommand`, `OnInteraction`, `Webhook`, `Listen`, `Thread`, `Shutdown`), `AdapterAs` |
+| `types.go` | `Adapter`, `DispatchFunc`, `Event`, `Message`, `MessageEvent`, `MessageHandler`, `Command`, `CommandEvent`, `CommandHandler`, `Interaction`, `InteractionKind` (`InteractionUnknown`, `InteractionBlockAction`), `InteractionEvent`, `InteractionHandler`, `Actor`, `BotKind` (`BotUnknown`, `BotHuman`, `BotBot`), `ThreadID`, `ThreadRef`, `RetryMetadata`, `PostableMessage`, `MessageFormat` (`MessageFormatText`, `MessageFormatMarkdown`), `Text`, `Markdown`, `SentMessage`, and the Optional Capabilities `Listener`, `HistoryReader` (`HistoryQuery`), `EphemeralPoster` (`EphemeralOptions`), `NativeContentPoster` (`NativeContent`) |
+| `state.go` | `State` (`IsThreadSubscribed`, `SubscribeThread`, `UnsubscribeThread`, `MarkEvent`, `AcquireLock`, `ExtendLock`, `ReleaseLock`, `Shutdown`), `LockLease` |
+| `thread.go` | `Thread` (`ID`, `Subscribe`, `Unsubscribe`, `Post`, `PostEphemeral`) |
+| `install.go` | `InstallStore` (`Lookup`), `Install`, `ErrInstallNotFound` |
+| `errors.go` | `ErrUnsupportedCapability`, `ErrPreempted`, `ErrAdmissionRejected` |
+| `observer.go` | `Observer`, `DispatchSpan`, `WithObserver`, `ObservationName` and the `Obs*` constants, `DispatchOutcome` and the `Outcome*` constants, `Attr` with the `Attr*` keys and `*Attr` builders |
+| `admission.go`, `burst.go` | No exported symbols. They hold the admission gate and burst batching. |
+| `doc.go` | Package documentation (`go doc github.com/coder/chat`) |
+
+Invariants:
+
+- `New` fails without a `State`, without an adapter, without a logger, on a
+  nil option or adapter, or on an empty or duplicate adapter name. It calls
+  `Adapter.Init` for each adapter in registration order. An `Init` error
+  fails `New`, which then shuts down every adapter registered so far,
+  including the one that failed [runtime.go:New].
+- `validateRuntimeOptions` rejects these options
+  [runtime.go:validateRuntimeOptions]:
+  - a non-positive `DedupeTTL` or `ThreadLockTTL`;
+  - under `ConcurrencyDebounce`: a non-positive `DebounceInterval`,
+    `DispatchSync`, or a `DetachTimeout` that does not exceed
+    `DebounceInterval`;
+  - under `ConcurrencyConcurrent`: a non-positive `MaxConcurrent`;
+  - under `ConcurrencyBurst`: a non-positive `BurstWindow`, a negative
+    `MaxBurstBatch`, or `DispatchSync`;
+  - under `DispatchDeferred`: a non-positive `DetachTimeout` or
+    `MaxDetached`, or a negative `MaxDetachedPerTenant`;
+  - an unknown `ConcurrencyStrategy`, `LockScope`, or `DispatchMode` value.
+- The defaults are `DedupeTTL` 24h, `ThreadLockTTL` 2m, `ConcurrencyDrop`,
+  `DispatchSync`, `LockScopeThread`, and `MaxDetached` 1024
+  [runtime.go:DefaultRuntimeOptions].
+- Each hook holds one handler. A later `On*` call replaces it atomically
+  under `handlersMu` [runtime.go:Chat.OnNewMention].
+- An `Event` must carry an `ID`, an `Adapter`, and a `ThreadID`
+  [runtime.go:validateEvent], and it sets at most one of `Message`,
+  `Command`, or `Interaction` [types.go:Event].
+- A rejected delivery returns `ErrAdmissionRejected` before acknowledgement
+  and is never marked, so the platform's retry is not deduped away
+  [runtime.go:Chat.dispatch, errors.go:ErrAdmissionRejected].
+- A failed prelude also leaves the event unmarked [runtime.go:Chat.prelude].
+- An accepted event is acknowledged even when its handler returns an error.
+  The runtime logs and observes the error and does not retry it
+  [runtime.go:Chat.dispatchSync, doc.go].
+- The runtime ignores messages, commands, and interactions from the
+  adapter's own bot actor [runtime.go:isSelfActor].
+- While a locked handler runs, the runtime renews the lease every
+  `ThreadLockTTL/2`. A lost lease cancels the handler with `ErrPreempted` as
+  the cause [runtime.go:Chat.startLockRefresh, errors.go:ErrPreempted].
+- Lock waiters poll `State.AcquireLock` every `ThreadLockTTL/20`, clamped to
+  1ms–1s, because `State` does not signal a release
+  [runtime.go:Chat.pollForLock].
+- `Shutdown` closes admission, cancels deferred work, drains it, stops
+  listeners, shuts down the adapters, and then shuts down `State`. A second
+  call waits for the first [runtime.go:Chat.Shutdown].
+- `Thread.Post` rejects an empty `Text` and does not subscribe the thread
+  [thread.go:Thread.Post, doc.go].
+- `Thread.PostEphemeral` rejects an empty actor ID or `Text`. It returns
+  `ErrUnsupportedCapability` when the adapter does not implement
+  `EphemeralPoster` [thread.go:Thread.PostEphemeral].
+- `Chat.Webhook` and `Chat.Listen` return an error for an adapter name that
+  is not registered. `Chat.Listen` returns `ErrUnsupportedCapability` for an
+  adapter that does not implement `Listener`. After `Shutdown` has started,
+  `Chat.Listen` returns nil at once and does not call the adapter
+  [runtime.go:Chat.Webhook, runtime.go:Chat.Listen].
+- `Observer` calls are best-effort: the runtime recovers a panic and logs it
+  at Warn [observer.go:safeEvent, observer.go:recoverObserver]. Default
+  attributes never include Thread IDs, message text, or raw actor IDs
+  [observer.go:AttrAdapter].
+- Under `ConcurrencyBurst`, one runner serves each scope. The window starts
+  at the first member's join and seals at `BurstWindow` or `MaxBurstBatch`
+  [burst.go:burstScope, burst.go:joinBurstBatch].
+
+Side effects:
+
+- Starts goroutines for each detached tail [runtime.go:Chat.startDetachedTail],
+  each lock refresh ticker [runtime.go:Chat.startLockRefresh], each burst
+  scope runner [burst.go:joinBurstBatch], and each bounded wait
+  [runtime.go:waitBounded].
+- Calls `State.MarkEvent`, `AcquireLock`, `ExtendLock`, `ReleaseLock`, and
+  `IsThreadSubscribed` [runtime.go]. Lock release uses
+  `context.WithoutCancel`, so it still runs after the caller's context ends
+  [runtime.go:Chat.releaseLock]. `Thread.Subscribe` and `Thread.Unsubscribe`
+  write subscriptions [thread.go:Thread.Subscribe].
+- Calls the adapter methods `Init`, `Webhook`, `ValidateThreadID`,
+  `PostMessage`, and `Shutdown`, plus `Listener.Listen` for adapters that
+  implement it [runtime.go:New, runtime.go:Chat.Listen, thread.go:Thread.Post].
+- Logs through `slog` and calls the `Observer` synchronously on the dispatch
+  path [observer.go:safeEvent, observer.go:safeDispatch].
+
+## Subdirectories & System Boundaries
+
+- **adapters**: [adapters/README.md](./adapters/README.md) - The Linear and
+  Slack platform adapters. Both verify webhook signatures, support
+  single-install and multi-tenant (`InstallStore`) modes, implement
+  `chat.HistoryReader`, and retry rate-limited calls only within the
+  caller's deadline. Slack's low-level Web API and Socket Mode client is
+  `adapters/slack/slackapi`, with test fakes in `slackapitest`.
+- **state**: [state/README.md](./state/README.md) - The four `chat.State`
+  backends: `memory` (root module, in-process) and `nats`, `postgres`, and
+  `redis` (each a separate Go module). All four run the
+  `internal/statetest` conformance suite.
+- **internal**: [internal/README.md](./internal/README.md) - Private helpers:
+  `ratelimit` (retry mechanics for the adapters), `statetest` (the `State`
+  conformance suite), and `tokens` (random lock lease tokens).
+- **examples**: [examples/README.md](./examples/README.md) - Five runnable
+  bots: `slack-hello-world` and `linear-agent-hello-world` with in-memory
+  state, and three Slack bots on NATS, Postgres, and Redis state, each a
+  separate module with `compose.yaml` and `pitchfork.toml`.
+- **scripts**: [scripts/README.md](./scripts/README.md) -
+  `clawpatch-autofix.sh`, the developer tool behind
+  `mise run clawpatch:autofix`.
+- **docs**: Prose documentation, not a code contract. See
+  [Documentation](#documentation).
+
+## Global Invariants
+
+- Dependencies point inward. `adapters/*` and `state/*` import the root
+  `chat` package, and the root package imports neither
+  [runtime.go, types.go, state.go].
+- `State` holds coordination data only: thread subscriptions, dedupe marks,
+  and lock leases. The runtime never creates one silently [doc.go,
+  runtime.go:New].
+- Every backend must pass `RunStateConformance`. The first `MarkEvent` for
+  an ID within its TTL wins. Only the lease token's owner can extend or
+  release a lock, and a stale token gets `false` with no error. A cancelled
+  context changes no state [internal/statetest/state.go:RunStateConformance].
+- A Thread ID starts with the adapter name and a colon
+  [runtime.go:adapterNameFromThreadID]. The Slack adapter uses `slack:v1:`
+  [adapters/slack/slack.go:decodeThreadID], and the Linear adapter uses
+  `linear:v1:` [adapters/linear/linear.go:decodeThreadID].
+- An adapter turns `ErrAdmissionRejected` into a retryable response: HTTP
+  503 from Linear [adapters/linear/linear.go:Webhook] and `ErrBusy` from
+  Slack, which `slackapi.Webhook` serves as 503
+  [adapters/slack/slack.go:deliveryHandler,
+  adapters/slack/slackapi/webhook.go:Webhook.ServeHTTP]. The exception is a
+  Slack slash command: Slack does not redeliver it, so the adapter acks it
+  with a busy reply instead [adapters/slack/slack.go:deliveryHandler].
+- `InstallStore.Lookup` runs on every inbound webhook, with no cache in the
+  adapter. `ErrInstallNotFound` makes the delivery an Ignored Event
+  [install.go:InstallStore, install.go:ErrInstallNotFound].
+- Adapter rate-limit retry never sleeps past the caller's deadline and ends
+  in a typed `RateLimited` error. Both adapters share the mechanics in
+  `internal/ratelimit` [internal/ratelimit/ratelimit.go:SleepCtx].
+- `go.work` adds six separate modules to the root module: `state/nats`,
+  `state/postgres`, `state/redis`, and the three `examples/slack-*-state`
+  bots. Its `replace` directives point the root and the three state module
+  paths at their local directories [go.work].
+
+## Global Side Effects
+
+- **Outbound network:** the Slack Web API and Socket Mode websockets
+  (`adapters/slack/slackapi`), and Linear GraphQL plus its OAuth token
+  endpoint (`adapters/linear`).
+- **Inbound HTTP:** the application serves the `http.Handler` that
+  `Chat.Webhook` returns. Adapters verify each request's signature before
+  they dispatch it [adapters/slack/slackapi/webhook.go:Webhook.ServeHTTP,
+  adapters/linear/linear.go:Webhook].
+- **Persistent state:** NATS JetStream KV buckets `<prefix>_sub`,
+  `<prefix>_event`, and `<prefix>_lock`. Postgres tables
+  `chat_runtime_subscriptions`, `chat_runtime_events`, and
+  `chat_runtime_locks`, which `postgres.New` creates. Redis keys
+  `<prefix>:sub:<id>`, `<prefix>:event:<id>`, and `<prefix>:lock:<key>`.
+- **Caller-owned clients:** `Chat.Shutdown` calls `State.Shutdown`, which
+  closes the NATS connection, pgx pool, or Redis client that the caller
+  passed in.
+- **Observability:** `slog` logs and the optional `Observer`. Adapters also
+  emit `ObsAdapterCall` and `ObsRateLimit`.
+- **Developer tooling:** `scripts/clawpatch-autofix.sh` runs Codex with the
+  sandbox disabled and creates git commits.
+
+## System Verification
+
+- Run: `mise run test`. It tests the root module, the three backend
+  modules, and the three state example modules. The Postgres and Redis
+  backend tests use Testcontainers and need Docker.
+- Run: `go test ./...` for the root module only.
+- Run: `mise run vet` for `go vet` across every module.
+
 ## Status
 
 Chat SDK Go is pre-1.0, and the public API may change before 1.0. See the

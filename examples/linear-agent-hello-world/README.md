@@ -1,5 +1,7 @@
 # Linear Agent Hello World Example
 
+## Overview
+
 A small Linear agent with in-memory state. Mention the installed Linear app
 in an issue, or delegate an issue to it, and Linear opens an agent session.
 The example then:
@@ -76,7 +78,7 @@ assignment-created sessions started arriving.
 
 Linear requires a public HTTPS endpoint. For local development, expose port
 `8080` with a tunnel such as Tailscale Funnel, `ngrok`, or `cloudflared` (see
-[Step 5 of the Slack tutorial](../../docs/tutorials/slack-bot.md#step-5-expose-the-bot-to-slack)
+[Use HTTP Instead Of Socket Mode in the Slack tutorial](../../docs/tutorials/slack-bot.md#use-http-instead-of-socket-mode)
 for Funnel commands), then use that public HTTPS URL as `YOUR_PUBLIC_HOST`.
 
 ## Run
@@ -146,3 +148,103 @@ Expected behavior:
 - This example runs under `chat.DispatchDeferred`, so the webhook
   acknowledgement does not wait for follow-up work, and the runtime holds and
   renews the thread lock while that work runs.
+
+## Interface
+
+`package main` in the root module, built from [`main.go`](main.go) and
+[`capabilities.go`](capabilities.go). It takes no CLI flags. It imports
+`github.com/coder/chat`, `github.com/coder/chat/adapters/linear`, and
+`github.com/coder/chat/state/memory` [main.go:main].
+
+| Symbol | Role | Source |
+| --- | --- | --- |
+| `main()` | Builds the Linear adapter and the `chat.Chat` runtime, registers both handlers, and serves the webhook. | [main.go:main] |
+| `/webhooks/linear` | The only HTTP route. It serves `bot.Webhook("linear")`, which answers 405 to any method but POST. | [main.go:newWebhookServer] |
+| `linearAgentAccess` | Interface over `PostThought`, `PostAction`, `PostElicitation`, `PostError`, `UpdateSession`, `CreateSessionOnIssue`, and `SuggestRepositories`. `*linear.Adapter` and a test fake satisfy it. | [main.go:linearAgentAccess] |
+| `newMentionHandler` | `OnNewMention` handler: comment reply, or subscribe, thought, action, external URL, then a final response or a `select` elicitation. | [main.go:newMentionHandler] |
+| `newFollowUpHandler` | `OnSubscribedMessage` handler: stop confirmation, then a pending select answer, then a normal follow-up reply. | [main.go:newFollowUpHandler] |
+| `shouldAsk` | Returns true when the prompt text is `deploy`. | [main.go:shouldAsk] |
+| `newWebhookServer` | Builds the `*http.Server` with a `ServeMux` and fixed timeouts. | [main.go:newWebhookServer] |
+| `mustEnv` | Reads a required environment variable. | [main.go:mustEnv] |
+| `selectionKindDeploy`, `selectionKindRepository` | Kinds of pending select elicitation (`"deploy"`, `"repository"`). | [capabilities.go:selectionKindDeploy], [capabilities.go:selectionKindRepository] |
+| `pendingSelection`, `pendingSelections`, `newPendingSelections` | Per-thread record of the offered select values, with `set` and `take`. | [capabilities.go:pendingSelections] |
+| `startProactiveSession` | Creates a session on an issue with `CreateSessionOnIssue`, seeds a `Run dashboard` URL, and posts a first thought. | [capabilities.go:startProactiveSession] |
+| `chooseRepository`, `bestSuggestion`, `offerRepositoryChoice`, `repositoryOptionValue` | Repository suggestion loop with `SuggestRepositories` and a `select` fallback. | [capabilities.go:chooseRepository] |
+| `handleSelection` | Matches a follow-up to an offered value and posts an acknowledgement for the selection kind. | [capabilities.go:handleSelection] |
+| `requireAccountLink`, `resumeAfterAccountLink` | `auth` elicitation, and the resume that the application's own auth callback calls. | [capabilities.go:requireAccountLink], [capabilities.go:resumeAfterAccountLink] |
+| `publishPullRequest` | Adds a `Pull request` external URL with `AddExternalURLs`. | [capabilities.go:publishPullRequest] |
+| `confirmStop` | Detects `linear.RawMessageFrom(...).StopRequested()` and posts a stop confirmation. | [capabilities.go:confirmStop] |
+
+The running bot calls `confirmStop` and `handleSelection` from
+`newFollowUpHandler` [main.go:newFollowUpHandler]. The other
+`capabilities.go` helpers are not called from `main.go`.
+
+## Invariants
+
+- `LINEAR_WEBHOOK_SECRET`, `LINEAR_CLIENT_CREDENTIALS_CLIENT_ID`, and
+  `LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET` must be non-empty. Otherwise
+  `mustEnv` panics with `<NAME> is required` [main.go:mustEnv].
+- An error from `linear.New`, `chat.New`, `bot.Webhook("linear")`, or
+  `ListenAndServe` panics. A missing adapter panics with
+  `linear adapter is not registered` [main.go:main].
+- The runtime uses `chat.DispatchDeferred` with `DedupeTTL` 24h,
+  `ThreadLockTTL` 2m, `DetachTimeout` 5m, and `MaxDetached` 1024. The code
+  comment says deferred dispatch requires this admission bound [main.go:main].
+- A mention on a `comment`-kind thread gets one plain reply and returns before
+  `Thread.Subscribe` [main.go:newMentionHandler].
+- On an agent session, the handler subscribes the thread before it posts any
+  activity [main.go:newMentionHandler].
+- If the final response fails to post, the handler posts an error activity and
+  unsubscribes with `context.WithoutCancel(ctx)` [main.go:newMentionHandler].
+- A stop request is handled first and drops the pending selection for the
+  thread [main.go:newFollowUpHandler].
+- Each follow-up consumes the pending selection. The handler registers it again
+  only when a matched choice fails to post, because deferred dispatch does not
+  redeliver a handler error [main.go:newFollowUpHandler].
+- `handleSelection` matches only `strings.TrimSpace(text)` equal to an offered
+  value. Other text returns `handled=false` [capabilities.go:handleSelection].
+- `chooseRepository` skips the question only when the best suggestion has
+  `Confidence >= 0.8` [capabilities.go:chooseRepository].
+- `offerRepositoryChoice` records a pending selection only for a non-empty
+  shortlist whose elicitation posted without error
+  [capabilities.go:offerRepositoryChoice].
+- With an empty shortlist, `offerRepositoryChoice` posts a free-text
+  elicitation with no `select` signal and records no pending selection
+  [capabilities.go:offerRepositoryChoice].
+- `startProactiveSession` returns the created thread ID with the error when the
+  first thought fails, so a caller does not create a duplicate session
+  [capabilities.go:startProactiveSession].
+- `pendingSelections` guards its map with a `sync.Mutex`
+  [capabilities.go:pendingSelections].
+
+## Side Effects
+
+| Environment variable | Default | Use | Source |
+| --- | --- | --- | --- |
+| `LINEAR_WEBHOOK_SECRET` | none (required) | `linear.Options.WebhookSecret` | [main.go:main] |
+| `LINEAR_CLIENT_CREDENTIALS_CLIENT_ID` | none (required) | `linear.ClientCredentials.ClientID` | [main.go:main] |
+| `LINEAR_CLIENT_CREDENTIALS_CLIENT_SECRET` | none (required) | `linear.ClientCredentials.ClientSecret` | [main.go:main] |
+| `PORT` | `8080` | Listen address `":" + PORT` | [main.go:main] |
+
+- Network: `http.Server.ListenAndServe` on `:$PORT`, with
+  `ReadHeaderTimeout` 5s, `ReadTimeout` 10s, `WriteTimeout` 10s, and
+  `IdleTimeout` 60s [main.go:newWebhookServer].
+- Network: Linear API calls through `linearAgentAccess` (thoughts, actions,
+  elicitations, errors, session updates) and `Thread.Post`
+  [main.go:newMentionHandler], [main.go:newFollowUpHandler].
+- External URL: each agent-session mention sets the `Draft PR` link
+  `https://example.com/pr/1` on the session [main.go:newMentionHandler].
+- State: runtime state lives in `memory.New()`, and pending selections live in
+  a process map. Both are lost on exit [main.go:main],
+  [capabilities.go:pendingSelections].
+- Logging: `slog.Default()` goes to the adapter and the runtime. `main` logs
+  `listening` and `chat shutdown failed` [main.go:main].
+- Lifecycle: a deferred `bot.Shutdown(context.Background())` runs when `main`
+  returns or panics. `main` installs no signal handler [main.go:main].
+
+## Verification
+
+From the repository root:
+
+- Run: `go test ./examples/linear-agent-hello-world/...`
+- Run: `go vet ./examples/linear-agent-hello-world/...`

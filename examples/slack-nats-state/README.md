@@ -1,5 +1,7 @@
 # Slack NATS State Example
 
+## Overview
+
 This example runs a tiny Slack bot with NATS JetStream-backed runtime state. When
 the bot is mentioned in a channel, or messaged directly if you enable the DM
 event, it subscribes the thread and replies. Later messages in that subscribed
@@ -108,3 +110,67 @@ NATS remembered this subscribed thread.
 Relevant docs:
 
 - NATS JetStream Key-Value store: https://docs.nats.io/nats-concepts/jetstream/key-value-store
+
+## Interface
+
+`package main` in its own module, `github.com/coder/chat/examples/slack-nats-state`
+[go.mod:module]. It is built from [`main.go`](main.go) and takes no CLI flags.
+It imports `github.com/coder/chat`, `github.com/coder/chat/adapters/slack`,
+`github.com/coder/chat/state/nats` (as `chatnats`), and `github.com/nats-io/nats.go` [main.go:main].
+
+| Symbol | Role | Source |
+| --- | --- | --- |
+| `main()` | Connects to NATS, builds the state, the Slack adapter, and the `chat.Chat` runtime, registers both handlers, and serves the webhook. | [main.go:main] |
+| `OnNewMention` handler | Subscribes the thread, then posts `chat.Markdown("**hello** _world_ from NATS state. This thread is now subscribed.")`. | [main.go:main] |
+| `OnSubscribedMessage` handler | Posts `chat.Markdown("NATS remembered this subscribed thread.")`. | [main.go:main] |
+| `/webhooks/slack` | The only HTTP route, on `http.DefaultServeMux`. It serves `bot.Webhook("slack")`, which answers 405 to any method but POST. | [main.go:main] |
+| `mustEnv` | Reads a required environment variable. | [main.go:mustEnv] |
+| [`compose.yaml`](compose.yaml) | Local `nats` service and volume. | [compose.yaml:services.nats] |
+| [`pitchfork.toml`](pitchfork.toml) | Pitchfork daemon `nats` that wraps the Compose service. | [pitchfork.toml:daemons.nats] |
+
+## Invariants
+
+- `NATS_URL`, `SLACK_SIGNING_SECRET`, and `SLACK_BOT_TOKEN` must be
+  non-empty. Otherwise `mustEnv` panics with `<NAME> is required`
+  [main.go:mustEnv].
+- An error from `natsgo.Connect`, `chatnats.New`, `slack.New`, `chat.New`,
+  `bot.Webhook("slack")`, or `http.ListenAndServe` panics [main.go:main].
+- The state keys use the `slack-example` namespace: `chatnats.New` with `Conn` and `Prefix: "slack-example"`
+  [main.go:main].
+- The mention handler subscribes the thread before it posts the reply
+  [main.go:main].
+- `go.mod` replaces `github.com/coder/chat` with `../..` and
+  `github.com/coder/chat/state/nats` with `../../state/nats`, so the example builds against
+  the local tree [go.mod:replace].
+
+## Side Effects
+
+| Environment variable | Default | Use | Source |
+| --- | --- | --- | --- |
+| `NATS_URL` | none (required) | NATS connection | [main.go:main] |
+| `SLACK_SIGNING_SECRET` | none (required) | `slack.Options.SigningSecret` | [main.go:main] |
+| `SLACK_BOT_TOKEN` | none (required) | `slack.Options.BotToken` | [main.go:main] |
+| `PORT` | `8080` | Listen address `":" + PORT` | [main.go:main] |
+
+- Network: `natsgo.Connect(NATS_URL)` opens a NATS connection [main.go:main]. `main` does not close it.
+- Network: `http.ListenAndServe` on `:$PORT` with the default server, so no
+  server timeouts are set [main.go:main].
+- Network: `slack.New` builds the Slack adapter, and each handler posts a reply
+  with `Thread.Post` [main.go:main].
+- State: runtime state goes to NATS through `chatnats.New` [main.go:main].
+- Logging: `slog.Default()` goes to the adapter and the runtime. `main` logs
+  `listening` and `chat shutdown failed` [main.go:main].
+- Lifecycle: a deferred `bot.Shutdown(context.Background())` runs when `main`
+  returns or panics. `main` installs no signal handler [main.go:main].
+- Compose service `nats`: image `nats:2.11-alpine`, port `127.0.0.1:42220:4222`, volume `nats-data` at `/data` [compose.yaml:services.nats].
+- Command `-js -sd /data -m 8222` enables JetStream, stores data in `/data`, and serves monitoring on port 8222 inside the container. Port 8222 is not published [compose.yaml:services.nats].
+- Compose healthcheck: `wget -q -O- http://localhost:8222/healthz` every 2s, timeout 5s, 30 retries [compose.yaml:services.nats.healthcheck].
+- Pitchfork daemon `nats` in namespace `chat-sdk-go-slack-nats-state`: runs `docker compose up nats`, waits on `docker compose exec -T nats wget -q -O- http://localhost:8222/healthz`, and has `auto = ["start", "stop"]` [pitchfork.toml:daemons.nats].
+
+## Verification
+
+This example is a separate Go module with no `_test.go` files, so `go test`
+only builds it. From the repository root:
+
+- Run: `cd examples/slack-nats-state && go test ./...`
+- Run: `cd examples/slack-nats-state && go vet ./...`
