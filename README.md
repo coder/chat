@@ -400,9 +400,13 @@ Side effects:
   [install.go:InstallStore, install.go:ErrInstallNotFound,
   adapters/slack/slack.go:resolveInstall,
   adapters/linear/linear.go:resolveWebhookInstall].
-- Adapter rate-limit retry never sleeps past the caller's deadline and ends
-  in a typed `RateLimited` error. Both adapters share the mechanics in
-  `internal/ratelimit` [internal/ratelimit/ratelimit.go:SleepCtx].
+- Adapter rate-limit retry never sleeps past the caller's deadline. When the
+  retry policy or the deadline check stops it, it returns a typed
+  `RateLimited` error. A context cancelled during a backoff sleep returns the
+  context error instead. Both adapters share the mechanics in
+  `internal/ratelimit` [internal/ratelimit/ratelimit.go:SleepCtx,
+  adapters/slack/slackapi/retry.go:Client.doWithRetry,
+  adapters/linear/retry.go:doJSONWithRetry].
 - `go.work` adds six separate modules to the root module: `state/nats`,
   `state/postgres`, `state/redis`, and the three `examples/slack-*-state`
   bots. Its `replace` directives point the root and the three state module

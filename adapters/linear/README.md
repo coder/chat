@@ -116,7 +116,7 @@ The adapter owns its own rate-limit retry (`RetryPolicy`) and Linear-specific ex
 - `ReadHistory` does no storage, dedupe, or caching. [history.go:ReadHistory], [doc.go:linear]
 - A `Before` cursor resolves to a `createdAt` filter. An unresolved cursor is an error. [history.go:historyCursorFilter]
 - Retry runs on HTTP 429 or a throttling GraphQL error. It never sleeps past the request context deadline, and returns `*RateLimited` instead. [retry.go:doJSONWithRetry,rateLimitedResponse]
-- Retry also returns `*RateLimited` after `MaxAttempts`, or when the next delay would push the total past `MaxElapsed`. Each delay is the exponential backoff, raised to the platform's Retry-After, then capped at `MaxDelay`. [retry.go:doJSONWithRetry], [internal/ratelimit/ratelimit.go:BackoffDelay]
+- Retry also returns `*RateLimited` after `MaxAttempts`, or when the next delay would push the total past `MaxElapsed`. A context cancelled during a backoff sleep returns the context error instead. Each delay is the exponential backoff, raised to the platform's Retry-After, then capped at `MaxDelay`. [retry.go:doJSONWithRetry], [internal/ratelimit/ratelimit.go:BackoffDelay]
 - The first-thought budget is 10 seconds from session creation. The adapter reports the deadline and runs no watchdog. [raw.go:firstThoughtBudget], [doc.go:linear]
 - When the session timestamp does not parse, `newFirstThoughtDeadline` uses `now()` as the creation time. Its doc comment says it returns nil in that case, so the doc comment and the code disagree. [raw.go:newFirstThoughtDeadline]
 

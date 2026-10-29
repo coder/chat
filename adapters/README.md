@@ -8,7 +8,7 @@ Both adapters share these traits, from their own contracts:
 
 1. Each adapter runs in single-install mode (static credentials) or multi-tenant mode (`chat.InstallStore`, looked up for each request routed to an install, with no caching).
 2. Each adapter verifies the signature of inbound webhooks before dispatch.
-3. Each adapter retries platform rate limits within a `RetryPolicy`, never sleeps past the caller's context deadline, and returns a typed `*RateLimited` error when retry stops.
+3. Each adapter retries platform rate limits within a `RetryPolicy` and never sleeps past the caller's context deadline. When the policy or the deadline check stops retry, it returns a typed `*RateLimited` error. A context cancelled during a backoff sleep returns the context error, and a failed HTTP attempt returns its transport error.
 4. Each adapter emits `chat.ObsAdapterCall` and `chat.ObsRateLimit` events to the configured observer.
 5. Each adapter implements `chat.HistoryReader` as a live read with no storage or caching.
 
