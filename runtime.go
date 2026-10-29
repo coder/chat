@@ -660,12 +660,13 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 }
 
 // deferredRelease returns the release a deferred delivery calls at its outcome:
-// it leaves the delivery's queue scope and frees its admission slot.
+// it leaves the delivery's queue scope and frees its admission slot. Like the
+// release admit returns, it is idempotent.
 func (c *Chat) deferredRelease(entry *queueEntry, release func()) func() {
-	return func() {
+	return sync.OnceFunc(func() {
 		c.leaveQueueScope(entry)
 		release()
-	}
+	})
 }
 
 // dispatchSync runs the prelude and the routed handler inline under the request
