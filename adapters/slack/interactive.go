@@ -305,7 +305,7 @@ func (a *Adapter) PostNative(ctx context.Context, thread chat.ThreadRef, content
 	if err != nil {
 		return nil, err
 	}
-	payload := postMessagePayload{
+	payload := nativePostPayload{
 		Channel: thread.Channel,
 		Blocks:  content.Payload,
 	}
@@ -313,11 +313,11 @@ func (a *Adapter) PostNative(ctx context.Context, thread chat.ThreadRef, content
 		payload.ThreadTS = thread.Root
 	}
 
-	var resp postMessageResponse
-	if err := a.callWithToken(ctx, token, "chat.postMessage", payload, &resp); err != nil {
+	var resp slackapi.PostMessageResponse
+	if err := a.api.WithToken(token).Call(ctx, "chat.postMessage", payload, &resp); err != nil {
 		return nil, err
 	}
-	return &chat.SentMessage{ID: resp.TS, ThreadID: thread.ID, Raw: resp}, nil
+	return &chat.SentMessage{ID: resp.TS, ThreadID: thread.ID, Raw: &resp}, nil
 }
 
 // OpenModal opens a modal via views.open using a trigger_id reachable from a
@@ -359,7 +359,7 @@ func (a *Adapter) OpenModalForTenant(ctx context.Context, tenant string, trigger
 
 func (a *Adapter) openModalWithToken(ctx context.Context, token string, triggerID string, view any) error {
 	var resp openViewResponse
-	return a.callWithToken(ctx, token, "views.open", openViewPayload{TriggerID: triggerID, View: view}, &resp)
+	return a.api.WithToken(token).Call(ctx, "views.open", openViewPayload{TriggerID: triggerID, View: view}, &resp)
 }
 
 // OpenModalFromRaw opens a modal using the trigger_id preserved on a Command or
@@ -444,6 +444,15 @@ func triggerIDFromRaw(raw any) string {
 	default:
 		return ""
 	}
+}
+
+// nativePostPayload is the chat.postMessage request of PostNative. It sends the
+// opaque native payload as blocks without decoding it, which the []Block of
+// slackapi.PostMessageRequest cannot do.
+type nativePostPayload struct {
+	Channel  string `json:"channel"`
+	ThreadTS string `json:"thread_ts,omitempty"`
+	Blocks   any    `json:"blocks,omitempty"`
 }
 
 type openViewPayload struct {

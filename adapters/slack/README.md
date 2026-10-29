@@ -94,8 +94,9 @@ The code has compile-time assertions for `chat.Listener`, `chat.HistoryReader`, 
 
 ## Side Effects
 
-- In single-install mode, `Init` calls `auth.test` unless all three IDs are configured, and writes the team, bot user, and bot IDs on the `Adapter`. [slack.go:Init]
-- Posts call `chat.postMessage`, `chat.postEphemeral`, `conversations.open` (DM fallback), and `views.open` through `slackapi.Client.Call`. [slack.go:PostMessage,PostEphemeralMessage,postEphemeralFallback], [interactive.go:PostNative,openModalWithToken]
+- In single-install mode, `Init` calls `auth.test` through `slackapi.Client.AuthTest` unless all three IDs are configured, and writes the team, bot user, and bot IDs on the `Adapter`. [slack.go:Init]
+- Posts call `chat.postMessage`, `chat.postEphemeral`, and `conversations.open` (DM fallback) through the typed `slackapi.Client` methods `PostMessage`, `PostEphemeral`, and `OpenConversation`. [slack.go:PostMessage,PostEphemeralMessage,postEphemeralFallback]
+- `PostNative` sends its payload to `chat.postMessage` as `blocks` without decoding it, and `OpenModal` calls `views.open`. Both go through `slackapi.Client.Call`. [interactive.go:PostNative,nativePostPayload,openModalWithToken]
 - `ReadHistory` calls `conversations.replies` for threads and `conversations.history` for direct messages. [history.go:ReadHistory]
 - `RespondURL` POSTs to the `response_url` through `slackapi.Client.PostResponseURL`, with no bot token. [interactive.go:RespondURL]
 - `Listen` opens a Socket Mode websocket through `slackapi.Client.Listen` with the app token. [slack.go:Listen]
