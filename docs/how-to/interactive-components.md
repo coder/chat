@@ -112,7 +112,10 @@ within `DedupeTTL`.
 
 `ev.Interaction.Actor` carries the Slack user ID, not a display name; the
 payload does not include one. `chat.Text` posts with Slack formatting turned
-off, so `<@USERID>` shows up literally. To credit the user in plain text,
+off, so `<@USERID>` shows up literally. A native ephemeral `chat.Text` post is
+the exception. Slack documents no switch that turns formatting off for
+`chat.postEphemeral`, so Slack formats that text. The DM fallback still turns
+formatting off. To credit the user in plain text,
 look up their display name through the Slack API. For a real, clickable
 mention, post Block Kit content with an `mrkdwn` text element containing
 `<@USERID>`.

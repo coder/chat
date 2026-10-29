@@ -30,9 +30,10 @@ type RetryPolicy struct {
 	MaxDelay time.Duration
 }
 
-// Default retry bounds are deliberately conservative so the worst-case backoff
-// (about 200ms + 400ms = 600ms over two retries, capped at MaxElapsed) stays
-// well under the ~10s first-thought window.
+// The defaults keep the total backoff well under the ~10s first-thought window.
+// Three attempts allow two sleeps, which total 200ms + 400ms = 600ms when Linear
+// sends no Retry-After. A Retry-After raises each sleep up to MaxDelay (1s), so
+// the total can reach 2s, below MaxElapsed (3s).
 func (p RetryPolicy) withDefaults() RetryPolicy {
 	out := p
 	if out.MaxAttempts <= 0 {
