@@ -20,6 +20,11 @@ const (
 	// ConcurrencyQueue waits for the in-flight handler, then dispatches the most
 	// recent superseded event for the scope. A newer event that finds the lock
 	// free runs at once and supersedes the waiting event.
+	//
+	// "Most recent" follows the order in which deliveries reach their lock scope
+	// on this instance, before any State call. A delivery delayed after that in
+	// its prelude (lock, routing, dedupe) never runs after a newer delivery that
+	// already took the scope's turn: it ends as superseded.
 	ConcurrencyQueue
 	// ConcurrencyDebounce coalesces rapid follow-ups: each new routed event for a
 	// scope supersedes the previous waiter and only the final event in a
@@ -28,7 +33,8 @@ const (
 	// dispatch (a synchronous webhook cannot park an event past the platform's
 	// acknowledgement deadline).
 	//
-	// "Final" follows the dispatch admission order on this instance: a delivery
+	// "Final" follows the admission order on this instance (the order in which
+	// deliveries reach their lock scope, before any State call): a delivery
 	// delayed in its prelude never displaces a waiter admitted after it. The
 	// quiet period is measured over registered waiters: a delivery stalled in
 	// its prelude (validation, dedupe, routing) for longer than the interval
@@ -233,11 +239,14 @@ type Chat struct {
 	// inflight tracks detached tails so Shutdown drains them before state shutdown.
 	inflight sync.WaitGroup
 
-	// queueMu guards pending, the per-scope most-recent pending waiter.
-	queueMu sync.Mutex
-	pending map[string]*pendingWaiter
-	// dispatchSeq orders deliveries by dispatch admission so a delivery delayed
-	// in its prelude can never displace a newer pending waiter.
+	// queueMu guards pending, the per-scope most-recent pending waiter, and
+	// queueTurns, the per-scope turn record of the queue strategy.
+	queueMu    sync.Mutex
+	pending    map[string]*pendingWaiter
+	queueTurns map[string]*queueTurn
+	// dispatchSeq orders deliveries by when they reach their lock scope, before
+	// any State call, so a delivery delayed in its prelude can never displace a
+	// newer pending waiter.
 	dispatchSeq atomic.Uint64
 
 	// concurrencySlots bounds simultaneous handler executions under
@@ -306,6 +315,7 @@ func New(ctx context.Context, opts ...Option) (*Chat, error) {
 		options:          cfg.options,
 		eventAcceptances: map[string]*eventAcceptance{},
 		pending:          map[string]*pendingWaiter{},
+		queueTurns:       map[string]*queueTurn{},
 		burstScopes:      map[string]*burstScope{},
 	}
 	if cfg.options.Concurrency == ConcurrencyConcurrent {
@@ -614,10 +624,6 @@ func shutdownAdapters(ctx context.Context, adapters map[string]Adapter) error {
 }
 
 func (c *Chat) dispatch(ctx context.Context, event *Event) error {
-	// The admission sequence is assigned before any prelude work so pending
-	// registration can order deliveries by admission: a delivery delayed in
-	// validation/dedupe/routing can never displace a newer waiter.
-	seq := c.dispatchSeq.Add(1)
 	if err := validateEvent(event); err != nil {
 		return err
 	}
@@ -635,13 +641,21 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 		c.safeEnd(span, OutcomeAdmissionRejected)
 		return fmt.Errorf("chat: dispatch admission rejected for adapter %q: %w", event.Adapter, ErrAdmissionRejected)
 	}
+	// A queue delivery leaves its scope's turn record once it reaches its
+	// outcome: when the deferred tail frees its admission slot, or when
+	// dispatchSync returns.
+	entry := &queueEntry{}
 	if c.options.Dispatch == DispatchDeferred {
-		return c.dispatchDeferred(ctx, event, seq, release)
+		return c.dispatchDeferred(ctx, event, entry, func() {
+			c.leaveQueueScope(entry)
+			release()
+		})
 	}
 	// A sync delivery retains no work for Shutdown to drain: its caller (an
 	// HTTP server or a Listener) owns its lifetime.
 	release()
-	return c.dispatchSync(ctx, event, seq)
+	defer c.leaveQueueScope(entry)
+	return c.dispatchSync(ctx, event, entry)
 }
 
 // dispatchSync runs the prelude and the routed handler inline under the request
@@ -649,8 +663,8 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 // strategy a Lock Conflict waits inline (bounded by ctx) for the in-flight
 // handler before the routed handler runs. Under the concurrent strategy the
 // request waits inline for a MaxConcurrent slot instead of a lock.
-func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64) error {
-	work, resolved, err := c.prelude(ctx, event, seq)
+func (c *Chat) dispatchSync(ctx context.Context, event *Event, entry *queueEntry) error {
+	work, resolved, err := c.prelude(ctx, event, entry)
 	if err != nil || resolved {
 		return err
 	}
@@ -686,8 +700,8 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64) error
 // dispatchDeferred runs the prelude under the request context and, on a routed
 // event, launches the detached tail and returns so the adapter can acknowledge
 // the platform (ack-then-work). release frees the delivery's admission slot.
-func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64, release func()) error {
-	work, resolved, err := c.prelude(ctx, event, seq)
+func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, entry *queueEntry, release func()) error {
+	work, resolved, err := c.prelude(ctx, event, entry)
 	if err != nil || resolved {
 		// The delivery retains nothing past the prelude: an errored or
 		// resolved (duplicate, dropped, ignored, unrouted) prelude frees its
@@ -768,7 +782,7 @@ type preludeWork struct {
 // Under the queue strategy a Lock Conflict on a routed event does not block: the
 // event is registered as pending (no lease) and returned with needsLock=true so
 // the tail acquires the lock, keeping ack prompt under DispatchDeferred.
-func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64) (preludeWork, bool, error) {
+func (c *Chat) prelude(ctx context.Context, event *Event, entry *queueEntry) (preludeWork, bool, error) {
 	spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
 	ctx = spanCtx
 
@@ -812,6 +826,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64) (preludeWo
 		return preludeWork{}, true, err
 	}
 	scope := c.lockScopeKey(event, ref)
+	seq := c.enterScope(scope, entry)
 
 	// The prelude acquires the Thread Lock only under drop/queue; debounce and
 	// burst always coordinate in the tail (keeping ack prompt and free of lock
@@ -979,7 +994,8 @@ func (c *Chat) routedWork(
 	}
 
 	// resolveStale closes a routed event whose delivery was admitted before the
-	// scope's current pending waiter: it never displaces the newer waiter.
+	// scope's current pending waiter or, under queue, before the scope's latest
+	// turn: it never displaces the newer waiter or runs after the newer turn.
 	resolveStale := func(label string) (preludeWork, bool, error) {
 		c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 		c.safeEnd(span, OutcomeIgnored, RouteAttr(route))
@@ -1002,7 +1018,10 @@ func (c *Chat) routedWork(
 			work.displaced = displaced
 			return work, false, nil
 		}
-		c.supersedeOlderWaiter(scope, event, seq)
+		if !c.takeQueueTurn(scope, event, seq) {
+			releaseOnResolve()
+			return resolveStale("queue")
+		}
 		return work, false, nil
 
 	case ConcurrencyDebounce:
@@ -1289,27 +1308,85 @@ const (
 // pendingWaiter is one scope's most-recent pending event plus a displacement
 // signal: displaced closes when a newer event supersedes this waiter, so a
 // parked (debounce) waiter exits promptly instead of holding its event through
-// the full interval. seq is the delivery's dispatch admission sequence, which
-// defines "newer".
+// the full interval. seq is the delivery's admission sequence (enterScope),
+// which defines "newer".
 type pendingWaiter struct {
 	event     *Event
 	seq       uint64
 	displaced chan struct{}
 }
 
+// queueTurn is a lock scope's turn record under the queue strategy. won is the
+// admission sequence of the newest delivery that took a turn (it holds the lock
+// and will run its handler). active counts the scope's deliveries from
+// enterScope to their outcome. The record lives while active > 0, so every
+// delivery admitted before won stays counted until it ends stale.
+type queueTurn struct {
+	active int
+	won    uint64
+}
+
+// queueEntry is the lock scope a queue delivery entered, or "" if it entered
+// none: dispatch leaves that scope once the delivery reaches its outcome.
+type queueEntry struct {
+	scope string
+}
+
+// enterScope assigns the delivery's admission sequence once its lock scope is
+// known, before any State call. Under queue it also counts the delivery in the
+// scope's turn record, in the same queueMu section: no delivery can take a turn
+// between the assignment and the count.
+func (c *Chat) enterScope(scope string, entry *queueEntry) uint64 {
+	if c.options.Concurrency != ConcurrencyQueue {
+		return c.dispatchSeq.Add(1)
+	}
+	assert(entry.scope == "", "a delivery enters one lock scope")
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	turn := c.queueTurns[scope]
+	if turn == nil {
+		turn = &queueTurn{}
+		c.queueTurns[scope] = turn
+	}
+	turn.active++
+	entry.scope = scope
+	return c.dispatchSeq.Add(1)
+}
+
+// leaveQueueScope ends a queue delivery's count in its scope's turn record and
+// drops the record when no delivery for the scope is left.
+func (c *Chat) leaveQueueScope(entry *queueEntry) {
+	if entry.scope == "" {
+		return
+	}
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	turn := c.queueTurns[entry.scope]
+	assert(turn != nil && turn.active > 0, "a queue delivery leaves a scope it entered")
+	turn.active--
+	if turn.active == 0 {
+		assert(c.pending[entry.scope] == nil, "a scope with no delivery has no pending waiter")
+		delete(c.queueTurns, entry.scope)
+	}
+}
+
 // registerPending records event as the most-recent pending event for its scope,
 // superseding (and signalling) any earlier waiter. "Most recent" follows the
 // dispatch admission sequence, not registration time: a delivery delayed in
-// its prelude (validation, dedupe, routing) never displaces a waiter admitted
-// after it, and instead reports registered=false so the caller resolves it as
-// superseded. Recording supersession here, where the displacing event's id is
-// known, lets the record carry superseded_by. label names the coordination
-// mode ("queue" or "debounce") so the observation names the strategy that
-// displaced the waiter. The returned channel closes when this registration is
-// itself superseded.
+// its prelude (dedupe, routing) never displaces a waiter admitted after it,
+// and instead reports registered=false so the caller resolves it as
+// superseded. Under queue it also reports registered=false when the scope's
+// latest turn was admitted after it. Recording supersession here, where the
+// displacing event's id is known, lets the record carry superseded_by. label
+// names the coordination mode ("queue" or "debounce") so the observation names
+// the strategy that displaced the waiter. The returned channel closes when
+// this registration is itself superseded.
 func (c *Chat) registerPending(scope string, event *Event, seq uint64, label string) (displaced <-chan struct{}, registered bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
+	if turn := c.queueTurns[scope]; turn != nil && turn.won > seq {
+		return nil, false
+	}
 	if prev := c.pending[scope]; prev != nil {
 		if prev.seq > seq {
 			return nil, false
@@ -1327,16 +1404,27 @@ func (c *Chat) displaceLocked(prev *pendingWaiter, by *Event, label string) {
 	close(prev.displaced)
 }
 
-func (c *Chat) supersedeOlderWaiter(scope string, event *Event, seq uint64) {
+// takeQueueTurn gives event, which took the free lock in its prelude, its
+// scope's turn: it supersedes an older pending waiter and makes every delivery
+// admitted before event stale. It reports false, and takes no turn, when a
+// newer delivery already took one.
+func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) bool {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
+	turn := c.queueTurns[scope]
+	assert(turn != nil, "a queue delivery takes a turn in a scope it entered")
+	if turn.won > seq {
+		return false
+	}
+	turn.won = seq
 	prev := c.pending[scope]
 	if prev == nil || prev.seq > seq {
-		return
+		return true
 	}
 	assert(prev.seq != seq, "a delivery that holds its prelude lease is never its scope's pending waiter")
 	c.displaceLocked(prev, event, "queue")
 	delete(c.pending, scope)
+	return true
 }
 
 // isPending reports whether event is still its scope's most-recent pending
@@ -1365,12 +1453,11 @@ func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, lab
 		// AcquireLock was in flight must win, or a superseded debounce/queue
 		// waiter would dispatch alongside the final one. Once the holder passes
 		// this check it is committed; later arrivals wait on the lock.
-		if !c.isPending(scope, event) {
+		if !c.commitPending(scope, event) {
 			c.releaseLock(ctx, lease, event.ThreadID)
 			c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 			return LockLease{}, acquireSuperseded
 		}
-		c.clearPending(scope, event)
 	case acquireSuperseded:
 		// registerPending already emitted the superseded_by record; this waiter
 		// just stops.
@@ -1413,6 +1500,25 @@ func (c *Chat) pollForLock(ctx context.Context, scope string, superseded func() 
 		case <-ticker.C:
 		}
 	}
+}
+
+// commitPending commits event, which holds the lock, if it is still its scope's
+// pending waiter: it clears the entry and, under queue, gives event the scope's
+// turn. The check and the clear are one queueMu section, so no newer event can
+// displace a waiter that goes on to run.
+func (c *Chat) commitPending(scope string, event *Event) bool {
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	waiter := c.pending[scope]
+	if waiter == nil || waiter.event != event {
+		return false
+	}
+	delete(c.pending, scope)
+	if turn := c.queueTurns[scope]; turn != nil {
+		assert(turn.won < waiter.seq, "a pending waiter is newer than every turn its scope took")
+		turn.won = waiter.seq
+	}
+	return true
 }
 
 func (c *Chat) clearPending(scope string, event *Event) {

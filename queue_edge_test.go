@@ -790,3 +790,67 @@ func TestQueueDeliveryStalledBeforeRegisteringNeverRunsAfterNewerLockTaker(t *te
 		})
 	}
 }
+
+func TestQueueDeliveryStalledInItsLockCallNeverRunsAfterNewerLockTaker(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const xPreludeAcquire = 1
+			state := newGatedAcquireState(xPreludeAcquire)
+			run := newGatedQueueRun(t, state, tc.mode, "")
+
+			run.post("X")
+			waitClosed(t, state.reached, "X's prelude did not reach the lock")
+			run.post("C")
+			eventually(t, 2*time.Second, func() bool {
+				return equalStrings(run.handledIDs(), []string{"C"}) && !state.lockHeld(string(queueThread))
+			}, "C did not take the free lock and run")
+			close(state.release)
+			eventually(t, 2*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 2 },
+				"X did not reach a terminal outcome")
+
+			if got := run.handledIDs(); !equalStrings(got, []string{"C"}) {
+				t.Fatalf("handled = %v, want [C]: X was admitted before C, so C's turn supersedes it", got)
+			}
+			if state.lockHeld(string(queueThread)) {
+				t.Fatal("X kept the Thread Lock after it ended as superseded")
+			}
+		})
+	}
+}
+
+func TestQueueDeliveryStalledBeforeRegisteringNeverRunsAfterNewerWaiter(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const cFirstPoll = 4 // after the prelude acquires of A, X, and C
+			state := newGatedMarkState("X")
+			run := newGatedQueueRun(t, state, tc.mode, "A")
+
+			run.post("A")
+			waitClosed(t, run.blockStarted, "A's handler did not start")
+			run.post("X")
+			waitClosed(t, state.markReached, "X did not reach its dedupe mark after the Lock Conflict")
+			run.post("C")
+			eventually(t, 2*time.Second, func() bool { return state.acquireCalls() >= cFirstPoll },
+				"C did not park and poll for the lock")
+			close(run.releaseBlock)
+			eventually(t, 2*time.Second, func() bool {
+				return equalStrings(run.handledIDs(), []string{"A", "C"}) && !state.lockHeld(string(queueThread))
+			}, "C did not take its turn after A")
+			close(state.markRelease)
+			eventually(t, 4*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 3 },
+				"X did not reach a terminal outcome")
+
+			if got := run.handledIDs(); !equalStrings(got, []string{"A", "C"}) {
+				t.Fatalf("handled = %v, want [A C]: X was admitted before C, so C's turn supersedes it", got)
+			}
+		})
+	}
+}
