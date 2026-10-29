@@ -462,9 +462,10 @@ func TestQueueDeferredWaiterDrainedAndCancelledByShutdown(t *testing.T) {
 
 type gatedAcquireState struct {
 	*fakeState
-	gateCall int
-	reached  chan struct{}
-	release  chan struct{}
+	gateCall  int
+	reached   chan struct{}
+	release   chan struct{}
+	gatePanic any
 
 	mu    sync.Mutex
 	calls int
@@ -487,6 +488,9 @@ func (s *gatedAcquireState) AcquireLock(ctx context.Context, key string, ttl tim
 	if gated {
 		close(s.reached)
 		<-s.release
+		if s.gatePanic != nil {
+			panic(s.gatePanic)
+		}
 	}
 	return s.fakeState.AcquireLock(ctx, key, ttl)
 }

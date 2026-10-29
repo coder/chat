@@ -61,3 +61,66 @@ func TestQueueDeferredReleaseCalledTwiceLeavesItsScopeOnce(t *testing.T) {
 		t.Fatalf("turn records = %d after both deliveries released, want 0", got)
 	}
 }
+
+type recoveredPost struct {
+	postEventResult
+	panicked any
+}
+
+// postRecovering posts id to the queue thread and recovers a panic from
+// dispatch, as net/http does for a handler.
+func (r *gatedQueueRun) postRecovering(id string) <-chan recoveredPost {
+	done := make(chan recoveredPost, 1)
+	go func() {
+		var res recoveredPost
+		defer func() {
+			res.panicked = recover()
+			done <- res
+		}()
+		res.postEventResult = postEventResultFor(r.bot, "fake", mentionEvent(id, queueThread))
+	}()
+	return done
+}
+
+func receivePost(t *testing.T, done <-chan recoveredPost, name string) recoveredPost {
+	t.Helper()
+	select {
+	case res := <-done:
+		return res
+	case <-time.After(2 * time.Second):
+		t.Fatalf("%s did not return", name)
+		return recoveredPost{}
+	}
+}
+
+func TestQueueStatePanicWhileWaiterPollsLeavesNoStaleWaiter(t *testing.T) {
+	t.Parallel()
+
+	const (
+		bFirstPoll = 3 // after the prelude acquires of A and B
+		statePanic = "state AcquireLock panicked"
+	)
+	state := newGatedAcquireState(bFirstPoll)
+	state.gatePanic = statePanic
+	run := newGatedQueueRun(t, state, chat.DispatchSync, "A")
+
+	a := run.postRecovering("A")
+	waitClosed(t, run.blockStarted, "A's handler did not start")
+	b := run.postRecovering("B")
+	waitClosed(t, state.reached, "B did not poll for the lock")
+	close(run.releaseBlock)
+	if res := receivePost(t, a, "A"); res.panicked != nil || res.status != http.StatusOK {
+		t.Fatalf("A: status=%d panic=%v", res.status, res.panicked)
+	}
+
+	close(state.release)
+	if res := receivePost(t, b, "B"); res.panicked != statePanic {
+		t.Errorf("B's dispatch panicked with %v, want the State's own panic", res.panicked)
+	}
+	if res := receivePost(t, run.postRecovering("A"), "the redelivery of A"); res.panicked != nil || res.status != http.StatusOK {
+		t.Fatalf("the redelivery of A after the State panic: status=%d panic=%v", res.status, res.panicked)
+	}
+	if got := chat.QueueTurnCount(run.bot); got != 0 {
+		t.Fatalf("turn records = %d after every delivery finished, want 0", got)
+	}
+}
