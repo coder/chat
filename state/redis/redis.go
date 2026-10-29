@@ -109,7 +109,7 @@ func (s *State) ExtendLock(ctx context.Context, lease chat.LockLease, ttl time.D
 	if ttl <= 0 {
 		return false, errors.New("redis state: lock ttl must be positive")
 	}
-	result, err := s.client.Eval(ctx, extendScript, []string{s.key("lock", lease.Key)}, lease.Token, ttl.Milliseconds()).Int()
+	result, err := s.client.Eval(ctx, extendScript, []string{s.key("lock", lease.Key)}, lease.Token, max(ttl.Milliseconds(), 1)).Int()
 	if err != nil {
 		return false, err
 	}
