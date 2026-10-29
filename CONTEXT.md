@@ -191,15 +191,15 @@ The `context.Context` used for runtime dispatch and handler execution.
 _Avoid_: Background work context
 
 **Dispatch Mode**:
-Whether the routed handler runs before or after the adapter acknowledges the platform: synchronous by default, or deferred so the platform is acknowledged first.
+Whether the adapter acknowledges the platform after the routed handler returns or without waiting for it: synchronous by default, or deferred.
 _Avoid_: Concurrency Strategy, async flag
 
 **Ack-Then-Work**:
-The deferred-dispatch contract where the adapter acknowledges within the platform deadline after the synchronous prelude, then the handler runs on the **Detached Work Context**.
+The deferred-dispatch contract where the adapter acknowledges within the platform deadline after the synchronous prelude, without waiting for the handler, which runs on the **Detached Work Context**.
 _Avoid_: Synchronous handler, fire-and-forget goroutine
 
 **Detached Work Context**:
-A runtime-derived context that outlives the inbound request or **Delivery** so a deferred handler keeps working after acknowledgement; bounded by a detach timeout and cancelled by **Runtime Shutdown**.
+A runtime-derived context that outlives the inbound request or **Delivery** so a deferred handler keeps working after the adapter acknowledges; bounded by a detach timeout and cancelled by **Runtime Shutdown**.
 _Avoid_: Request context, context.Background()
 
 **Admission Bound**:
@@ -450,7 +450,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - A **Lock Conflict** is acknowledged to the platform by default and recorded as unhandled runtime contention.
 - An adapter accepts and normalizes a **Delivery**, but **Runtime Dispatch** decides which handler runs.
 - The **Linear App-Actor Slice** preserves synchronous **Runtime Dispatch** for MVP; long-running Linear agent work should post an early **Agent Activity Thought** and enqueue follow-up work in application code.
-- **Runtime Dispatch** defaults to synchronous (**Dispatch Mode** sync); a deferred **Dispatch Mode** (**Ack-Then-Work**) is available opt-in and runs the handler on the **Detached Work Context** after acknowledgement.
+- **Runtime Dispatch** defaults to synchronous (**Dispatch Mode** sync); a deferred **Dispatch Mode** (**Ack-Then-Work**) is available opt-in, runs the handler on the **Detached Work Context**, and acknowledges without waiting for the handler.
 - The synchronous **Dispatch Context** comes from the inbound webhook request, or from the handler context of a **Delivery** that a **Listener** receives; under deferred **Dispatch Mode** the **Thread Lock** is held across the detached work and refreshed before its lease expires.
 - Runtime locks must be released when **Dispatch Context** is cancelled or handler execution exits.
 - **Runtime State** mutations performed during synchronous dispatch respect the caller's **Dispatch Context** and fail when it is cancelled.

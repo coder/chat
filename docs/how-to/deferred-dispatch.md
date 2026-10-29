@@ -31,7 +31,7 @@ Start from `chat.DefaultRuntimeOptions()` so you keep the required
 | Option | Default | What it does |
 | --- | --- | --- |
 | `Dispatch` | `DispatchSync` | `DispatchDeferred` turns on ack-then-work. |
-| `DetachTimeout` | `0` | How long a handler may run after the acknowledgement. Required under deferred dispatch: `chat.New` fails while it is zero. |
+| `DetachTimeout` | `0` | The timeout of the detached context that each deferred handler runs on. Required under deferred dispatch: `chat.New` fails while it is zero. |
 | `Concurrency` | `ConcurrencyDrop` | What happens to an event that arrives while a handler holds the thread lock. See [Pick a concurrency strategy](#pick-a-concurrency-strategy). |
 | `MaxDetached` | `1024` | The cap on deferred work in flight. Must be positive under deferred dispatch. See [Handle overload](#handle-overload). |
 
@@ -77,7 +77,7 @@ Follow three rules:
 
 - **Use the `ctx` you are given for every call.** It carries the
   `DetachTimeout` deadline and the runtime's cancellation signal.
-- **Expect no platform retry.** An error returned after the acknowledgement
+- **Expect no platform retry.** An error that a deferred handler returns
   is logged and observed, but the platform never redelivers the event. If the
   work must not be lost, make it idempotent and put it on your own queue.
 - **Expect shutdown to abort work.** `Shutdown(ctx)` cancels the detached

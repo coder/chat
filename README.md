@@ -121,11 +121,11 @@ go get github.com/coder/chat/state/nats
   runs Socket Mode, `Chat.Webhook` serves HTTP, and a bot can use both. See
   [receiving deliveries](docs/reference.md#receiving-deliveries).
 - **Ack-then-work dispatch.** Handlers run synchronously by default; opt in
-  to `DispatchDeferred` to run them after the event is acknowledged, with
-  lock renewal and an admission cap. Five concurrency strategies (drop,
-  queue, debounce, concurrent, burst) decide what happens when events
-  overlap on one thread; debounce and burst require deferred dispatch —
-  [defer long-running work](docs/how-to/deferred-dispatch.md).
+  to `DispatchDeferred` to acknowledge the event without waiting for the
+  handler, with lock renewal and an admission cap. Five concurrency
+  strategies (drop, queue, debounce, concurrent, burst) decide what happens
+  when events overlap on one thread; debounce and burst require deferred
+  dispatch — [defer long-running work](docs/how-to/deferred-dispatch.md).
 - **Slash commands and interactive components.** Commands and button clicks
   have their own hooks; Block Kit and modals go through typed adapter access —
   [slash commands](docs/how-to/slash-commands.md),
@@ -224,7 +224,7 @@ works through these steps [runtime.go:Chat.dispatch, runtime.go:Chat.prelude]:
 6. **Route.** Commands go to `OnCommand` and interactions to `OnInteraction`.
    A message goes to `OnSubscribedMessage` when its thread is subscribed,
    else to `OnNewMention` when it is a mention or a direct message
-   [runtime.go:Chat.route].
+   [runtime.go:Chat.prelude, runtime.go:Chat.route].
 7. **Mark.** When the prelude knows the outcome (dropped on a lock conflict,
    ignored, or routed), `State.MarkEvent` records the event ID for
    `DedupeTTL`. A duplicate stops here [runtime.go:Chat.prelude,
@@ -301,7 +301,7 @@ Invariants:
   not cancelled [runtime.go:Chat.dispatchSync].
 - Lock waiters poll `State.AcquireLock` every `ThreadLockTTL/20`, clamped to
   1ms–1s, because `State` does not signal a release
-  [runtime.go:Chat.pollForLock].
+  [runtime.go:Chat.pollForLock, runtime.go:Chat.queuePollInterval].
 - `Shutdown` closes admission, cancels deferred work, waits for it to drain,
   stops listeners and waits for them, shuts down the adapters, and then
   shuts down `State`. `ctx` bounds the two waits. If `ctx` ends first,

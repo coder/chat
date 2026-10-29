@@ -316,9 +316,10 @@ inbound webhook request context, or on the delivery context of a listener,
 before the platform acknowledgement. For
 long-running work, opt in to `DispatchDeferred` (ack-then-work,
 [ADR 0002](adr/0002-async-dispatch.md)): the dedupe and lock prelude runs
-before the acknowledgement, then the handler runs on a detached work context
-with automatic lock lease renewal, bounded by `DetachTimeout` (which must be
-positive under deferred dispatch). Under deferred dispatch `MaxDetached`
+before the acknowledgement, and the adapter acknowledges without waiting for
+the handler, which runs on a detached work context with automatic lock lease
+renewal, bounded by `DetachTimeout` (which must be positive under deferred
+dispatch). Under deferred dispatch `MaxDetached`
 bounds admitted-but-incomplete deliveries; a delivery arriving at the bound is
 rejected with `chat.ErrAdmissionRejected` before acknowledgement and before
 dedupe marking ([ADR 0015](adr/0015-runtime-coordination.md)). After
@@ -525,8 +526,9 @@ if ok {
   issue-comment threads from the root comment and its replies, with the same
   newest-first ordering and `Before` cursor semantics, clamped to Linear's
   maximum page size.
-- Long fetches belong after the acknowledgement, under deferred dispatch; the
-  runtime never fetches history on the inbound request path.
+- Long fetches belong in a deferred handler, which does not delay the
+  acknowledgement; the runtime never fetches history on the inbound request
+  path.
 
 This deliberately diverges from Vercel Chat SDK's end-to-end stored-history
 model: persistence of conversation content stays an application concern.
