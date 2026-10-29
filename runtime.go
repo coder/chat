@@ -650,16 +650,20 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 	// dispatchSync returns.
 	entry := &queueEntry{}
 	if c.options.Dispatch == DispatchDeferred {
-		return c.dispatchDeferred(ctx, event, seq, entry, func() {
-			c.leaveQueueScope(entry)
-			release()
-		})
+		return c.dispatchDeferred(ctx, event, seq, entry, c.deferredRelease(entry, release))
 	}
 	// A sync delivery retains no work for Shutdown to drain: its caller (an
 	// HTTP server or a Listener) owns its lifetime.
 	release()
 	defer c.leaveQueueScope(entry)
 	return c.dispatchSync(ctx, event, seq, entry)
+}
+
+func (c *Chat) deferredRelease(entry *queueEntry, release func()) func() {
+	return sync.OnceFunc(func() {
+		c.leaveQueueScope(entry)
+		release()
+	})
 }
 
 // dispatchSync runs the prelude and the routed handler inline under the request
@@ -1445,6 +1449,7 @@ func (c *Chat) isPending(scope string, event *Event) bool {
 // AcquireLock error, or the lease (acquireHeld) once acquired. label names the
 // coordination mode in the wait observations.
 func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, label string) (LockLease, acquireOutcome) {
+	defer c.clearPending(scope, event)
 	superseded := func() bool {
 		return !c.isPending(scope, event)
 	}
@@ -1465,10 +1470,8 @@ func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, lab
 		// just stops.
 		c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 	case acquireAbandoned:
-		c.clearPending(scope, event)
 		c.logger.Info("chat "+label+" wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
 	case acquireFailed:
-		c.clearPending(scope, event)
 		c.logger.Error("chat "+label+" acquire lock failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 	}
 	return lease, outcome

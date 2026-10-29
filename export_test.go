@@ -17,3 +17,32 @@ func BurstScopeCount(c *Chat) int {
 	defer c.burstMu.Unlock()
 	return len(c.burstScopes)
 }
+
+// QueueTurnCount reports the number of live queue turn records, for hardening
+// tests proving an idle scope retains no record (ADR 0015 bounded retention).
+func QueueTurnCount(c *Chat) int {
+	assert(c != nil, "QueueTurnCount called on nil runtime")
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	return len(c.queueTurns)
+}
+
+// QueuePendingCount reports the number of live pending queue waiters, for
+// hardening tests proving a waiter that ended leaves no stale entry.
+func QueuePendingCount(c *Chat) int {
+	assert(c != nil, "QueuePendingCount called on nil runtime")
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	return len(c.pending)
+}
+
+// QueueDeferredRelease enters scope's queue turn record as the prelude does
+// and returns the deferred release dispatch builds for that delivery, with a
+// no-op admission release, for hardening tests proving a repeated release
+// leaves the scope once.
+func QueueDeferredRelease(c *Chat, scope string) func() {
+	assert(c != nil, "QueueDeferredRelease called on nil runtime")
+	entry := &queueEntry{}
+	c.enterQueueScope(scope, entry)
+	return c.deferredRelease(entry, func() {})
+}

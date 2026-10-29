@@ -133,6 +133,9 @@ type Adapter interface {
 	Init(context.Context) error
 	Shutdown(context.Context) error
 	Webhook(DispatchFunc) http.Handler
+	// ValidateThreadID must not block. Dispatch calls it before the lock scope
+	// is known, so under [ConcurrencyQueue] a delivery delayed here can run
+	// after newer deliveries for its scope have finished.
 	ValidateThreadID(ThreadID) (ThreadRef, error)
 	PostMessage(context.Context, ThreadRef, PostableMessage) (*SentMessage, error)
 	BotActor() Actor
