@@ -4,6 +4,10 @@
 
 Accepted
 
+Amended 2026-10-29 (issue #136):
+
+- Decision 3 claimed that the deadline check keeps synchronous retry inside the ack window. The deadline check and `MaxElapsed` bound only the backoff sleep, not the HTTP attempts, as [#132](https://github.com/coder/chat/pull/132) corrected in the package docs. Decision 3 now states the bounds alone.
+
 ## Context
 
 The **Go Chat Runtime** posts outbound replies through a **Platform Adapter**. Every platform throttles its API: Slack Web API returns HTTP 429 with a `Retry-After` header (seconds); Linear GraphQL enforces request and complexity limits with documented reset hints; a future Teams adapter (ADR 0007) is throttled by the Bot Framework REST connector, which also uses `Retry-After`.
@@ -26,7 +30,7 @@ Outbound rate-limit retry/backoff lives in the **Platform Adapter**. It owns the
 
 2. **Honor the platform signal first.** The adapter uses the platform's `Retry-After` / reset hint when present; otherwise bounded exponential backoff with jitter. The platform signal overrides computed backoff but is still clamped to the bounds below.
 
-3. **Two hard bounds, plus a deadline.** Retry is bounded by an attempt cap and a cumulative-backoff ceiling (a proposed per-adapter **Retry Policy**), and by the caller's `context.Context` deadline. The single load-bearing invariant: the adapter never sleeps past the caller's context deadline. If the next wait would exceed the deadline (or the ceiling), it does not sleep and returns the throttling error. This keeps synchronous retry inside the ack window.
+3. **Two hard bounds, plus a deadline.** Retry is bounded by an attempt cap and a cumulative-backoff ceiling (a proposed per-adapter **Retry Policy**), and by the caller's `context.Context` deadline. The single load-bearing invariant: the adapter never sleeps past the caller's context deadline. If the next wait would exceed the deadline (or the ceiling), it does not sleep and returns the throttling error. Retry backoff is bounded by `MaxElapsed`. Individual HTTP attempts are bounded by the caller's context and HTTP client.
 
 4. **Per-adapter Retry Policy, conservative by default.** The **Retry Policy** lives in each adapter's own options, not in **Runtime Options** — rate-limit behavior is platform-specific, and **Runtime Options** stays coordination-only (DedupeTTL, ThreadLockTTL, Concurrency, and the ADR 0002 Dispatch Mode). The default attempt cap and cumulative ceiling sit comfortably under the tightest relevant ack deadline, so the synchronous path is safe without tuning. Retry is opt-out (`MaxAttempts: 1` disables it), not opt-in.
 
