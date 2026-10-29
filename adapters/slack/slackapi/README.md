@@ -39,6 +39,7 @@ The Slack adapter (package `slack`) uses this package for its Web API calls, rat
 | `Client.UpdateMessage` | `chat.update` | [chat.go:Client.UpdateMessage] |
 | `Client.DeleteMessage` | `chat.delete` | [chat.go:Client.DeleteMessage] |
 | `Client.ConversationInfo` | `conversations.info` | [conversations.go:Client.ConversationInfo] |
+| `Client.OpenConversation` | `conversations.open` | [conversations.go:Client.OpenConversation] |
 | `Client.ConversationHistory` | `conversations.history` | [conversations.go:Client.ConversationHistory] |
 | `Client.ConversationReplies` | `conversations.replies` | [conversations.go:Client.ConversationReplies] |
 | `Client.FileInfo` | `files.info` | [files.go:Client.FileInfo] |
