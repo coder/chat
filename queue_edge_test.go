@@ -550,7 +550,13 @@ func newGatedQueueRun(t *testing.T, state chat.State, mode chat.DispatchMode, bl
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
 	}
-	t.Cleanup(func() { _ = bot.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		// A check that fails before a gate opens leaves work blocked on it, so bound
+		// the drain: an unbounded Shutdown hangs and hides the failure.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = bot.Shutdown(ctx)
+	})
 	var blockOnce sync.Once
 	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
 		run.mu.Lock()
