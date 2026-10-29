@@ -459,3 +459,277 @@ func TestQueueDeferredWaiterDrainedAndCancelledByShutdown(t *testing.T) {
 		t.Fatalf("handler ran despite the lock never freeing, calls = %d", calls)
 	}
 }
+
+type gatedAcquireState struct {
+	*fakeState
+	gateCall int
+	reached  chan struct{}
+	release  chan struct{}
+
+	mu    sync.Mutex
+	calls int
+}
+
+func newGatedAcquireState(gateCall int) *gatedAcquireState {
+	return &gatedAcquireState{
+		fakeState: newFakeState(),
+		gateCall:  gateCall,
+		reached:   make(chan struct{}),
+		release:   make(chan struct{}),
+	}
+}
+
+func (s *gatedAcquireState) AcquireLock(ctx context.Context, key string, ttl time.Duration) (chat.LockLease, bool, error) {
+	s.mu.Lock()
+	s.calls++
+	gated := s.calls == s.gateCall
+	s.mu.Unlock()
+	if gated {
+		close(s.reached)
+		<-s.release
+	}
+	return s.fakeState.AcquireLock(ctx, key, ttl)
+}
+
+func (s *gatedAcquireState) acquireCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *gatedAcquireState) lockHeld(key string) bool {
+	s.fakeState.mu.Lock()
+	defer s.fakeState.mu.Unlock()
+	_, held := s.fakeState.locked[key]
+	return held
+}
+
+const queueThread = chat.ThreadID("fake:v1:thread-1")
+
+var queueDispatchModes = []struct {
+	name string
+	mode chat.DispatchMode
+}{
+	{name: "deferred", mode: chat.DispatchDeferred},
+	{name: "sync", mode: chat.DispatchSync},
+}
+
+type gatedQueueRun struct {
+	bot          *chat.Chat
+	obs          *recordingObserver
+	logs         *syncBuffer
+	blockStarted chan struct{}
+	releaseBlock chan struct{}
+
+	mu      sync.Mutex
+	handled []string
+}
+
+func newGatedQueueRun(t *testing.T, state chat.State, mode chat.DispatchMode, blockID string) *gatedQueueRun {
+	t.Helper()
+	run := &gatedQueueRun{
+		obs:          &recordingObserver{},
+		logs:         newSyncBuffer(),
+		blockStarted: make(chan struct{}),
+		releaseBlock: make(chan struct{}),
+	}
+	bot, err := chat.New(context.Background(),
+		chat.WithState(state),
+		chat.WithAdapter(newFakeAdapter("fake")),
+		chat.WithLogger(slog.New(slog.NewTextHandler(run.logs, nil))),
+		chat.WithObserver(run.obs),
+		chat.WithRuntimeOptions(chat.RuntimeOptions{
+			DedupeTTL:     time.Hour,
+			ThreadLockTTL: time.Hour,
+			Concurrency:   chat.ConcurrencyQueue,
+			Dispatch:      mode,
+			MaxDetached:   1024,
+			DetachTimeout: 5 * time.Second,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		// A check that fails before a gate opens leaves work blocked on it, so bound
+		// the drain: an unbounded Shutdown hangs and hides the failure.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = bot.Shutdown(ctx)
+	})
+	var blockOnce sync.Once
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		run.mu.Lock()
+		run.handled = append(run.handled, ev.Event.ID)
+		run.mu.Unlock()
+		if ev.Event.ID == blockID {
+			blockOnce.Do(func() { close(run.blockStarted) })
+			<-run.releaseBlock
+		}
+		return nil
+	})
+	run.bot = bot
+	return run
+}
+
+func (r *gatedQueueRun) post(id string) <-chan postEventResult {
+	done := make(chan postEventResult, 1)
+	go func() { done <- postEventResultFor(r.bot, "fake", mentionEvent(id, queueThread)) }()
+	return done
+}
+
+func (r *gatedQueueRun) handledIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.handled...)
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, msg string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal(msg)
+	}
+}
+
+func TestQueueNewerDeliveryThatTakesTheFreeLockSupersedesParkedWaiter(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				bPreludeAcquire
+				bFirstPoll
+			)
+			state := newGatedAcquireState(bFirstPoll)
+			run := newGatedQueueRun(t, state, tc.mode, "A")
+
+			results := []<-chan postEventResult{run.post("A")}
+			waitClosed(t, run.blockStarted, "A's handler did not start")
+			results = append(results, run.post("B"))
+			waitClosed(t, state.reached, "B did not poll for the lock")
+			close(run.releaseBlock)
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			results = append(results, run.post("C"))
+			eventually(t, 2*time.Second, func() bool {
+				got := run.handledIDs()
+				return len(got) == 2 && got[1] == "C" && !state.lockHeld(string(queueThread))
+			}, "C did not take the free lock and run")
+			close(state.release)
+			eventually(t, 2*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 3 },
+				"B did not reach a terminal outcome")
+
+			for i, done := range results {
+				select {
+				case res := <-done:
+					if res.err != nil || res.status != http.StatusOK {
+						t.Fatalf("delivery %d: status=%d err=%v", i, res.status, res.err)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatalf("delivery %d did not return", i)
+				}
+			}
+			if got := run.handledIDs(); !equalStrings(got, []string{"A", "C"}) {
+				t.Fatalf("handled = %v, want [A C]: B was queued before C, so C supersedes it", got)
+			}
+			var handledCount, ignoredCount int
+			for _, outcome := range run.obs.terminalOutcomes() {
+				switch outcome {
+				case chat.OutcomeHandled:
+					handledCount++
+				case chat.OutcomeIgnored:
+					ignoredCount++
+				}
+			}
+			if handledCount != 2 || ignoredCount != 1 {
+				t.Fatalf("outcomes = %v, want A and C handled and B ignored", run.obs.terminalOutcomes())
+			}
+			if !strings.Contains(run.logs.String(), "superseded_by=C") {
+				t.Fatalf("B's supersession by C was not logged; logs:\n%s", run.logs.String())
+			}
+		})
+	}
+}
+
+func TestQueueDuplicateLockTakerKeepsParkedWaiter(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				bPreludeAcquire
+				bFirstPoll
+			)
+			state := newGatedAcquireState(bFirstPoll)
+			run := newGatedQueueRun(t, state, tc.mode, "A")
+
+			run.post("A")
+			waitClosed(t, run.blockStarted, "A's handler did not start")
+			run.post("B")
+			waitClosed(t, state.reached, "B did not poll for the lock")
+			close(run.releaseBlock)
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			run.post("A")
+			eventually(t, 2*time.Second, func() bool {
+				outcomes := run.obs.terminalOutcomes()
+				return len(outcomes) == 2 && outcomes[1] == chat.OutcomeDuplicate && !state.lockHeld(string(queueThread))
+			}, "the redelivery of A did not take the free lock and end as a duplicate")
+			close(state.release)
+			eventually(t, 2*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 3 },
+				"B did not reach a terminal outcome")
+
+			if got := run.handledIDs(); !equalStrings(got, []string{"A", "B"}) {
+				t.Fatalf("handled = %v, want [A B]: a duplicate must not supersede the waiter", got)
+			}
+			if strings.Contains(run.logs.String(), "superseded_by") {
+				t.Fatalf("unexpected supersession; logs:\n%s", run.logs.String())
+			}
+		})
+	}
+}
+
+func TestQueueOlderLockTakerKeepsNewerWaiter(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				cPreludeAcquire
+				bPreludeAcquire
+				bFirstPoll
+			)
+			state := newGatedAcquireState(cPreludeAcquire)
+			run := newGatedQueueRun(t, state, tc.mode, "A")
+
+			run.post("A")
+			waitClosed(t, run.blockStarted, "A's handler did not start")
+			run.post("C")
+			waitClosed(t, state.reached, "C's prelude did not reach the lock")
+			run.post("B")
+			eventually(t, 2*time.Second, func() bool { return state.acquireCalls() >= bFirstPoll },
+				"B did not park and poll for the lock")
+			close(run.releaseBlock)
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			close(state.release)
+			eventually(t, 4*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 3 },
+				"the deliveries did not finish")
+
+			if got := run.handledIDs(); !equalStrings(got, []string{"A", "C", "B"}) {
+				t.Fatalf("handled = %v, want [A C B]: the older C must not supersede the newer B", got)
+			}
+		})
+	}
+}

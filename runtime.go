@@ -18,7 +18,8 @@ const (
 	// ConcurrencyDrop acknowledges and drops a Lock Conflict. This is the default.
 	ConcurrencyDrop ConcurrencyStrategy = iota
 	// ConcurrencyQueue waits for the in-flight handler, then dispatches the most
-	// recent superseded event for the scope.
+	// recent superseded event for the scope. A newer event that finds the lock
+	// free runs at once and supersedes the waiting event.
 	ConcurrencyQueue
 	// ConcurrencyDebounce coalesces rapid follow-ups: each new routed event for a
 	// scope supersedes the previous waiter and only the final event in a
@@ -986,10 +987,12 @@ func (c *Chat) routedWork(
 	}
 
 	switch c.options.Concurrency {
-	case ConcurrencyDrop, ConcurrencyQueue:
+	case ConcurrencyDrop:
+		assert(!conflicted, "drop resolves a Lock Conflict at the conflict site")
+		return work, false, nil
+
+	case ConcurrencyQueue:
 		if conflicted {
-			// Only queue reaches routing with a conflict (drop resolves at the
-			// conflict site): the event waits as its scope's pending waiter.
 			work.needsLock = true
 			work.waitLabel = "queue"
 			displaced, registered := c.registerPending(scope, event, seq, work.waitLabel)
@@ -997,7 +1000,9 @@ func (c *Chat) routedWork(
 				return resolveStale(work.waitLabel)
 			}
 			work.displaced = displaced
+			return work, false, nil
 		}
+		c.supersedeOlderWaiter(scope, event, seq)
 		return work, false, nil
 
 	case ConcurrencyDebounce:
@@ -1309,12 +1314,29 @@ func (c *Chat) registerPending(scope string, event *Event, seq uint64, label str
 		if prev.seq > seq {
 			return nil, false
 		}
-		c.logger.Info("chat "+label+" superseded", "adapter", prev.event.Adapter, "event_id", prev.event.ID, "thread_id", prev.event.ThreadID, "superseded_by", event.ID)
-		close(prev.displaced)
+		c.displaceLocked(prev, event, label)
 	}
 	waiter := &pendingWaiter{event: event, seq: seq, displaced: make(chan struct{})}
 	c.pending[scope] = waiter
 	return waiter.displaced, true
+}
+
+func (c *Chat) displaceLocked(prev *pendingWaiter, by *Event, label string) {
+	c.logger.Info("chat "+label+" superseded", "adapter", prev.event.Adapter,
+		"event_id", prev.event.ID, "thread_id", prev.event.ThreadID, "superseded_by", by.ID)
+	close(prev.displaced)
+}
+
+func (c *Chat) supersedeOlderWaiter(scope string, event *Event, seq uint64) {
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	prev := c.pending[scope]
+	if prev == nil || prev.seq > seq {
+		return
+	}
+	assert(prev.seq != seq, "a delivery that holds its prelude lease is never its scope's pending waiter")
+	c.displaceLocked(prev, event, "queue")
+	delete(c.pending, scope)
 }
 
 // isPending reports whether event is still its scope's most-recent pending
