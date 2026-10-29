@@ -649,3 +649,81 @@ func TestQueueNewerDeliveryThatTakesTheFreeLockSupersedesParkedWaiter(t *testing
 		})
 	}
 }
+
+func TestQueueDuplicateLockTakerKeepsParkedWaiter(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				bPreludeAcquire
+				bFirstPoll
+			)
+			state := newGatedAcquireState(bFirstPoll)
+			run := newGatedQueueRun(t, state, tc.mode, "A")
+
+			run.post("A")
+			waitClosed(t, run.blockStarted, "A's handler did not start")
+			run.post("B")
+			waitClosed(t, state.reached, "B did not poll for the lock")
+			close(run.releaseBlock)
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			run.post("A")
+			eventually(t, 2*time.Second, func() bool {
+				outcomes := run.obs.terminalOutcomes()
+				return len(outcomes) == 2 && outcomes[1] == chat.OutcomeDuplicate && !state.lockHeld(string(queueThread))
+			}, "the redelivery of A did not take the free lock and end as a duplicate")
+			close(state.release)
+			eventually(t, 2*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 3 },
+				"B did not reach a terminal outcome")
+
+			if got := run.handledIDs(); !equalStrings(got, []string{"A", "B"}) {
+				t.Fatalf("handled = %v, want [A B]: a duplicate must not supersede the waiter", got)
+			}
+			if strings.Contains(run.logs.String(), "superseded_by") {
+				t.Fatalf("unexpected supersession; logs:\n%s", run.logs.String())
+			}
+		})
+	}
+}
+
+func TestQueueOlderLockTakerKeepsNewerWaiter(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				cPreludeAcquire
+				bPreludeAcquire
+				bFirstPoll
+			)
+			state := newGatedAcquireState(cPreludeAcquire)
+			run := newGatedQueueRun(t, state, tc.mode, "A")
+
+			run.post("A")
+			waitClosed(t, run.blockStarted, "A's handler did not start")
+			run.post("C")
+			waitClosed(t, state.reached, "C's prelude did not reach the lock")
+			run.post("B")
+			eventually(t, 2*time.Second, func() bool { return state.acquireCalls() >= bFirstPoll },
+				"B did not park and poll for the lock")
+			close(run.releaseBlock)
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			close(state.release)
+			eventually(t, 4*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 3 },
+				"the deliveries did not finish")
+
+			if got := run.handledIDs(); !equalStrings(got, []string{"A", "C", "B"}) {
+				t.Fatalf("handled = %v, want [A C B]: the older C must not supersede the newer B", got)
+			}
+		})
+	}
+}
