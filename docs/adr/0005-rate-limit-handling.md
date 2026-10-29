@@ -6,7 +6,7 @@ Accepted
 
 Amended 2026-10-29 (issue #136):
 
-- Decision 3 claimed that the deadline check keeps synchronous retry inside the ack window. The deadline check and `MaxElapsed` bound only the backoff sleep, not the HTTP attempts, as [#132](https://github.com/coder/chat/pull/132) corrected in the package docs. Decision 3 now states the bounds alone.
+- Decision 3 claimed that the deadline check keeps synchronous retry inside the ack window. The deadline check and `MaxElapsed` bound only the backoff sleep, not the HTTP attempts, as [#132](https://github.com/coder/chat/pull/132) corrected in the package docs. Decision 3 now states the bounds alone. Decision 4 and two Consequences made the same claim and now name what bounds each HTTP attempt.
 
 ## Context
 
@@ -32,7 +32,7 @@ Outbound rate-limit retry/backoff lives in the **Platform Adapter**. It owns the
 
 3. **Two hard bounds, plus a deadline.** Retry is bounded by an attempt cap and a cumulative-backoff ceiling (a proposed per-adapter **Retry Policy**), and by the caller's `context.Context` deadline. The single load-bearing invariant: the adapter never sleeps past the caller's context deadline. If the next wait would exceed the deadline (or the ceiling), it does not sleep and returns the throttling error. Retry backoff is bounded by `MaxElapsed`. Individual HTTP attempts are bounded by the caller's context and HTTP client.
 
-4. **Per-adapter Retry Policy, conservative by default.** The **Retry Policy** lives in each adapter's own options, not in **Runtime Options** — rate-limit behavior is platform-specific, and **Runtime Options** stays coordination-only (DedupeTTL, ThreadLockTTL, Concurrency, and the ADR 0002 Dispatch Mode). The default attempt cap and cumulative ceiling sit comfortably under the tightest relevant ack deadline, so the synchronous path is safe without tuning. Retry is opt-out (`MaxAttempts: 1` disables it), not opt-in.
+4. **Per-adapter Retry Policy, conservative by default.** The **Retry Policy** lives in each adapter's own options, not in **Runtime Options** — rate-limit behavior is platform-specific, and **Runtime Options** stays coordination-only (DedupeTTL, ThreadLockTTL, Concurrency, and the ADR 0002 Dispatch Mode). The default attempt cap and cumulative ceiling keep the total backoff under the tightest relevant ack deadline without tuning. The caller's context or HTTP client still bounds each HTTP attempt. Retry is opt-out (`MaxAttempts: 1` disables it), not opt-in.
 
 5. **Explicit, typed exhaustion.** When bounded retry is exhausted, or a single `Retry-After` exceeds the caller's deadline, the adapter returns a typed `RateLimited` error carrying the adapter name, last `Retry-After`, attempt count, and the raw platform response as a **Platform Escape Hatch**. Callers branch on it to defer, drop, or notify; they do not string-match a generic error.
 
@@ -66,11 +66,11 @@ Throttling detection is adapter-owned: Slack maps 429 + `Retry-After` and the `r
 ## Consequences
 
 - Adapters are hardened by default: a transient Slack 429 or Linear GraphQL throttle no longer drops a reply, with no app code change. Under the default `DispatchSync` the bounded retry can only absorb throttles whose `Retry-After` fits inside the ack window; a longer throttle surfaces as a typed `RateLimited` for the caller to defer or drop. The full benefit — waiting out a multi-second throttle with the **Lock Lease** held — lands under `DispatchDeferred`.
-- The ack deadline is protected by construction. Synchronous retry cannot outlive the **Dispatch Context**, so throttling does not cause platform redelivery storms or duplicate handler runs.
+- Synchronous retry cannot outlive the **Dispatch Context**. When that context or the HTTP client ends each attempt before the ack deadline, throttling does not cause platform redelivery storms or duplicate handler runs.
 - The small **Adapter** interface is unchanged — retry is internal to existing outbound calls. The core stays a **semantic subset**; no global limiter or queue is added.
 - Callers gain an explicit `RateLimited` branch point: defer to a **Detached Work Context** (ADR 0002), drop, or notify. The raw response stays reachable via the **Platform Escape Hatch**.
 - Operators see throttling in **Runtime Observation** and through ADR 0010 **Observation Hook** counters, without reading platform dashboards.
-- Linear's first **Agent Activity Thought** stays inside the ~10s **Agent Session Timing Contract** because the default policy's ceiling is below it (ADR 0008).
+- Linear's default backoff ceiling is below the ~10s **Agent Session Timing Contract** (ADR 0008). The first **Agent Activity Thought** stays inside it when the caller's context or HTTP client also bounds each attempt.
 - Cost: a per-adapter **Retry Policy** is one more option surface, and each adapter must classify its own throttling responses. This is accepted because throttling semantics are genuinely platform-specific and do not belong in the runtime.
 - Apps that truly need to wait out long throttles must restructure to **Ack-Then-Work** rather than getting a free unbounded wait. This is intended: it keeps the synchronous path honest.
 
