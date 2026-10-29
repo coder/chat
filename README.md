@@ -121,11 +121,11 @@ go get github.com/coder/chat/state/nats
   runs Socket Mode, `Chat.Webhook` serves HTTP, and a bot can use both. See
   [receiving deliveries](docs/reference.md#receiving-deliveries).
 - **Ack-then-work dispatch.** Handlers run synchronously by default; opt in
-  to `DispatchDeferred` to run them after the event is acknowledged, with
-  lock renewal and an admission cap. Five concurrency strategies (drop,
-  queue, debounce, concurrent, burst) decide what happens when events
-  overlap on one thread; debounce and burst require deferred dispatch —
-  [defer long-running work](docs/how-to/deferred-dispatch.md).
+  to `DispatchDeferred` to acknowledge the event without waiting for the
+  handler, with lock renewal and an admission cap. Five concurrency
+  strategies (drop, queue, debounce, concurrent, burst) decide what happens
+  when events overlap on one thread; debounce and burst require deferred
+  dispatch — [defer long-running work](docs/how-to/deferred-dispatch.md).
 - **Slash commands and interactive components.** Commands and button clicks
   have their own hooks; Block Kit and modals go through typed adapter access —
   [slash commands](docs/how-to/slash-commands.md),

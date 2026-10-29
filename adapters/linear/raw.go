@@ -85,8 +85,8 @@ func RawMessageFrom(m *chat.Message) (*RawMessage, bool) {
 }
 
 // newFirstThoughtDeadline parses the session-created timestamp and computes the
-// first-thought deadline. It returns nil when the timestamp is absent or
-// unparseable so the surface stays best-effort.
+// first-thought deadline. When the timestamp is absent or unparseable, it uses
+// now() as the creation time. It returns nil only when now is also nil.
 func newFirstThoughtDeadline(createdAt string, now func() time.Time) *FirstThoughtDeadline {
 	created, ok := parseLinearTime(createdAt)
 	if !ok {

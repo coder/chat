@@ -79,8 +79,10 @@
 // attempt cap (Options.RetryPolicy.MaxAttempts), a cumulative backoff ceiling
 // (MaxElapsed), and the caller's context deadline. The single load-bearing
 // invariant is that in-line synchronous retry never sleeps past the caller's
-// context deadline, so retry under the default DispatchSync stays inside Slack's
-// 3-second ack window and cannot trigger a platform redelivery storm.
+// context deadline. The deadline check and MaxElapsed bound only the sleep
+// between attempts, not the HTTP attempts. Retry under the default DispatchSync
+// stays inside Slack's 3-second ack window only when the request context or
+// Options.Client bounds those attempts.
 //
 // The RetryPolicy is per-adapter platform config in Options, never Runtime
 // Options. RetryPolicy and RateLimited are type aliases of slackapi.RetryPolicy
