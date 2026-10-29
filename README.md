@@ -230,8 +230,11 @@ works through these steps [runtime.go:Chat.dispatch, runtime.go:Chat.prelude]:
    `DedupeTTL`. A duplicate stops here [runtime.go:Chat.prelude,
    runtime.go:Chat.routedWork, runtime.go:Chat.markAcceptedEvent].
 8. **Run.** `DispatchSync` runs the handler before the adapter acknowledges.
-   `DispatchDeferred` acknowledges first and runs the handler on a detached
-   context bounded by `DetachTimeout` [runtime.go:Chat.startDetachedTail].
+   `DispatchDeferred` starts the handler in a goroutine on a detached context
+   bounded by `DetachTimeout`, then returns to the adapter without waiting
+   for it. The adapter's acknowledgement and the handler run at the same
+   time, so a fast handler can act before the acknowledgement is written
+   [runtime.go:Chat.dispatchDeferred, runtime.go:Chat.startDetachedTail].
 
 Handlers reply through `Thread.Post`, which calls `Adapter.PostMessage`
 [thread.go:Thread.Post]. The runtime keeps its coordination data in a
@@ -289,9 +292,13 @@ Invariants:
   [runtime.go:Chat.dispatchSync, doc.go].
 - The runtime ignores messages, commands, and interactions from the
   adapter's own bot actor [runtime.go:isSelfActor].
-- While a locked handler runs, the runtime renews the lease every
-  `ThreadLockTTL/2`. A lost lease cancels the handler with `ErrPreempted` as
-  the cause [runtime.go:Chat.startLockRefresh, errors.go:ErrPreempted].
+- Under `DispatchDeferred`, while a locked handler or burst batch runs, the
+  runtime renews the lease every `ThreadLockTTL/2`. A lost lease cancels the
+  handler with `ErrPreempted` as the cause [runtime.go:Chat.runLockedTail,
+  burst.go:dispatchBurstBatch, runtime.go:Chat.startLockRefresh,
+  errors.go:ErrPreempted]. `DispatchSync` does not renew: a synchronous
+  handler that runs longer than `ThreadLockTTL` loses mutual exclusion and is
+  not cancelled [runtime.go:Chat.dispatchSync].
 - Lock waiters poll `State.AcquireLock` every `ThreadLockTTL/20`, clamped to
   1ms–1s, because `State` does not signal a release
   [runtime.go:Chat.pollForLock].

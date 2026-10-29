@@ -152,7 +152,7 @@ It imports `github.com/coder/chat`, `github.com/coder/chat/adapters/slack`,
 | `SLACK_BOT_TOKEN` | none (required) | `slack.Options.BotToken` | [main.go:main] |
 | `PORT` | `8080` | Listen address `":" + PORT` | [main.go:main] |
 
-- Network: `natsgo.Connect(NATS_URL)` opens a NATS connection [main.go:main]. `main` does not close it.
+- Network: `natsgo.Connect(NATS_URL)` opens a NATS connection [main.go:main]. `main` does not close it directly: the deferred `bot.Shutdown` calls `State.Shutdown`, which closes it [main.go:main], [`state/nats` `State.Shutdown`].
 - Network: `http.ListenAndServe` on `:$PORT` with the default server, so no
   server timeouts are set [main.go:main].
 - Network: `slack.New` builds the Slack adapter, and each handler posts a reply

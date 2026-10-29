@@ -90,7 +90,7 @@ The code has compile-time assertions for `chat.Listener`, `chat.HistoryReader`, 
 - `ReadHistory` uses 100 when `Limit <= 0` and caps `Limit` at 1000. [history.go:ReadHistory,slackDefaultHistoryLimit,slackMaxHistoryLimit]
 - `ReadHistory` does no storage, dedupe, or caching. [doc.go:slack]
 - `ReadHistory` returns an empty page with no Slack call when the `Before` cursor equals the thread root. [history.go:ReadHistory]
-- Retry never sleeps past the caller's context deadline, so synchronous retry stays inside Slack's 3-second ack window. [doc.go:slack]
+- Retry never sleeps past the caller's context deadline. The default `MaxElapsed` (2 s) also keeps the total backoff sleep under Slack's 3-second ack window. Neither bound covers the time of each HTTP attempt, so under `DispatchSync` a delivery stays inside the window only when the request context or the HTTP client (`Options.Client`) bounds those attempts. [doc.go:slack], [slackapi/retry.go:RetryPolicy.withDefaults,Client.doWithRetry]
 
 ## Side Effects
 

@@ -156,13 +156,13 @@ Some of those types hold nested exported types:
 
 ### Formats
 
-- `SplitMarkdown` uses `MarkdownBlockLimit` for a limit of zero or less, returns nil for empty text, and does not end a chunk inside or right after a code-fence opening line. [markdown.go:SplitMarkdown,splitFenced]
+- `SplitMarkdown` uses `MarkdownBlockLimit` for a limit of zero or less, and returns nil for empty text. When the limit is at least twice the length of the longest fence line plus six runes, it closes and reopens a fence that a chunk ends inside, and does not end a chunk inside or right after a code-fence opening line. Below that limit it splits without this fence repair. [markdown.go:SplitMarkdown,splitFenced,longestFenceLine]
 - `UserMentions` returns IDs in first-appearance order with no duplicates. [mentions.go:UserMentions]
 - `ParseEnvelope` returns an error for invalid JSON or an empty envelope type. [envelope.go:ParseEnvelope]
 
 ## Side Effects
 
-- Every typed method and `Call` sends an HTTP POST to `BaseURL` + `/<method>` through the configured `http.Client`. [client.go:Client.Call,send]
+- `Call` and each typed Web API method in the table above send an HTTP POST to `BaseURL` + `/<method>` through the configured `http.Client`. [client.go:Client.Call,send] The file methods below use other URLs or verbs: `UploadFile` calls two Web API methods and also POSTs to the upload URL.
 - `PostResponseURL` sends an HTTP POST to a caller-supplied `response_url`. [client.go:Client.PostResponseURL]
 - `UploadToURL` POSTs file content to the upload URL. `DownloadFile` GETs a file and writes it to the caller's writer. Both use a copied `http.Client` with a custom redirect policy. [files.go:Client.UploadToURL,Client.DownloadFile,Client.fileHTTPClient]
 - Retry sleeps between attempts with `ratelimit.SleepCtx` from `internal/ratelimit`. [retry.go:Client.doWithRetry]

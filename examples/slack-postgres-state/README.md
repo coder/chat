@@ -143,7 +143,7 @@ It imports `github.com/coder/chat`, `github.com/coder/chat/adapters/slack`,
 | `SLACK_BOT_TOKEN` | none (required) | `slack.Options.BotToken` | [main.go:main] |
 | `PORT` | `8080` | Listen address `":" + PORT` | [main.go:main] |
 
-- Network: `pgxpool.New(ctx, DATABASE_URL)` opens a connection pool [main.go:main]. `main` does not close it.
+- Network: `pgxpool.New(ctx, DATABASE_URL)` opens a connection pool [main.go:main]. `main` does not close it directly: the deferred `bot.Shutdown` calls `State.Shutdown`, which closes it [main.go:main], [`state/postgres` `State.Shutdown`].
 - Network: `http.ListenAndServe` on `:$PORT` with the default server, so no
   server timeouts are set [main.go:main].
 - Network: `slack.New` builds the Slack adapter, and each handler posts a reply
