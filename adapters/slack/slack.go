@@ -356,7 +356,6 @@ func (a *Adapter) PostEphemeralMessage(ctx context.Context, thread chat.ThreadRe
 			User:         actor.ID,
 			Text:         messageFields.Text,
 			MarkdownText: messageFields.MarkdownText,
-			Mrkdwn:       messageFields.Mrkdwn,
 		}
 		if !thread.Direct {
 			payload.ThreadTS = thread.Root

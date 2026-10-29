@@ -39,11 +39,12 @@ type RetryPolicy struct {
 	MaxDelay time.Duration
 }
 
-// Default retry bounds are deliberately conservative so the worst-case backoff
-// (about 200ms + 400ms = 600ms over two retries, capped at MaxElapsed) stays well
-// under Slack's 3-second ack window. A longer Retry-After is capped at MaxDelay.
-// When the next delay would pass MaxElapsed or the context deadline, retry stops
-// with a typed RateLimited rather than sleeping past the deadline.
+// The defaults keep the total backoff under Slack's 3-second ack window. Three
+// attempts allow two sleeps, which total 200ms + 400ms = 600ms when Slack sends
+// no Retry-After. A Retry-After raises each sleep up to MaxDelay (1s), so the
+// total can reach MaxElapsed (2s). When the next delay would pass MaxElapsed or
+// the context deadline, retry stops with a typed RateLimited rather than
+// sleeping past the deadline.
 func (p RetryPolicy) withDefaults() RetryPolicy {
 	out := p
 	if out.MaxAttempts <= 0 {

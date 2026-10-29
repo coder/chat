@@ -478,6 +478,7 @@ _Avoid_: Full platform schema, strict external SDK model
 - An **Optional Capability** is detected through a small Go interface implemented by a **Platform Adapter**.
 - Absence of an **Optional Capability** returns an explicit unsupported-capability result.
 - **Plain Text** carries no formatting intent; adapters should disable platform markdown parsing for it while preserving benign platform presentation such as automatic URL linking.
+- A native Slack ephemeral **Plain Text** post is the exception. Slack documents no switch that turns formatting off for `chat.postEphemeral`, so Slack formats that text. Slack `chat.postMessage` posts, the DM fallback included, still send `mrkdwn: false`.
 - **Portable Markdown** carries conservative CommonMark formatting intent, not platform-native syntax.
 - The **Portable Markdown Subset** is paragraphs, line breaks, emphasis, strong emphasis, inline code, fenced code blocks, block quotes, links, unordered lists, and ordered lists. Strikethrough is extension-tolerated and may degrade literally.
 - Tables, task lists, images, raw HTML, heading hierarchy, footnotes, definition lists, and embedded media are outside the **Portable Markdown Subset**.
