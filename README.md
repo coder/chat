@@ -302,9 +302,13 @@ Invariants:
 - Lock waiters poll `State.AcquireLock` every `ThreadLockTTL/20`, clamped to
   1ms–1s, because `State` does not signal a release
   [runtime.go:Chat.pollForLock].
-- `Shutdown` closes admission, cancels deferred work, drains it, stops
-  listeners, shuts down the adapters, and then shuts down `State`. A second
-  call waits for the first [runtime.go:Chat.Shutdown].
+- `Shutdown` closes admission, cancels deferred work, waits for it to drain,
+  stops listeners and waits for them, shuts down the adapters, and then
+  shuts down `State`. `ctx` bounds the two waits. If `ctx` ends first,
+  `Shutdown` stops waiting and shuts down the adapters and `State` while
+  deferred work or listeners can still run. A second call waits for the
+  first, bounded by its own `ctx` [runtime.go:Chat.Shutdown,
+  runtime.go:waitBounded].
 - `Thread.Post` rejects an empty `Text` and does not subscribe the thread
   [thread.go:Thread.Post, doc.go].
 - `Thread.PostEphemeral` rejects an empty actor ID or `Text`. It returns
@@ -388,9 +392,14 @@ Side effects:
   adapters/slack/slackapi/webhook.go:Webhook.ServeHTTP]. The exception is a
   Slack slash command: Slack does not redeliver it, so the adapter acks it
   with a busy reply instead [adapters/slack/slack.go:deliveryHandler].
-- `InstallStore.Lookup` runs on every inbound webhook, with no cache in the
-  adapter. `ErrInstallNotFound` makes the delivery an Ignored Event
-  [install.go:InstallStore, install.go:ErrInstallNotFound].
+- In multi-tenant mode, an adapter calls `InstallStore.Lookup` for each
+  inbound delivery that it routes to an install, with no cache in the
+  adapter. Deliveries that it ignores before that point, such as an
+  unsupported Slack event type or a Linear body with no organization, get
+  no lookup. `ErrInstallNotFound` makes the delivery an Ignored Event
+  [install.go:InstallStore, install.go:ErrInstallNotFound,
+  adapters/slack/slack.go:resolveInstall,
+  adapters/linear/linear.go:resolveWebhookInstall].
 - Adapter rate-limit retry never sleeps past the caller's deadline and ends
   in a typed `RateLimited` error. Both adapters share the mechanics in
   `internal/ratelimit` [internal/ratelimit/ratelimit.go:SleepCtx].

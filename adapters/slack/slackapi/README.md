@@ -110,7 +110,7 @@ Some of those types hold nested exported types:
 - `New` trims trailing slashes from `BaseURL`. It drops each `FileOrigins` entry that is not an absolute URL with a host, and logs a warning for it. [client.go:New]
 - The client sends the `Authorization` header only when the token is not empty. `UploadToURL`, `PostResponseURL`, and `OAuthV2Access` never send the client token. [client.go:send,Options], [oauth.go:Client.OAuthV2Access]
 - `Call` encodes a nil payload as `{}`, a `url.Values` payload as a form body, and any other payload as JSON. [client.go:Client.Call,encodeRequest]
-- An `ok:false` response or a non-2xx status returns `*APIError`. [client.go:Client.Call,send]
+- An `ok:false` response or a non-2xx status returns `*APIError`, except a throttling response: HTTP 429, or `ok:false` with `ratelimited` or `rate_limited`. Retry handles that response and returns `*RateLimited` when it stops. [client.go:Client.Call,send], [retry.go:slackThrottle,Client.doWithRetry]
 - `WithToken` shares the base URL, file origins, HTTP client, retry policy, observer, and logger with the original client. [client.go:Client.WithToken]
 - `RetryPolicy` defaults for zero fields: `MaxAttempts` 3, `MaxElapsed` 2s, `BaseDelay` 200ms, `MaxDelay` 1s. `MaxAttempts` 1 turns retry off. [retry.go:RetryPolicy.withDefaults]
 - Retry runs only on HTTP 429 or an `ok:false` envelope with error `ratelimited` or `rate_limited`. Transport errors return directly and are never retried. [retry.go:slackThrottle,Client.doWithRetry]

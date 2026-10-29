@@ -101,7 +101,7 @@ The code has compile-time assertions for `chat.Listener`, `chat.HistoryReader`, 
 - `Listen` opens a Socket Mode websocket through `slackapi.Client.Listen` with the app token. [slack.go:Listen]
 - `Webhook` serves inbound HTTP through a `slackapi.Webhook` that verifies signatures. [slack.go:Webhook]
 - The delivery handler calls the runtime `chat.DispatchFunc` for each normalized event. [slack.go:deliveryHandler]
-- Multi-tenant mode calls `InstallStore.Lookup` on every delivery and every outbound post. The adapter does not cache install records. [slack.go:resolveInstall,postToken], [doc.go:slack]
+- Multi-tenant mode calls `InstallStore.Lookup` for each supported delivery with a team ID (an `event_callback` envelope, a slash command, or a `block_actions` interaction), and for each outbound call that needs a bot token. Ignored delivery types and `RespondURL`, which sends no token, do no lookup. The adapter does not cache install records. [slack.go:normalizeDelivery,normalizeEvent,resolveInstall,postToken], [interactive.go:normalizeCommand,normalizeInteraction,RespondURL], [doc.go:slack]
 - Retry sleeps, observation events (`chat.ObsAdapterCall`, `chat.ObsRateLimit`), and throttle logs come from `slackapi`. `New` passes `Client`, `RetryPolicy`, `Observer`, and `Logger` to `slackapi.New`. [slack.go:New], [doc.go:slack]
 - The package starts no goroutines and holds no mutable package-level state. [slack.go:New]
 
