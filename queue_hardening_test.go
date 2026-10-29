@@ -121,6 +121,9 @@ func TestQueueStatePanicWhileWaiterPollsLeavesNoStaleWaiter(t *testing.T) {
 	if res := receivePost(t, b, "B"); res.panicked != statePanic {
 		t.Errorf("B's dispatch panicked with %v, want the State's own panic", res.panicked)
 	}
+	if got := chat.QueuePendingCount(run.bot); got != 0 {
+		t.Fatalf("pending waiters = %d after B's poll panicked, want 0", got)
+	}
 	if res := receivePost(t, run.postRecovering("A"), "the redelivery of A"); res.panicked != nil || res.status != http.StatusOK {
 		t.Fatalf("the redelivery of A after the State panic: status=%d panic=%v", res.status, res.panicked)
 	}

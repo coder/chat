@@ -27,6 +27,15 @@ func QueueTurnCount(c *Chat) int {
 	return len(c.queueTurns)
 }
 
+// QueuePendingCount reports the number of live pending queue waiters, for
+// hardening tests proving a waiter that ended leaves no stale entry.
+func QueuePendingCount(c *Chat) int {
+	assert(c != nil, "QueuePendingCount called on nil runtime")
+	c.queueMu.Lock()
+	defer c.queueMu.Unlock()
+	return len(c.pending)
+}
+
 // QueueDeferredRelease enters scope's queue turn record as the prelude does
 // and returns the deferred release dispatch builds for that delivery, with a
 // no-op admission release, for hardening tests proving a repeated release
