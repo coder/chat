@@ -531,7 +531,15 @@ func TestNativeEphemeralPosting(t *testing.T) {
 	if sent == nil || sent.ID != "998.000" {
 		t.Fatalf("native ephemeral sent = %#v", sent)
 	}
+	if _, err := thread.PostEphemeral(context.Background(),
+		chat.Actor{Adapter: "slack", Tenant: "T1", ID: "U1", BotKind: chat.BotHuman},
+		chat.Text("*plain*"),
+		chat.EphemeralOptions{},
+	); err != nil {
+		t.Fatalf("plain text native ephemeral: %v", err)
+	}
 	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", User: "U1", MarkdownText: "**private**"})
+	api.assertPost(t, 1, slackPost{Channel: "C1", ThreadTS: "111.000", User: "U1", Text: "*plain*"})
 }
 
 func newSlackRuntime(t *testing.T, api *slackAPIServer, opts slack.Options) *chat.Chat {

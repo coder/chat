@@ -2,6 +2,8 @@ package slackapi_test
 
 import (
 	"encoding/json"
+	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/coder/chat/adapters/slack/slackapi"
@@ -186,25 +188,43 @@ func TestPostEphemeral(t *testing.T) {
 	methodsCheckEqual(t, "response", resp, &slackapi.PostEphemeralResponse{MessageTS: "1700000000.000200"})
 }
 
-func TestPostEphemeralMrkdwn(t *testing.T) {
+func TestPostEphemeralSendsOnlyDocumentedArguments(t *testing.T) {
 	t.Parallel()
+
+	// The arguments that https://docs.slack.dev/reference/methods/chat.postEphemeral lists.
+	documented := []string{
+		"as_user", "attachments", "blocks", "channel", "icon_emoji", "icon_url", "link_names",
+		"markdown_text", "metadata", "parse", "text", "thread_ts", "user", "username",
+	}
+
+	var req slackapi.PostEphemeralRequest
+	fields := reflect.ValueOf(&req).Elem()
+	for i := range fields.NumField() {
+		field := fields.Field(i)
+		switch field.Kind() {
+		case reflect.String:
+			field.SetString("x")
+		case reflect.Slice:
+			field.Set(reflect.MakeSlice(field.Type(), 1, 1))
+		case reflect.Pointer:
+			field.Set(reflect.New(field.Type().Elem()))
+		default:
+			t.Fatalf("field %s has unhandled kind %s", fields.Type().Field(i).Name, field.Kind())
+		}
+	}
 
 	srv := slackapitest.NewServer(t)
 	srv.Respond("chat.postEphemeral", json.RawMessage(`{"ok":true,"message_ts":"1700000000.000200"}`))
-
-	_, err := methodsNewClient(srv).PostEphemeral(t.Context(), slackapi.PostEphemeralRequest{
-		Channel: "C1",
-		User:    "U1",
-		Text:    "*not bold*",
-		Mrkdwn:  new(false),
-	})
-	if err != nil {
+	if _, err := methodsNewClient(srv).PostEphemeral(t.Context(), req); err != nil {
 		t.Fatalf("PostEphemeral: %v", err)
 	}
-	methodsCheckJSONBody(t, srv, "chat.postEphemeral", `{
-		"channel": "C1",
-		"user": "U1",
-		"text": "*not bold*",
-		"mrkdwn": false
-	}`)
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(methodsOnlyCall(t, srv, "chat.postEphemeral", methodsJSONType).Body, &body); err != nil {
+		t.Fatalf("decode chat.postEphemeral body: %v", err)
+	}
+	for name := range body {
+		if !slices.Contains(documented, name) {
+			t.Errorf("chat.postEphemeral body has argument %q, which Slack does not document", name)
+		}
+	}
 }
