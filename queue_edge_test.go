@@ -733,3 +733,60 @@ func TestQueueOlderLockTakerKeepsNewerWaiter(t *testing.T) {
 		})
 	}
 }
+
+type gatedMarkState struct {
+	*gatedAcquireState
+	gateID      string
+	markReached chan struct{}
+	markRelease chan struct{}
+}
+
+func newGatedMarkState(gateID string) *gatedMarkState {
+	return &gatedMarkState{
+		gatedAcquireState: newGatedAcquireState(0),
+		gateID:            gateID,
+		markReached:       make(chan struct{}),
+		markRelease:       make(chan struct{}),
+	}
+}
+
+func (s *gatedMarkState) MarkEvent(ctx context.Context, id string, ttl time.Duration) (bool, error) {
+	if id == s.gateID {
+		close(s.markReached)
+		<-s.markRelease
+	}
+	return s.gatedAcquireState.MarkEvent(ctx, id, ttl)
+}
+
+func TestQueueDeliveryStalledBeforeRegisteringNeverRunsAfterNewerLockTaker(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			state := newGatedMarkState("X")
+			run := newGatedQueueRun(t, state, tc.mode, "A")
+
+			run.post("A")
+			waitClosed(t, run.blockStarted, "A's handler did not start")
+			run.post("X")
+			waitClosed(t, state.markReached, "X did not reach its dedupe mark after the Lock Conflict")
+			close(run.releaseBlock)
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			run.post("C")
+			eventually(t, 2*time.Second, func() bool {
+				got := run.handledIDs()
+				return len(got) == 2 && got[1] == "C" && !state.lockHeld(string(queueThread))
+			}, "C did not take the free lock and run")
+			close(state.markRelease)
+			eventually(t, 4*time.Second, func() bool { return len(run.obs.terminalOutcomes()) == 3 },
+				"X did not reach a terminal outcome")
+
+			if got := run.handledIDs(); !equalStrings(got, []string{"A", "C"}) {
+				t.Fatalf("handled = %v, want [A C]: X was admitted before C, so C's turn supersedes it", got)
+			}
+		})
+	}
+}
