@@ -26,3 +26,13 @@ func QueueTurnCount(c *Chat) int {
 	defer c.queueMu.Unlock()
 	return len(c.queueTurns)
 }
+
+// QueueDeferredRelease counts one queue delivery in scope's turn record, as
+// the prelude does, and returns the release dispatch gives that delivery's
+// deferred path.
+func QueueDeferredRelease(c *Chat, scope string) func() {
+	assert(c != nil, "QueueDeferredRelease called on nil runtime")
+	entry := &queueEntry{}
+	c.enterQueueScope(scope, entry)
+	return c.deferredRelease(entry, func() {})
+}

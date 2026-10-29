@@ -650,16 +650,22 @@ func (c *Chat) dispatch(ctx context.Context, event *Event) error {
 	// dispatchSync returns.
 	entry := &queueEntry{}
 	if c.options.Dispatch == DispatchDeferred {
-		return c.dispatchDeferred(ctx, event, seq, entry, func() {
-			c.leaveQueueScope(entry)
-			release()
-		})
+		return c.dispatchDeferred(ctx, event, seq, entry, c.deferredRelease(entry, release))
 	}
 	// A sync delivery retains no work for Shutdown to drain: its caller (an
 	// HTTP server or a Listener) owns its lifetime.
 	release()
 	defer c.leaveQueueScope(entry)
 	return c.dispatchSync(ctx, event, seq, entry)
+}
+
+// deferredRelease returns the release a deferred delivery calls at its outcome:
+// it leaves the delivery's queue scope and frees its admission slot.
+func (c *Chat) deferredRelease(entry *queueEntry, release func()) func() {
+	return func() {
+		c.leaveQueueScope(entry)
+		release()
+	}
 }
 
 // dispatchSync runs the prelude and the routed handler inline under the request

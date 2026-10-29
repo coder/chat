@@ -41,3 +41,23 @@ func TestQueueIdleScopeRetainsNoTurnRecord(t *testing.T) {
 		})
 	}
 }
+
+func TestQueueDeferredReleaseCalledTwiceLeavesItsScopeOnce(t *testing.T) {
+	t.Parallel()
+
+	var logs syncBuffer
+	bot := newQueueRuntime(t, newFakeState(), newFakeAdapter("fake"), &logs)
+	first := chat.QueueDeferredRelease(bot, "scope-1")
+	second := chat.QueueDeferredRelease(bot, "scope-1")
+
+	first()
+	first()
+	if got := chat.QueueTurnCount(bot); got != 1 {
+		t.Fatalf("turn records = %d after one of two deliveries released twice, want 1", got)
+	}
+	second()
+	second()
+	if got := chat.QueueTurnCount(bot); got != 0 {
+		t.Fatalf("turn records = %d after both deliveries released, want 0", got)
+	}
+}
