@@ -709,15 +709,22 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64, entry
 // event, launches the detached tail and returns so the adapter can acknowledge
 // the platform (ack-then-work). release frees the delivery's admission slot.
 func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64, entry *queueEntry, release func()) error {
+	// A delivery that hands no work to a tail retains nothing past the
+	// prelude, so every such exit frees its admission slot: an error, a
+	// resolved event (duplicate, dropped, ignored, unrouted), or a State
+	// panic, which net/http recovers while the runtime keeps running.
+	handedOff := false
+	defer func() {
+		if !handedOff {
+			release()
+		}
+	}()
 	work, resolved, err := c.prelude(ctx, event, seq, entry)
 	if err != nil || resolved {
-		// The delivery retains nothing past the prelude: an errored or
-		// resolved (duplicate, dropped, ignored, unrouted) prelude frees its
-		// admission slot immediately.
-		release()
 		return err
 	}
 	work.releaseAdmission = release
+	handedOff = true
 	if work.burst {
 		// A burst member parks in its scope's collection window instead of
 		// owning a detached tail; its admission slot travels with it and the
