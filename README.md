@@ -224,7 +224,7 @@ works through these steps [runtime.go:Chat.dispatch, runtime.go:Chat.prelude]:
 6. **Route.** Commands go to `OnCommand` and interactions to `OnInteraction`.
    A message goes to `OnSubscribedMessage` when its thread is subscribed,
    else to `OnNewMention` when it is a mention or a direct message
-   [runtime.go:Chat.route].
+   [runtime.go:Chat.prelude, runtime.go:Chat.route].
 7. **Mark.** When the prelude knows the outcome (dropped on a lock conflict,
    ignored, or routed), `State.MarkEvent` records the event ID for
    `DedupeTTL`. A duplicate stops here [runtime.go:Chat.prelude,
@@ -301,7 +301,7 @@ Invariants:
   not cancelled [runtime.go:Chat.dispatchSync].
 - Lock waiters poll `State.AcquireLock` every `ThreadLockTTL/20`, clamped to
   1ms–1s, because `State` does not signal a release
-  [runtime.go:Chat.pollForLock].
+  [runtime.go:Chat.pollForLock, runtime.go:Chat.queuePollInterval].
 - `Shutdown` closes admission, cancels deferred work, waits for it to drain,
   stops listeners and waits for them, shuts down the adapters, and then
   shuts down `State`. `ctx` bounds the two waits. If `ctx` ends first,
