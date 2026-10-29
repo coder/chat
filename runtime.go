@@ -1450,8 +1450,10 @@ func (c *Chat) isPending(scope string, event *Event) bool {
 // in-flight handler releases. It returns acquireSuperseded if a newer follow-up
 // displaced this waiter, acquireAbandoned if ctx ended, acquireFailed on an
 // AcquireLock error, or the lease (acquireHeld) once acquired. label names the
-// coordination mode in the wait observations.
+// coordination mode in the wait observations. It clears the waiter's pending
+// entry on every exit, including a panic from State.
 func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, label string) (LockLease, acquireOutcome) {
+	defer c.clearPending(scope, event)
 	superseded := func() bool {
 		return !c.isPending(scope, event)
 	}
@@ -1472,10 +1474,8 @@ func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, lab
 		// just stops.
 		c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 	case acquireAbandoned:
-		c.clearPending(scope, event)
 		c.logger.Info("chat "+label+" wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
 	case acquireFailed:
-		c.clearPending(scope, event)
 		c.logger.Error("chat "+label+" acquire lock failed", "error", err, "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 	}
 	return lease, outcome
