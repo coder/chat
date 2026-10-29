@@ -50,19 +50,24 @@ func TestExtendLockSubMillisecondTTLKeepsLock(t *testing.T) {
 		t.Fatalf("new redis state: %v", err)
 	}
 
-	lease, acquired, err := state.AcquireLock(ctx, "thread", time.Minute)
-	if err != nil || !acquired {
-		t.Fatalf("AcquireLock = %v, %v; want true, nil", acquired, err)
-	}
-	extended, err := state.ExtendLock(ctx, lease, 500*time.Microsecond)
-	if err != nil || !extended {
-		t.Fatalf("ExtendLock = %v, %v; want true, nil", extended, err)
-	}
-	if !server.Exists("test:lock:thread") {
-		t.Fatal("lock key was deleted by ExtendLock")
-	}
-	if _, acquired, err := state.AcquireLock(ctx, "thread", time.Minute); err != nil || acquired {
-		t.Fatalf("second AcquireLock = %v, %v; want false, nil", acquired, err)
+	for _, ttl := range []time.Duration{time.Nanosecond, 500 * time.Microsecond} {
+		t.Run(ttl.String(), func(t *testing.T) {
+			key := "thread-" + ttl.String()
+			lease, acquired, err := state.AcquireLock(ctx, key, time.Minute)
+			if err != nil || !acquired {
+				t.Fatalf("AcquireLock = %v, %v; want true, nil", acquired, err)
+			}
+			extended, err := state.ExtendLock(ctx, lease, ttl)
+			if err != nil || !extended {
+				t.Fatalf("ExtendLock = %v, %v; want true, nil", extended, err)
+			}
+			if !server.Exists("test:lock:" + key) {
+				t.Fatal("lock key was deleted by ExtendLock")
+			}
+			if _, acquired, err := state.AcquireLock(ctx, key, time.Minute); err != nil || acquired {
+				t.Fatalf("second AcquireLock = %v, %v; want false, nil", acquired, err)
+			}
+		})
 	}
 }
 

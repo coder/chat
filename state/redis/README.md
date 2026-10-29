@@ -93,7 +93,7 @@ with its own `go.mod` [go.mod:module]. `redis.go` imports
   with the token and the caller's `ttl` [redis.go:State.AcquireLock]
   [redis.go:newToken].
 - `ExtendLock` sends `EVAL extendScript` on `<prefix>:lock:<key>` with
-  `ARGV = [token, ttl in ms, at least 1]` [redis.go:State.ExtendLock].
+  `ARGV = [token, max(ttl in ms, 1)]` [redis.go:State.ExtendLock].
 - `ReleaseLock` sends `EVAL releaseScript` on `<prefix>:lock:<key>` with
   `ARGV = [token]` [redis.go:State.ReleaseLock].
 - `Shutdown` calls `Close` on the caller-supplied `redis.UniversalClient`
