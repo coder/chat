@@ -141,8 +141,8 @@ func newMentionHandler(linearAccess linearAgentAccess, pending *pendingSelection
 		}
 
 		// Ack-Then-Work: post a first thought inside the ~10s first-thought window,
-		// then do the rest. Under DispatchDeferred this whole handler already runs on
-		// the Detached Work Context after the webhook is acknowledged.
+		// then do the rest. Under DispatchDeferred this whole handler runs on the
+		// Detached Work Context, and the webhook is acknowledged without waiting for it.
 		_, _ = linearAccess.PostThought(ctx, ev.Thread.ID(), "Thinking...")
 
 		// Show native tool-call progress as an action.
