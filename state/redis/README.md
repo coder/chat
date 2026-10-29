@@ -69,14 +69,10 @@ with its own `go.mod` [go.mod:module]. `redis.go` imports
   the Go methods return `false` [redis.go:extendScript]
   [redis.go:releaseScript] [redis.go:State.ExtendLock]
   [redis.go:State.ReleaseLock].
-- `ExtendLock` passes `ttl.Milliseconds()` to the script, so it truncates
-  sub-millisecond precision [redis.go:State.ExtendLock].
-- A positive `ttl` under 1 ms therefore reaches the script as `0`. Redis
-  deletes a key given a non-positive `PEXPIRE` and returns `1`, so
-  `ExtendLock` deletes the lock and still returns `true`
-  [redis.go:State.ExtendLock] [redis.go:extendScript]. The runtime renews
-  with `ThreadLockTTL` (default 2 minutes), so only a sub-millisecond
-  configuration reaches this path.
+- `ExtendLock` passes `ttl` to the script in whole milliseconds, so it
+  truncates sub-millisecond precision. A positive `ttl` under 1 ms becomes
+  1 ms, as go-redis does for `SetNX`, so `PEXPIRE` never gets `0` and never
+  deletes the lock [redis.go:State.ExtendLock] [redis.go:extendScript].
 - Redis errors from the state methods are returned unwrapped. `New` wraps a
   ping error as `"redis state: ping: %w"` [redis.go:New].
 - `Shutdown` closes the client at most once. It returns the `Close` error from
@@ -97,7 +93,7 @@ with its own `go.mod` [go.mod:module]. `redis.go` imports
   with the token and the caller's `ttl` [redis.go:State.AcquireLock]
   [redis.go:newToken].
 - `ExtendLock` sends `EVAL extendScript` on `<prefix>:lock:<key>` with
-  `ARGV = [token, ttl in ms]` [redis.go:State.ExtendLock].
+  `ARGV = [token, max(ttl in ms, 1)]` [redis.go:State.ExtendLock].
 - `ReleaseLock` sends `EVAL releaseScript` on `<prefix>:lock:<key>` with
   `ARGV = [token]` [redis.go:State.ReleaseLock].
 - `Shutdown` calls `Close` on the caller-supplied `redis.UniversalClient`

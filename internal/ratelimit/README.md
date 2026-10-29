@@ -34,7 +34,7 @@ These packages import it:
 - A shifted delay that is non-positive (shift overflow) or above `maxDelay` becomes `maxDelay`. `[ratelimit.go:BackoffDelay]`
 - The result is `min(max(delay, retryAfter), maxDelay)`. A platform `retryAfter` can raise the delay but never above `maxDelay`. `[ratelimit.go:BackoffDelay]`
 - `d <= 0` returns `ctx.Err()` at once without waiting. `[ratelimit.go:SleepCtx]`
-- The sleep never outlasts the caller's context. The doc comment says this keeps retry inside the platform ack window. That holds only when the caller's context deadline fits that window. `[ratelimit.go:SleepCtx]`
+- The sleep never outlasts the caller's context. `[ratelimit.go:SleepCtx]`
 
 ## Side Effects
 

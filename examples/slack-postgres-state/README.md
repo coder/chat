@@ -10,10 +10,12 @@ are routed through Postgres-backed state.
 ## Slack App Setup
 
 Set up a Slack app as in the [tutorial](../../docs/tutorials/slack-bot.md):
-Steps 2–3 create the app and collect credentials, Step 5 exposes your
-machine, and Step 6 subscribes to events. This example also replies to follow-up messages in
-subscribed threads, so add Step 8's `channels:history` scope and
-`message.channels` event too.
+Steps 2–3 create the app and collect credentials, and
+[Use HTTP Instead Of Socket Mode](../../docs/tutorials/slack-bot.md#use-http-instead-of-socket-mode)
+exposes your machine and sets the request URL. This example also replies to
+follow-up messages in subscribed threads, so add the `channels:history` scope
+and `message.channels` event from
+[Step 6](../../docs/tutorials/slack-bot.md#step-6-make-it-yours) too.
 
 | Setting | Value |
 | --- | --- |
@@ -79,10 +81,11 @@ In Slack, mention the bot in a channel where it is present:
 @your-bot hello
 ```
 
-The bot replies in the same thread and subscribes the thread:
+The bot replies in the same thread with portable Markdown and subscribes the
+thread:
 
 ```text
-hello world from Postgres state. This thread is now subscribed.
+**hello** _world_ from Postgres state. This thread is now subscribed.
 ```
 
 Send another message in the same Slack thread. The bot should route it as a

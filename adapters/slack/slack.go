@@ -48,9 +48,9 @@ type Options struct {
 	// it is adapter-owned wiring, not on the core Adapter interface. Nil is a no-op.
 	Observer chat.Observer
 	// RetryPolicy bounds outbound Slack rate-limit retry/backoff (ADR 0005). The
-	// zero value applies a conservative default that stays well under Slack's
-	// 3-second ack window; MaxAttempts: 1 disables retry. It is per-adapter
-	// platform config, never Runtime Options.
+	// zero value applies a conservative default that caps the total backoff sleep
+	// at 2 seconds but does not bound the HTTP attempts; MaxAttempts: 1 disables
+	// retry. It is per-adapter platform config, never Runtime Options.
 	RetryPolicy RetryPolicy
 }
 

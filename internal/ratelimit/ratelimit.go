@@ -53,8 +53,7 @@ func BackoffDelay(base, maxDelay time.Duration, attempt int, retryAfter time.Dur
 }
 
 // SleepCtx sleeps for d but returns the context error if the context ends first,
-// so retry never outlasts the caller's context (and thus never blows the platform
-// ack window).
+// so a backoff sleep never outlasts the caller's context.
 func SleepCtx(ctx context.Context, d time.Duration) error {
 	if d <= 0 {
 		return ctx.Err()

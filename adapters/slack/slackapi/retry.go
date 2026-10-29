@@ -16,13 +16,15 @@ import (
 
 // RetryPolicy bounds outbound Slack rate-limit retry/backoff (ADR 0005). Retry is
 // bounded by attempt count and cumulative elapsed backoff, honors Slack's
-// Retry-After header, and never sleeps past the caller's context deadline so
-// in-line synchronous retry cannot outlive the platform ack window (Slack's
-// 3-second budget). The zero value applies a conservative default; MaxAttempts: 1
-// disables retry for callers that want raw single-shot behavior. A Retry-After
-// longer than MaxDelay is capped at MaxDelay, so the retry comes earlier than
-// Slack asked. Callers that must honor long Retry-After values should raise
-// MaxDelay and MaxElapsed.
+// Retry-After header, and never sleeps past the caller's context deadline. The
+// deadline check and MaxElapsed bound only the sleep between attempts, not the
+// HTTP attempts, so in-line synchronous retry stays inside Slack's 3-second ack
+// window only when the caller's context deadline or an Options.HTTPClient
+// timeout also limits those attempts. The zero value applies a conservative
+// default; MaxAttempts: 1 disables retry for callers that want raw single-shot
+// behavior. A Retry-After longer than MaxDelay is capped at MaxDelay, so the
+// retry comes earlier than Slack asked. Callers that must honor long
+// Retry-After values should raise MaxDelay and MaxElapsed.
 type RetryPolicy struct {
 	// MaxAttempts is the total number of attempts including the first. Zero applies
 	// a conservative default; 1 disables retry.
