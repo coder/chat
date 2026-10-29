@@ -12,8 +12,6 @@ import (
 	"github.com/coder/chat/adapters/linear"
 )
 
-// tokenWithoutExpiryServer mints client-credentials tokens whose response has
-// no expires_in, and answers any GraphQL query with an empty data object.
 type tokenWithoutExpiryServer struct {
 	*httptest.Server
 	mu     sync.Mutex
@@ -46,25 +44,23 @@ func (api *tokenWithoutExpiryServer) tokenRequests() int {
 	return api.tokens
 }
 
-// assertTokenRefreshedAfterDefaultLifetime drives query across Linear's 30-day
-// client-credentials lifetime: the token is reused within it and re-fetched
-// once the clock passes 30 days minus the 1-hour refresh buffer.
 func assertTokenRefreshedAfterDefaultLifetime(t *testing.T, api *tokenWithoutExpiryServer, clock *mutableClock, query func() error) {
 	t.Helper()
+	const lifetime, refreshBuffer = 30 * 24 * time.Hour, time.Hour
 	if err := query(); err != nil {
 		t.Fatalf("first query: %v", err)
 	}
 	if got := api.tokenRequests(); got != 1 {
 		t.Fatalf("token requests after first query = %d, want 1", got)
 	}
-	clock.advance(29 * 24 * time.Hour)
+	clock.advance(lifetime - refreshBuffer - time.Minute)
 	if err := query(); err != nil {
 		t.Fatalf("query within lifetime: %v", err)
 	}
 	if got := api.tokenRequests(); got != 1 {
 		t.Fatalf("token requests within lifetime = %d, want 1 (cached)", got)
 	}
-	clock.advance(24*time.Hour - time.Hour + time.Minute)
+	clock.advance(2 * time.Minute)
 	if err := query(); err != nil {
 		t.Fatalf("query past lifetime: %v", err)
 	}
