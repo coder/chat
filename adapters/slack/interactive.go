@@ -446,9 +446,6 @@ func triggerIDFromRaw(raw any) string {
 	}
 }
 
-// nativePostPayload is the chat.postMessage request of PostNative. It sends the
-// opaque native payload as blocks without decoding it, which the []Block of
-// slackapi.PostMessageRequest cannot do.
 type nativePostPayload struct {
 	Channel  string `json:"channel"`
 	ThreadTS string `json:"thread_ts,omitempty"`
