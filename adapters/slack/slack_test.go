@@ -472,10 +472,18 @@ func TestPostingTextMarkdownEphemeralAndExplicitFallback(t *testing.T) {
 	if sent == nil || sent.ID == "" {
 		t.Fatalf("fallback sent = %#v", sent)
 	}
+	if _, err := thread.PostEphemeral(context.Background(),
+		chat.Actor{Adapter: "slack", Tenant: "T1", ID: "U1", BotKind: chat.BotHuman},
+		chat.Text("*plain fallback*"),
+		chat.EphemeralOptions{FallbackToDM: true},
+	); err != nil {
+		t.Fatalf("plain text ephemeral fallback: %v", err)
+	}
 
 	api.assertPost(t, 0, slackPost{Channel: "C1", ThreadTS: "111.000", Text: "plain reply", Mrkdwn: new(false)})
 	api.assertPost(t, 1, slackPost{Channel: "C1", ThreadTS: "111.000", MarkdownText: "**portable**"})
 	api.assertPost(t, 2, slackPost{Channel: "D-fallback", MarkdownText: "**private fallback**"})
+	api.assertPost(t, 3, slackPost{Channel: "D-fallback", Text: "*plain fallback*", Mrkdwn: new(false)})
 }
 
 func TestNativeEphemeralPosting(t *testing.T) {
