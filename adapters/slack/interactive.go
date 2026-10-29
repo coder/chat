@@ -305,8 +305,8 @@ func (a *Adapter) PostNative(ctx context.Context, thread chat.ThreadRef, content
 	if err != nil {
 		return nil, err
 	}
-	// docs/reference.md says PostNative posts opaque Block Kit blocks, so the payload
-	// goes out as is. Decoding it into []slackapi.Block can drop fields Block does not model.
+	// docs/reference.md says PostNative posts opaque Block Kit blocks. The typed
+	// PostMessage takes []slackapi.Block, which models only markdown, actions, and image blocks.
 	payload := nativePostPayload{
 		Channel: thread.Channel,
 		Blocks:  content.Payload,
