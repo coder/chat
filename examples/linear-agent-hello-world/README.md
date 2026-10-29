@@ -112,8 +112,8 @@ Expected behavior:
    Thinking...
    ```
 
-5. The app posts a `search-codebase` action and adds a **Draft PR** external
-   link to the session.
+5. The app posts a `search-codebase` action and sets the session's external
+   links to one **Draft PR** link, which replaces any existing links.
 6. The app posts the final response, a bold `hello from Linear app actor`
    line followed by a note inviting a follow-up prompt.
 
