@@ -3,9 +3,12 @@ package chat_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"log"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -828,6 +831,80 @@ func TestDeferredHandlerCancelledOnLeaseLoss(t *testing.T) {
 			t.Fatalf("lease-loss cancellation not surfaced; logs:\n%s", logs.String())
 		case <-time.After(5 * time.Millisecond):
 		}
+	}
+}
+
+type markPanicState struct {
+	*fakeState
+	panicValue any
+}
+
+func (s markPanicState) MarkEvent(context.Context, string, time.Duration) (bool, error) {
+	panic(s.panicValue)
+}
+
+func TestDeferredPreludeStatePanicReleasesItsAdmission(t *testing.T) {
+	t.Parallel()
+
+	const statePanic = "state panicked in the prelude"
+	acquirePanics := newGatedAcquireState(1)
+	acquirePanics.gatePanic = statePanic
+	close(acquirePanics.release)
+	cases := []struct {
+		name    string
+		state   chat.State
+		options func(*chat.RuntimeOptions)
+	}{
+		{
+			name:    "queue AcquireLock",
+			state:   acquirePanics,
+			options: func(o *chat.RuntimeOptions) { o.Concurrency = chat.ConcurrencyQueue },
+		},
+		{
+			name:  "burst MarkEvent",
+			state: markPanicState{fakeState: newFakeState(), panicValue: statePanic},
+			options: func(o *chat.RuntimeOptions) {
+				o.Concurrency = chat.ConcurrencyBurst
+				o.BurstWindow = time.Millisecond
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			bot := newDeferredRuntime(t, tc.state, newFakeAdapter("fake"), tc.options)
+			handler, err := bot.Webhook("fake")
+			if err != nil {
+				t.Fatalf("webhook: %v", err)
+			}
+			var serverLog syncBuffer
+			srv := httptest.NewUnstartedServer(handler)
+			srv.Config.ErrorLog = log.New(&serverLog, "", 0)
+			srv.Start()
+			t.Cleanup(srv.Close)
+
+			body, err := json.Marshal(mentionEvent("A", "fake:v1:thread-1"))
+			if err != nil {
+				t.Fatalf("marshal event: %v", err)
+			}
+			resp, err := srv.Client().Post(srv.URL, "application/json", bytes.NewReader(body))
+			if err == nil {
+				resp.Body.Close()
+				t.Fatalf("status = %d, want the State panic to abort the request", resp.StatusCode)
+			}
+			if !strings.Contains(serverLog.String(), statePanic) {
+				t.Fatalf("net/http did not recover the State panic, server log: %q", serverLog.String())
+			}
+			if got := chat.QueueTurnCount(bot); got != 0 {
+				t.Errorf("turn records = %d after the prelude panicked, want 0", got)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := bot.Shutdown(ctx); err != nil {
+				t.Fatalf("Shutdown after the prelude panicked: %v", err)
+			}
+		})
 	}
 }
 
