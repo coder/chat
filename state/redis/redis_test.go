@@ -38,6 +38,34 @@ func TestStateConformance(t *testing.T) {
 	})
 }
 
+func TestExtendLockSubMillisecondTTLKeepsLock(t *testing.T) {
+	server := miniredis.RunT(t)
+	client := goredis.NewClient(&goredis.Options{Addr: server.Addr()})
+	t.Cleanup(func() {
+		_ = client.Close()
+	})
+	ctx := context.Background()
+	state, err := chatredis.New(ctx, chatredis.Options{Client: client, Prefix: "test"})
+	if err != nil {
+		t.Fatalf("new redis state: %v", err)
+	}
+
+	lease, acquired, err := state.AcquireLock(ctx, "thread", time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("AcquireLock = %v, %v; want true, nil", acquired, err)
+	}
+	extended, err := state.ExtendLock(ctx, lease, 500*time.Microsecond)
+	if err != nil || !extended {
+		t.Fatalf("ExtendLock = %v, %v; want true, nil", extended, err)
+	}
+	if !server.Exists("test:lock:thread") {
+		t.Fatal("lock key was deleted by ExtendLock")
+	}
+	if _, acquired, err := state.AcquireLock(ctx, "thread", time.Minute); err != nil || acquired {
+		t.Fatalf("second AcquireLock = %v, %v; want false, nil", acquired, err)
+	}
+}
+
 func TestStateConformanceWithRedisContainer(t *testing.T) {
 	testcontainers.SkipIfProviderIsNotHealthy(t)
 
