@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -528,5 +529,64 @@ func TestDebounceSupersededWaiterExitsBeforeItsInterval(t *testing.T) {
 	defer mu.Unlock()
 	if calls != 0 {
 		t.Fatalf("handler ran before any quiet period elapsed, calls = %d", calls)
+	}
+}
+
+type validationGatedAdapter struct {
+	*fakeAdapter
+	calls   atomic.Int32
+	reached chan struct{}
+	release chan struct{}
+}
+
+func (a *validationGatedAdapter) ValidateThreadID(id chat.ThreadID) (chat.ThreadRef, error) {
+	if a.calls.Add(1) == 1 {
+		close(a.reached)
+		<-a.release
+	}
+	return a.fakeAdapter.ValidateThreadID(id)
+}
+
+func TestDebounceDeliveryDelayedInValidationCannotDisplaceNewerWaiter(t *testing.T) {
+	t.Parallel()
+
+	adapter := &validationGatedAdapter{
+		fakeAdapter: newFakeAdapter("fake"),
+		reached:     make(chan struct{}),
+		release:     make(chan struct{}),
+	}
+	var logs syncBuffer
+	bot := newDebounceRuntime(t, newFakeState(), adapter, &logs, func(o *chat.RuntimeOptions) {
+		o.DebounceInterval = 500 * time.Millisecond
+	})
+	var mu sync.Mutex
+	var handled []string
+	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+		mu.Lock()
+		handled = append(handled, ev.Event.ID)
+		mu.Unlock()
+		return nil
+	})
+
+	olderDone := make(chan postEventResult, 1)
+	go func() { olderDone <- postEventResultFor(bot, "fake", mentionEvent("older", "fake:v1:thread-1")) }()
+	waitClosed(t, adapter.reached, "older delivery did not reach thread ID validation")
+	if status := postEvent(t, bot, "fake", mentionEvent("newer", "fake:v1:thread-1")); status != http.StatusOK {
+		t.Fatalf("newer status = %d", status)
+	}
+	close(adapter.release)
+	if res := <-olderDone; res.err != nil || res.status != http.StatusOK {
+		t.Fatalf("older result status=%d err=%v", res.status, res.err)
+	}
+	eventually(t, 3*time.Second, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(handled) >= 1
+	}, "debounce winner did not dispatch")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !equalStrings(handled, []string{"newer"}) {
+		t.Fatalf("handled = %v, want only [newer]: a delivery delayed in validation displaced the final event", handled)
 	}
 }
