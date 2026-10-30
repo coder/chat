@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -330,5 +331,232 @@ func TestBurstMemberLoggerPanicStillRunsItsScope(t *testing.T) {
 	defer cancel()
 	if err := bot.Shutdown(ctx); err != nil {
 		t.Fatalf("Shutdown after the logger panicked: %v", err)
+	}
+}
+
+func TestPreludePanicEndsItsDispatchSpan(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		opts func() []chat.Option
+	}{
+		{
+			name: "MarkEvent",
+			opts: func() []chat.Option {
+				return []chat.Option{chat.WithState(&firstMarkPanicState{fakeState: newFakeState()})}
+			},
+		},
+		{
+			name: "ignored log",
+			opts: func() []chat.Option {
+				return []chat.Option{chat.WithState(newFakeState()), chat.WithLogger(slog.New(&firstRecordPanicHandler{
+					Handler: slog.NewTextHandler(io.Discard, nil),
+					msg:     "chat ignored unrouted message",
+				}))}
+			},
+		},
+	}
+	for _, tc := range cases {
+		for _, mode := range queueDispatchModes {
+			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				t.Parallel()
+
+				observer := &recordingObserver{}
+				bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, mode.mode),
+					append(tc.opts(), chat.WithObserver(observer))...)
+				srv := newPanicServer(t, bot)
+
+				srv.requireAborted(t, srv.post(mentionEvent("A", queueThread)), "A")
+				eventually(t, 2*time.Second, func() bool { return len(observer.terminalOutcomes()) == 1 },
+					"A's dispatch span did not end after its prelude panicked")
+				if got := observer.terminalOutcomes(); got[0] != chat.OutcomeError {
+					t.Fatalf("A's dispatch span ended %q, want %q", got[0], chat.OutcomeError)
+				}
+			})
+		}
+	}
+}
+
+func TestDebounceSupersedeLoggerPanicStillRunsTheNewestEvent(t *testing.T) {
+	t.Parallel()
+
+	const aFirstPoll = 1
+	state := newGatedAcquireState(aFirstPoll)
+	logger := slog.New(&firstRecordPanicHandler{
+		Handler: slog.NewTextHandler(io.Discard, nil),
+		msg:     "chat debounce superseded",
+	})
+	observer := &recordingObserver{}
+	options := panicRuntimeOptions(chat.ConcurrencyDebounce, chat.DispatchDeferred)
+	options.DebounceInterval = time.Millisecond
+	bot := newPanicRuntime(t, options, chat.WithState(state), chat.WithLogger(logger), chat.WithObserver(observer))
+	handled := make(chan string, 2)
+	bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
+		handled <- ev.Event.ID
+		return nil
+	})
+	srv := newPanicServer(t, bot)
+	openGate := sync.OnceFunc(func() { close(state.release) })
+	t.Cleanup(openGate)
+
+	if res := srv.post(mentionEvent("A", queueThread)); res.err != nil || res.status != http.StatusOK {
+		t.Fatalf("A: status=%d err=%v, want 200", res.status, res.err)
+	}
+	waitClosed(t, state.reached, "A did not poll for the lock")
+	srv.requireAborted(t, srv.post(mentionEvent("B", queueThread)), "B")
+	openGate()
+	select {
+	case id := <-handled:
+		if id != "B" {
+			t.Fatalf("%s ran, want B: B superseded A", id)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("B did not run: its supersede log panicked")
+	}
+	requireOutcomes(t, observer, chat.OutcomeHandled, chat.OutcomeIgnored)
+}
+
+func requireOutcomes(t *testing.T, observer *recordingObserver, want ...chat.DispatchOutcome) {
+	t.Helper()
+	eventually(t, 2*time.Second, func() bool { return len(observer.terminalOutcomes()) >= len(want) },
+		"a delivery did not reach a terminal outcome")
+	got := observer.terminalOutcomes()
+	slices.Sort(got)
+	slices.Sort(want)
+	if !slices.Equal(got, want) {
+		t.Fatalf("outcomes = %v, want %v", got, want)
+	}
+}
+
+func TestQueueTurnSupersedeLoggerPanicStillRunsTheNewerEvent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				bPreludeAcquire
+				bFirstPoll
+			)
+			state := newGatedAcquireState(bFirstPoll)
+			logger := slog.New(&firstRecordPanicHandler{
+				Handler: slog.NewTextHandler(io.Discard, nil),
+				msg:     "chat queue superseded",
+			})
+			observer := &recordingObserver{}
+			bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, tc.mode),
+				chat.WithState(state), chat.WithLogger(logger), chat.WithObserver(observer))
+			aStarted := make(chan struct{})
+			releaseA := make(chan struct{})
+			var cHandled atomic.Bool
+			bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
+				switch ev.Event.ID {
+				case "A":
+					close(aStarted)
+					<-releaseA
+				case "B":
+					t.Error("B ran, but C superseded it")
+				case "C":
+					cHandled.Store(true)
+				}
+				return nil
+			})
+			srv := newPanicServer(t, bot)
+			finishA := sync.OnceFunc(func() { close(releaseA) })
+			openGate := sync.OnceFunc(func() { close(state.release) })
+			t.Cleanup(func() {
+				finishA()
+				openGate()
+			})
+
+			a := srv.postAsync(mentionEvent("A", queueThread))
+			waitClosed(t, aStarted, "A's handler did not start")
+			b := srv.postAsync(mentionEvent("B", queueThread))
+			waitClosed(t, state.reached, "B did not poll for the lock")
+			finishA()
+			if res := <-a; res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("A: status=%d err=%v, want 200", res.status, res.err)
+			}
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			srv.requireAborted(t, srv.post(mentionEvent("C", queueThread)), "C")
+			eventually(t, 2*time.Second, cHandled.Load, "C did not run: its supersede log panicked")
+			openGate()
+			if res := <-b; res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("B: status=%d err=%v, want 200 for a superseded waiter", res.status, res.err)
+			}
+			requireOutcomes(t, observer, chat.OutcomeHandled, chat.OutcomeHandled, chat.OutcomeIgnored)
+		})
+	}
+}
+
+func TestQueueWaiterSupersedeLoggerPanicStillRunsTheNewerEvent(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				wPreludeAcquire
+				wFirstPoll
+			)
+			state := newGatedAcquireState(wFirstPoll)
+			logger := slog.New(&firstRecordPanicHandler{
+				Handler: slog.NewTextHandler(io.Discard, nil),
+				msg:     "chat queue superseded",
+			})
+			observer := &recordingObserver{}
+			options := panicRuntimeOptions(chat.ConcurrencyQueue, tc.mode)
+			options.ThreadLockTTL = 5 * time.Second
+			bot := newPanicRuntime(t, options, chat.WithState(state), chat.WithLogger(logger), chat.WithObserver(observer))
+			aStarted := make(chan struct{})
+			releaseA := make(chan struct{})
+			var bHandled atomic.Bool
+			bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
+				switch ev.Event.ID {
+				case "A":
+					close(aStarted)
+					<-releaseA
+				case "W":
+					t.Error("W ran, but B superseded it")
+				case "B":
+					bHandled.Store(true)
+				}
+				return nil
+			})
+			srv := newPanicServer(t, bot)
+			finishA := sync.OnceFunc(func() { close(releaseA) })
+			openGate := sync.OnceFunc(func() { close(state.release) })
+			t.Cleanup(func() {
+				openGate()
+				finishA()
+			})
+
+			a := srv.postAsync(mentionEvent("A", queueThread))
+			waitClosed(t, aStarted, "A's handler did not start")
+			w := srv.postAsync(mentionEvent("W", queueThread))
+			waitClosed(t, state.reached, "W did not poll for the lock")
+			b := srv.postAsync(mentionEvent("B", queueThread))
+			openGate()
+			eventually(t, 2*time.Second, func() bool {
+				got := observer.terminalOutcomes()
+				return len(got) == 1 && got[0] == chat.OutcomeIgnored
+			}, "W did not end superseded: B's supersede log panicked before the handoff")
+			finishA()
+			if res := <-a; res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("A: status=%d err=%v, want 200", res.status, res.err)
+			}
+			eventually(t, 2*time.Second, bHandled.Load, "B did not run: its supersede log panicked")
+			srv.requireAborted(t, <-b, "B")
+			if res := <-w; res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("W: status=%d err=%v, want 200 for a superseded waiter", res.status, res.err)
+			}
+			requireOutcomes(t, observer, chat.OutcomeHandled, chat.OutcomeHandled, chat.OutcomeIgnored)
+		})
 	}
 }
