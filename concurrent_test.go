@@ -218,6 +218,81 @@ func TestConcurrentSlotWaiterDrainedByShutdown(t *testing.T) {
 	}
 }
 
+func TestConcurrentSlotWaiterAbandonedAtDetachTimeout(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var logs syncBuffer
+		observer := &recordingObserver{}
+		const detachTimeout = time.Hour
+		bot, err := chat.New(context.Background(),
+			chat.WithState(newFakeState()),
+			chat.WithAdapter(newFakeAdapter("fake")),
+			chat.WithLogger(slog.New(slog.NewTextHandler(&logs, nil))),
+			chat.WithObserver(observer),
+			chat.WithRuntimeOptions(chat.RuntimeOptions{
+				DedupeTTL:     time.Hour,
+				ThreadLockTTL: time.Hour,
+				Concurrency:   chat.ConcurrencyConcurrent,
+				MaxConcurrent: 1,
+				Dispatch:      chat.DispatchDeferred,
+				MaxDetached:   1024,
+				DetachTimeout: detachTimeout,
+			}),
+		)
+		if err != nil {
+			t.Fatalf("new concurrent runtime: %v", err)
+		}
+
+		releaseFirst := make(chan struct{})
+		release := sync.OnceFunc(func() { close(releaseFirst) })
+		defer release()
+		var waiterRan atomic.Bool
+		bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
+			if ev.Event.ID == "first" {
+				<-releaseFirst
+				return nil
+			}
+			waiterRan.Store(true)
+			return nil
+		})
+
+		if status := postEvent(t, bot, "fake", mentionEvent("first", "fake:v1:thread-1")); status != http.StatusOK {
+			t.Fatalf("first status = %d", status)
+		}
+		synctest.Wait()
+		if status := postEvent(t, bot, "fake", mentionEvent("waiter", "fake:v1:thread-2")); status != http.StatusOK {
+			t.Fatalf("waiter status = %d", status)
+		}
+		time.Sleep(detachTimeout)
+		synctest.Wait()
+
+		if waiterRan.Load() {
+			t.Fatalf("waiter ran its handler after its DetachTimeout expired; logs:\n%s", logs.String())
+		}
+		abandoned := slices.ContainsFunc(strings.Split(logs.String(), "\n"), func(line string) bool {
+			return strings.Contains(line, "chat concurrent slot wait abandoned") &&
+				strings.Contains(line, "event_id=waiter") &&
+				strings.Contains(line, "context deadline exceeded")
+		})
+		if !abandoned {
+			t.Fatalf("waiter's expired slot wait not logged as abandoned; logs:\n%s", logs.String())
+		}
+		if got := observer.terminalOutcomes(); !slices.Equal(got, []chat.DispatchOutcome{chat.OutcomeIgnored}) {
+			t.Fatalf("outcomes while the first handler holds the slot = %v, want [ignored]", got)
+		}
+
+		release()
+		synctest.Wait()
+		if waiterRan.Load() {
+			t.Fatalf("waiter ran its handler once the slot freed; logs:\n%s", logs.String())
+		}
+		if got := observer.terminalOutcomes(); !slices.Equal(got, []chat.DispatchOutcome{chat.OutcomeIgnored, chat.OutcomeHandled}) {
+			t.Fatalf("outcomes after the first handler returned = %v, want [ignored handled]", got)
+		}
+	})
+}
+
 func TestConcurrentSyncDispatchRunsWithoutLock(t *testing.T) {
 	t.Parallel()
 
