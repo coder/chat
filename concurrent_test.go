@@ -5,10 +5,12 @@ import (
 	"log/slog"
 	"net/http"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/chat"
@@ -110,67 +112,59 @@ func TestConcurrentRunsSameThreadHandlersInParallelWithoutLock(t *testing.T) {
 func TestConcurrentBoundedByMaxConcurrent(t *testing.T) {
 	t.Parallel()
 
-	state := newFakeState()
-	adapter := newFakeAdapter("fake")
-	var logs syncBuffer
-	bot := newConcurrentRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
-		o.MaxConcurrent = 1
+	synctest.Test(t, func(t *testing.T) {
+		state := newFakeState()
+		adapter := newFakeAdapter("fake")
+		var logs syncBuffer
+		const detachTimeout = time.Hour
+		bot := newConcurrentRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
+			o.MaxConcurrent = 1
+			o.DetachTimeout = detachTimeout
+		})
+
+		releaseFirst := make(chan struct{})
+		release := sync.OnceFunc(func() { close(releaseFirst) })
+		defer release()
+		var mu sync.Mutex
+		var handled []string
+		bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+			mu.Lock()
+			handled = append(handled, ev.Event.ID)
+			mu.Unlock()
+			if ev.Event.ID == "first" {
+				<-releaseFirst
+			}
+			return nil
+		})
+		handledIDs := func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(handled)
+		}
+
+		if status := postEvent(t, bot, "fake", mentionEvent("first", "fake:v1:thread-1")); status != http.StatusOK {
+			t.Fatalf("first status = %d", status)
+		}
+		synctest.Wait()
+		if got := handledIDs(); !slices.Equal(got, []string{"first"}) {
+			t.Fatalf("first handler did not start alone, handled = %v", got)
+		}
+
+		if status := postEvent(t, bot, "fake", mentionEvent("second", "fake:v1:thread-2")); status != http.StatusOK {
+			t.Fatalf("second status = %d", status)
+		}
+		justBeforeSlotWaitDeadline := detachTimeout - time.Nanosecond
+		time.Sleep(justBeforeSlotWaitDeadline)
+		if got := handledIDs(); !slices.Equal(got, []string{"first"}) {
+			t.Fatalf("MaxConcurrent=1 did not bound execution, handled = %v", got)
+		}
+
+		release()
+		synctest.Wait()
+		if got := handledIDs(); !slices.Equal(got, []string{"first", "second"}) {
+			t.Fatalf("second handler did not run after the slot freed, handled = %v", got)
+		}
 	})
-
-	firstStarted := make(chan struct{})
-	releaseFirst := make(chan struct{})
-	var mu sync.Mutex
-	var handled []string
-	bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
-		mu.Lock()
-		first := len(handled) == 0
-		handled = append(handled, ev.Event.ID)
-		mu.Unlock()
-		if first {
-			close(firstStarted)
-			<-releaseFirst
-		}
-		return nil
-	})
-
-	if status := postEvent(t, bot, "fake", mentionEvent("first", "fake:v1:thread-1")); status != http.StatusOK {
-		t.Fatalf("first status = %d", status)
-	}
-	select {
-	case <-firstStarted:
-	case <-time.After(2 * time.Second):
-		t.Fatal("first handler did not start")
-	}
-
-	// The second event is acked promptly but must wait for the single slot.
-	if status := postEvent(t, bot, "fake", mentionEvent("second", "fake:v1:thread-2")); status != http.StatusOK {
-		t.Fatalf("second status = %d", status)
-	}
-	time.Sleep(80 * time.Millisecond)
-	mu.Lock()
-	if len(handled) != 1 {
-		got := append([]string(nil), handled...)
-		mu.Unlock()
-		t.Fatalf("MaxConcurrent=1 did not bound execution, handled = %v", got)
-	}
-	mu.Unlock()
-
-	close(releaseFirst)
-
-	deadline := time.After(2 * time.Second)
-	for {
-		mu.Lock()
-		n := len(handled)
-		mu.Unlock()
-		if n >= 2 {
-			break
-		}
-		select {
-		case <-deadline:
-			t.Fatal("second handler did not run after the slot freed")
-		case <-time.After(5 * time.Millisecond):
-		}
-	}
 }
 
 func TestConcurrentSlotWaiterDrainedByShutdown(t *testing.T) {
