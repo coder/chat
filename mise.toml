@@ -18,6 +18,15 @@ run = [
   "clawpatch map",
 ]
 
+[tasks.emulate]
+description = "Start the emulate.dev Slack (:4710) and Linear (:4711) emulators for the emulate test tier"
+run = "npx --yes emulate@0.12.3 start --service slack,linear --port 4710 --seed testdata/emulate/seed.yaml"
+
+[tasks."test:emulate"]
+description = "Run the emulate.dev tests against a running `mise run emulate`"
+env = { CHAT_EMULATE_SLACK_URL = "http://127.0.0.1:4710" }
+run = "go test -run TestEmulate -count=1 -v ./adapters/slack/"
+
 [tasks."test:adapters"]
 description = "Run adapter-focused tests"
 run = [

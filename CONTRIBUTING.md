@@ -92,6 +92,52 @@ Some docs are checked by `documentation_test.go`:
 - A few key phrases must stay in the README, reference, explanation, and
   package docs. If you reword one, update the test in the same change.
 
+## Emulator Tests
+
+An opt-in tier runs the Slack adapter end to end against
+[emulate.dev](https://emulate.dev) (`vercel-labs/emulate`, pinned to 0.12.3),
+a local, stateful emulator of the Slack and Linear APIs. It covers flows that
+the fakes do not cover end to end:
+
+- a signed Events API message event, through the adapter's HTTP handler and
+  the mention handler, to a thread reply that `conversations.replies` shows;
+- a button click from emulate's block-action simulator, through the adapter's
+  HTTP handler, to the interaction handler.
+
+You need Node.js 22 or later for `npx`. Run from the repository root:
+
+```sh
+mise run emulate        # terminal 1: Slack on :4710, Linear on :4711
+mise run test:emulate   # terminal 2: sets CHAT_EMULATE_SLACK_URL, runs TestEmulate*
+```
+
+The seed is `testdata/emulate/seed.yaml`. The block-action test listens on
+`127.0.0.1:4799`, the seeded interactivity URL. Without
+`CHAT_EMULATE_SLACK_URL`, the tests skip and `go test ./...` is unchanged. The
+`Emulate` workflow runs the tier on each pull request, separately from `CI`.
+
+emulate is not the source of truth for Slack's rules. The fakes
+(`adapters/slack/slackapi/slackapitest` and `linearAPIServer` in
+`adapters/linear/linear_test.go`) and the live tests (`TestLive*` in
+`adapters/slack/slackapi/live_test.go`) are. Known gaps in emulate 0.12.3:
+
+- No Socket Mode: `apps.connections.open` returns 404.
+- No slash commands.
+- No Events API request URL in the CLI or the seed. The event test posts the
+  user message to emulate, then signs and sends its `event_callback` itself.
+- emulate accepts a JSON body for `conversations.history` and
+  `conversations.replies`. Real Slack returns `invalid_arguments`, so this tier
+  would have missed #98.
+- Scope checks are relaxed unless the seed sets `strict_scopes: true`. This
+  seed leaves them relaxed.
+- No Linear tests. emulate's Linear schema differs from Linear's, so the
+  adapter cannot reply: `User` has no `organization` (single-install `Init`
+  fails), `CommentCreateInput` has no `parentId`, `AgentActivityCreateInput` is
+  `{sessionId, type, body}` instead of `{agentSessionId, content}`, Comment
+  webhooks have no `data.user`, and `AgentSessionEvent` webhooks carry the
+  session in `data` instead of `agentSession`. The seed keeps a Linear team for
+  manual checks. Issue #148 tracks Linear tests.
+
 ## Validating Adapter Changes Live
 
 CI has no live Slack or Linear tests. Before you claim that a change works
