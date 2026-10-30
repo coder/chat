@@ -677,7 +677,7 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64, entry
 		return err
 	}
 	if work.noLock {
-		if !c.acquireConcurrencySlot(ctx, event, false) {
+		if !c.acquireConcurrencySlot(ctx, event) {
 			c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 			return nil
 		}
@@ -1086,7 +1086,7 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 		defer tailCancel()
 
 		if work.noLock {
-			if !c.acquireConcurrencySlot(tailCtx, work.event, true) {
+			if !c.acquireDetachedConcurrencySlot(tailCtx, work.event) {
 				c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 				return
 			}
@@ -1203,22 +1203,31 @@ func (c *Chat) waitDebounceQuietPeriod(ctx context.Context, work preludeWork) bo
 }
 
 // acquireConcurrencySlot blocks until a MaxConcurrent slot frees, bounded by
-// ctx. It reports false when the wait was abandoned. A detached tail also
-// abandons a slot it wins after Shutdown cancelled the base context: Shutdown
-// cancels the tails one at a time, so a slot freed by a cancelled tail can
-// reach a waiter whose own context is not cancelled yet.
-func (c *Chat) acquireConcurrencySlot(ctx context.Context, event *Event, detached bool) bool {
+// ctx. It reports false when the wait was abandoned.
+func (c *Chat) acquireConcurrencySlot(ctx context.Context, event *Event) bool {
 	assert(c.concurrencySlots != nil, "concurrency slots are only used under the concurrent strategy")
-	var err error
 	select {
 	case c.concurrencySlots <- struct{}{}:
-		if err = c.baseCtx.Err(); !detached || err == nil {
-			return true
-		}
-		c.releaseConcurrencySlot()
+		return true
 	case <-ctx.Done():
-		err = ctx.Err()
+		c.logger.Info("chat concurrent slot wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
+		return false
 	}
+}
+
+// acquireDetachedConcurrencySlot is acquireConcurrencySlot for a detached
+// tail. Shutdown cancels the tails one at a time, so a tail can win a slot
+// that a cancelled tail freed before its own context is cancelled. Such a
+// tail releases the slot and abandons the wait.
+func (c *Chat) acquireDetachedConcurrencySlot(ctx context.Context, event *Event) bool {
+	if !c.acquireConcurrencySlot(ctx, event) {
+		return false
+	}
+	err := c.baseCtx.Err()
+	if err == nil {
+		return true
+	}
+	c.releaseConcurrencySlot()
 	c.logger.Info("chat concurrent slot wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", err)
 	return false
 }

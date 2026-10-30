@@ -286,13 +286,9 @@ func TestConcurrentConstructionValidation(t *testing.T) {
 	}
 }
 
-// TestConcurrentSlotFreedDuringShutdownIsAbandoned covers a slot that frees
-// while Shutdown cancels the detached tails. Shutdown cancels the tails one at
-// a time, so the first handler can return and free the only slot before the
-// waiter's context is cancelled. The waiter must still abandon its wait. The
-// child contexts of the first handler's context widen that window, because
-// Shutdown cancels them after it wakes the first handler. The two tails cancel
-// in random order, so the test repeats the scenario.
+// TestConcurrentSlotFreedDuringShutdownIsAbandoned pins that a waiter whose
+// slot frees while Shutdown cancels the tails abandons the wait. The tails
+// cancel in random order, so the test repeats the scenario.
 func TestConcurrentSlotFreedDuringShutdownIsAbandoned(t *testing.T) {
 	t.Parallel()
 	if runtime.GOMAXPROCS(0) < 2 {
@@ -316,6 +312,8 @@ func TestConcurrentSlotFreedDuringShutdownIsAbandoned(t *testing.T) {
 				waiterRan.Store(true)
 				return nil
 			}
+			// Shutdown cancels these after it wakes this handler, so the
+			// waiter's context stays live while this handler frees the slot.
 			for range cap(children) {
 				_, cancel := context.WithCancel(ctx)
 				children = append(children, cancel)
