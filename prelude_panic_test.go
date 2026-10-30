@@ -336,22 +336,43 @@ func TestBurstMemberLoggerPanicStillRunsItsScope(t *testing.T) {
 func TestPreludePanicEndsItsDispatchSpan(t *testing.T) {
 	t.Parallel()
 
-	for _, tc := range queueDispatchModes {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+	cases := []struct {
+		name string
+		opts func() []chat.Option
+	}{
+		{
+			name: "MarkEvent",
+			opts: func() []chat.Option {
+				return []chat.Option{chat.WithState(&firstMarkPanicState{fakeState: newFakeState()})}
+			},
+		},
+		{
+			name: "ignored log",
+			opts: func() []chat.Option {
+				return []chat.Option{chat.WithState(newFakeState()), chat.WithLogger(slog.New(&firstRecordPanicHandler{
+					Handler: slog.NewTextHandler(io.Discard, nil),
+					msg:     "chat ignored unrouted message",
+				}))}
+			},
+		},
+	}
+	for _, tc := range cases {
+		for _, mode := range queueDispatchModes {
+			t.Run(tc.name+"/"+mode.name, func(t *testing.T) {
+				t.Parallel()
 
-			observer := &recordingObserver{}
-			bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, tc.mode),
-				chat.WithState(&firstMarkPanicState{fakeState: newFakeState()}), chat.WithObserver(observer))
-			bot.OnNewMention(func(context.Context, *chat.MessageEvent) error { return nil })
-			srv := newPanicServer(t, bot)
+				observer := &recordingObserver{}
+				bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, mode.mode),
+					append(tc.opts(), chat.WithObserver(observer))...)
+				srv := newPanicServer(t, bot)
 
-			srv.requireAborted(t, srv.post(mentionEvent("A", queueThread)), "A")
-			eventually(t, 2*time.Second, func() bool { return len(observer.terminalOutcomes()) == 1 },
-				"A's dispatch span did not end after its MarkEvent panicked")
-			if got := observer.terminalOutcomes(); got[0] != chat.OutcomeError {
-				t.Fatalf("A's dispatch span ended %q, want %q", got[0], chat.OutcomeError)
-			}
-		})
+				srv.requireAborted(t, srv.post(mentionEvent("A", queueThread)), "A")
+				eventually(t, 2*time.Second, func() bool { return len(observer.terminalOutcomes()) == 1 },
+					"A's dispatch span did not end after its prelude panicked")
+				if got := observer.terminalOutcomes(); got[0] != chat.OutcomeError {
+					t.Fatalf("A's dispatch span ended %q, want %q", got[0], chat.OutcomeError)
+				}
+			})
+		}
 	}
 }
