@@ -798,15 +798,20 @@ type preludeWork struct {
 // Under the queue strategy a Lock Conflict on a routed event does not block: the
 // event is registered as pending (no lease) and returned with needsLock=true so
 // the tail acquires the lock, keeping ack prompt under DispatchDeferred.
-func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *queueEntry) (work preludeWork, resolved bool, err error) {
+func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *queueEntry) (preludeWork, bool, error) {
 	spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
-	ctx = spanCtx
+	panicked := true
 	defer func() {
-		if !resolved && work.span == nil {
+		if panicked {
 			c.safeEnd(span, OutcomeError)
 		}
 	}()
+	work, resolved, err := c.acceptAndRoute(spanCtx, span, event, seq, entry)
+	panicked = false
+	return work, resolved, err
+}
 
+func (c *Chat) acceptAndRoute(ctx context.Context, span DispatchSpan, event *Event, seq uint64, entry *queueEntry) (preludeWork, bool, error) {
 	acceptance, primary := c.beginEventAcceptance(event.ID)
 	if !primary {
 		// The primary owns the terminal observation for the shared Event Identity.
