@@ -759,10 +759,7 @@ type preludeWork struct {
 	// displaced closes when a newer event supersedes this pending waiter; the
 	// debounce quiet-period wait exits promptly on it instead of parking through
 	// its full interval.
-	displaced <-chan struct{}
-	// supersedes is the pending waiter's event this delivery displaced. The
-	// dispatcher logs the supersession only once this delivery's run is
-	// secured, so a panicking slog handler cannot lose it.
+	displaced  <-chan struct{}
 	supersedes *Event
 	// debounce is true when the tail must hold the event through the
 	// DebounceInterval quiet period before waiting for the lock.
@@ -804,8 +801,6 @@ type preludeWork struct {
 func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *queueEntry) (work preludeWork, resolved bool, err error) {
 	spanCtx, span := c.safeDispatch(ctx, AdapterAttr(event.Adapter), TenantAttr(event.Tenant))
 	ctx = spanCtx
-	// A panic leaves the results zero: the prelude neither ended the span on a
-	// resolved outcome nor handed it to the tail in work.
 	defer func() {
 		if !resolved && work.span == nil {
 			c.safeEnd(span, OutcomeError)
@@ -1431,9 +1426,8 @@ func (c *Chat) leaveQueueScope(entry *queueEntry) {
 // its prelude (validation, dedupe, routing) never displaces a waiter admitted
 // after it, and instead reports registered=false so the caller resolves it as
 // superseded. Under queue it also reports registered=false when the scope's
-// latest turn was admitted after it. supersedes is the displaced waiter's
-// event, for the caller's supersession record. The returned channel closes
-// when this registration is itself superseded.
+// latest turn was admitted after it. The returned channel closes when this
+// registration is itself superseded.
 func (c *Chat) registerPending(scope string, event *Event, seq uint64) (displaced <-chan struct{}, supersedes *Event, registered bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
@@ -1453,9 +1447,9 @@ func (c *Chat) registerPending(scope string, event *Event, seq uint64) (displace
 }
 
 // takeQueueTurn gives event, which took the free lock in its prelude, its
-// scope's turn: it supersedes an older pending waiter, whose event it returns,
-// and makes every delivery admitted before event stale. It reports took=false,
-// and takes no turn, when a newer delivery already took one.
+// scope's turn: it supersedes an older pending waiter and makes every delivery
+// admitted before event stale. It reports took=false, and takes no turn, when a
+// newer delivery already took one.
 func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) (supersedes *Event, took bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
@@ -1475,7 +1469,6 @@ func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) (supersedes
 	return prev.event, true
 }
 
-// logSupersession records that work's delivery displaced an earlier waiter.
 func (c *Chat) logSupersession(work preludeWork) {
 	prev := work.supersedes
 	if prev == nil {
