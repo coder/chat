@@ -677,7 +677,7 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64, entry
 		return err
 	}
 	if work.noLock {
-		if !c.acquireConcurrencySlot(ctx, event) {
+		if !c.acquireConcurrencySlot(ctx, event, false) {
 			c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 			return nil
 		}
@@ -1086,7 +1086,7 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 		defer tailCancel()
 
 		if work.noLock {
-			if !c.acquireConcurrencySlot(tailCtx, work.event) {
+			if !c.acquireConcurrencySlot(tailCtx, work.event, true) {
 				c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 				return
 			}
@@ -1203,16 +1203,24 @@ func (c *Chat) waitDebounceQuietPeriod(ctx context.Context, work preludeWork) bo
 }
 
 // acquireConcurrencySlot blocks until a MaxConcurrent slot frees, bounded by
-// ctx. It reports false when the wait was abandoned.
-func (c *Chat) acquireConcurrencySlot(ctx context.Context, event *Event) bool {
+// ctx. It reports false when the wait was abandoned. A detached tail also
+// abandons a slot it wins after Shutdown cancelled the base context: Shutdown
+// cancels the tails one at a time, so a slot freed by a cancelled tail can
+// reach a waiter whose own context is not cancelled yet.
+func (c *Chat) acquireConcurrencySlot(ctx context.Context, event *Event, detached bool) bool {
 	assert(c.concurrencySlots != nil, "concurrency slots are only used under the concurrent strategy")
+	var err error
 	select {
 	case c.concurrencySlots <- struct{}{}:
-		return true
+		if err = c.baseCtx.Err(); !detached || err == nil {
+			return true
+		}
+		c.releaseConcurrencySlot()
 	case <-ctx.Done():
-		c.logger.Info("chat concurrent slot wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
-		return false
+		err = ctx.Err()
 	}
+	c.logger.Info("chat concurrent slot wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", err)
+	return false
 }
 
 func (c *Chat) releaseConcurrencySlot() {
