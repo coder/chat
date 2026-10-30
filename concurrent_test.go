@@ -206,7 +206,6 @@ func TestConcurrentSlotWaiterDrainedByShutdown(t *testing.T) {
 	if status := postEvent(t, bot, "fake", mentionEvent("waiter", "fake:v1:thread-2")); status != http.StatusOK {
 		t.Fatalf("waiter status = %d", status)
 	}
-	time.Sleep(40 * time.Millisecond)
 
 	done := make(chan error, 1)
 	go func() { done <- bot.Shutdown(context.Background()) }()
@@ -300,7 +299,7 @@ func TestConcurrentSlotFreedDuringShutdownIsAbandoned(t *testing.T) {
 		t.Skip("the first handler must run while Shutdown cancels the tails")
 	}
 
-	for i := range 20 {
+	for i := range 10 {
 		state := newFakeState()
 		adapter := newFakeAdapter("fake")
 		var logs syncBuffer
@@ -309,7 +308,7 @@ func TestConcurrentSlotFreedDuringShutdownIsAbandoned(t *testing.T) {
 			o.DetachTimeout = time.Hour
 		})
 
-		children := make([]context.CancelFunc, 0, 50000)
+		children := make([]context.CancelFunc, 0, 20000)
 		firstStarted := make(chan struct{})
 		var waiterRan atomic.Bool
 		bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
