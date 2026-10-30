@@ -1086,7 +1086,7 @@ func (c *Chat) startDetachedTail(work preludeWork) {
 		defer tailCancel()
 
 		if work.noLock {
-			if !c.acquireConcurrencySlot(tailCtx, work.event) {
+			if !c.acquireDetachedConcurrencySlot(tailCtx, work.event) {
 				c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 				return
 			}
@@ -1213,6 +1213,23 @@ func (c *Chat) acquireConcurrencySlot(ctx context.Context, event *Event) bool {
 		c.logger.Info("chat concurrent slot wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", ctx.Err())
 		return false
 	}
+}
+
+// acquireDetachedConcurrencySlot is acquireConcurrencySlot for a detached
+// tail. Shutdown cancels the tails one at a time, so a tail can win a slot
+// that a cancelled tail freed before its own context is cancelled. Such a
+// tail releases the slot and abandons the wait.
+func (c *Chat) acquireDetachedConcurrencySlot(ctx context.Context, event *Event) bool {
+	if !c.acquireConcurrencySlot(ctx, event) {
+		return false
+	}
+	err := c.baseCtx.Err()
+	if err == nil {
+		return true
+	}
+	c.releaseConcurrencySlot()
+	c.logger.Info("chat concurrent slot wait abandoned", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID, "error", err)
+	return false
 }
 
 func (c *Chat) releaseConcurrencySlot() {
