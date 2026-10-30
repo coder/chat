@@ -119,7 +119,6 @@ func (s *firstMarkPanicState) lockFree() bool {
 	return len(s.locked) == 0
 }
 
-// firstRecordPanicHandler panics on the first record whose message is msg.
 type firstRecordPanicHandler struct {
 	slog.Handler
 	msg      string

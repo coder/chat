@@ -806,10 +806,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 		c.safeEnd(span, OutcomeDuplicate)
 		return preludeWork{}, true, err
 	}
-	// Every return below has finished the entry already. Only a panic from
-	// State or the logger reaches this with the entry open: its duplicates
-	// fail, and a redelivery becomes the primary.
-	defer c.finishEventAcceptance(event.ID, acceptance, errPreludePanicked)
+	defer c.abandonEventAcceptance(event.ID, acceptance)
 	finish := func(err error) error {
 		c.finishEventAcceptance(event.ID, acceptance, err)
 		return err
@@ -882,8 +879,6 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 
 	// releaseOnResolve releases the lease when the event resolves here; an event
 	// whose strategy defers lock coordination to the tail holds no lease yet.
-	// The deferred call frees a lease that a panic left with the prelude.
-	// handOff gives the lease to the dispatch tail with the routed work.
 	releaseOnResolve := func() {
 		if lease == (LockLease{}) {
 			return
@@ -893,7 +888,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 		c.releaseLock(ctx, held, event.ThreadID)
 	}
 	defer releaseOnResolve()
-	handOff := func(work preludeWork, resolved bool, err error) (preludeWork, bool, error) {
+	handLeaseToTail := func(work preludeWork, resolved bool, err error) (preludeWork, bool, error) {
 		if !resolved {
 			lease = LockLease{}
 		}
@@ -942,7 +937,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 			return resolveIgnored("no-command-handler", "chat ignored command with no handler", slog.LevelInfo)
 		}
 		cmdEvent := &CommandEvent{Event: event, Thread: thread, Command: event.Command}
-		return handOff(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "command", func(ctx context.Context) error {
+		return handLeaseToTail(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "command", func(ctx context.Context) error {
 			return handler(ctx, cmdEvent)
 		}, acceptEvent, releaseOnResolve))
 
@@ -957,7 +952,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 			return resolveIgnored("no-interaction-handler", "chat ignored interaction with no handler", slog.LevelInfo)
 		}
 		intEvent := &InteractionEvent{Event: event, Thread: thread, Interaction: event.Interaction}
-		return handOff(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "interaction", func(ctx context.Context) error {
+		return handLeaseToTail(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "interaction", func(ctx context.Context) error {
 			return handler(ctx, intEvent)
 		}, acceptEvent, releaseOnResolve))
 	}
@@ -978,7 +973,7 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 	}
 
 	msgEvent := &MessageEvent{Event: event, Thread: thread, Message: event.Message}
-	return handOff(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, route, func(ctx context.Context) error {
+	return handLeaseToTail(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, route, func(ctx context.Context) error {
 		return handler(ctx, msgEvent)
 	}, acceptEvent, releaseOnResolve))
 }
@@ -1616,16 +1611,23 @@ func (c *Chat) beginEventAcceptance(eventID string) (*eventAcceptance, bool) {
 func (c *Chat) finishEventAcceptance(eventID string, acceptance *eventAcceptance, err error) {
 	c.acceptancesMu.Lock()
 	defer c.acceptancesMu.Unlock()
-	select {
-	case <-acceptance.done:
-		return
-	default:
-	}
 	if c.eventAcceptances[eventID] == acceptance {
 		delete(c.eventAcceptances, eventID)
 	}
 	acceptance.err = err
 	close(acceptance.done)
+}
+
+// abandonEventAcceptance finishes an entry the prelude left open, which only a
+// panic does, so its duplicates fail and a redelivery becomes the primary.
+// Only the primary's goroutine closes done, so the check needs no lock.
+func (c *Chat) abandonEventAcceptance(eventID string, acceptance *eventAcceptance) {
+	select {
+	case <-acceptance.done:
+		return
+	default:
+	}
+	c.finishEventAcceptance(eventID, acceptance, errPreludePanicked)
 }
 
 func waitEventAcceptance(ctx context.Context, acceptance *eventAcceptance) error {
