@@ -882,11 +882,22 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 
 	// releaseOnResolve releases the lease when the event resolves here; an event
 	// whose strategy defers lock coordination to the tail holds no lease yet.
+	// The deferred call frees a lease that a panic left with the prelude.
+	// handOff gives the lease to the dispatch tail with the routed work.
 	releaseOnResolve := func() {
 		if lease == (LockLease{}) {
 			return
 		}
-		c.releaseLock(ctx, lease, event.ThreadID)
+		held := lease
+		lease = LockLease{}
+		c.releaseLock(ctx, held, event.ThreadID)
+	}
+	defer releaseOnResolve()
+	handOff := func(work preludeWork, resolved bool, err error) (preludeWork, bool, error) {
+		if !resolved {
+			lease = LockLease{}
+		}
+		return work, resolved, err
 	}
 	// resolveError releases the lease and closes the span for a failed prelude.
 	resolveError := func(err error) (preludeWork, bool, error) {
@@ -931,9 +942,9 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 			return resolveIgnored("no-command-handler", "chat ignored command with no handler", slog.LevelInfo)
 		}
 		cmdEvent := &CommandEvent{Event: event, Thread: thread, Command: event.Command}
-		return c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "command", func(ctx context.Context) error {
+		return handOff(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "command", func(ctx context.Context) error {
 			return handler(ctx, cmdEvent)
-		}, acceptEvent, releaseOnResolve)
+		}, acceptEvent, releaseOnResolve))
 
 	case event.Interaction != nil:
 		if isSelfActor(event.Interaction.Actor, bot) {
@@ -946,9 +957,9 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 			return resolveIgnored("no-interaction-handler", "chat ignored interaction with no handler", slog.LevelInfo)
 		}
 		intEvent := &InteractionEvent{Event: event, Thread: thread, Interaction: event.Interaction}
-		return c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "interaction", func(ctx context.Context) error {
+		return handOff(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, "interaction", func(ctx context.Context) error {
 			return handler(ctx, intEvent)
-		}, acceptEvent, releaseOnResolve)
+		}, acceptEvent, releaseOnResolve))
 	}
 
 	if event.Message == nil {
@@ -967,9 +978,9 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 	}
 
 	msgEvent := &MessageEvent{Event: event, Thread: thread, Message: event.Message}
-	return c.routedWork(ctx, span, event, lease, scope, seq, conflicted, route, func(ctx context.Context) error {
+	return handOff(c.routedWork(ctx, span, event, lease, scope, seq, conflicted, route, func(ctx context.Context) error {
 		return handler(ctx, msgEvent)
-	}, acceptEvent, releaseOnResolve)
+	}, acceptEvent, releaseOnResolve))
 }
 
 // routedWork accepts a routed event (deduping), applies the Concurrency
@@ -1437,8 +1448,8 @@ func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) bool {
 		return true
 	}
 	assert(prev.seq != seq, "a delivery that holds its prelude lease is never its scope's pending waiter")
-	c.displaceLocked(prev, event, "queue")
 	delete(c.pending, scope)
+	c.displaceLocked(prev, event, "queue")
 	return true
 }
 
