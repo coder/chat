@@ -206,6 +206,7 @@ func TestConcurrentSlotWaiterDrainedByShutdown(t *testing.T) {
 	if status := postEvent(t, bot, "fake", mentionEvent("waiter", "fake:v1:thread-2")); status != http.StatusOK {
 		t.Fatalf("waiter status = %d", status)
 	}
+	time.Sleep(40 * time.Millisecond)
 
 	done := make(chan error, 1)
 	go func() { done <- bot.Shutdown(context.Background()) }()
