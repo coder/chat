@@ -39,6 +39,7 @@ This qualifies two accepted ADRs, flagged per the domain docs' ADR-conflict rule
 1. **Bounded retention.** Everything an admitted deferred delivery retains (goroutine, payload, closure — running tails, parked waiters, slot-waiters, future batch members) counts against the cap, and capacity is never released while that work remains retained.
 2. **Honest rejection.** A rejected delivery is never acknowledged as handled, never marked in **Event Identity** dedupe, and always observable: a new observation (`admission_rejected`, carrying adapter and tenant) and a new terminal dispatch outcome (`admission-rejected`).
 3. **No silent loss.** Every admitted delivery reaches an observable terminal outcome — including under **Runtime Shutdown**.
+4. **Panic release.** When `State` or the app's `slog` handler panics during the prelude, the runtime releases every resource the delivery took and does not recover the panic.
 
 Per-strategy invariant under `DispatchDeferred` (one line each):
 
