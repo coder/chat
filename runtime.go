@@ -760,7 +760,7 @@ type preludeWork struct {
 	// debounce quiet-period wait exits promptly on it instead of parking through
 	// its full interval.
 	displaced  <-chan struct{}
-	supersedes *Event
+	supersedes *supersession
 	// debounce is true when the tail must hold the event through the
 	// DebounceInterval quiet period before waiting for the lock.
 	debounce bool
@@ -1433,7 +1433,7 @@ func (c *Chat) leaveQueueScope(entry *queueEntry) {
 // superseded. Under queue it also reports registered=false when the scope's
 // latest turn was admitted after it. The returned channel closes when this
 // registration is itself superseded.
-func (c *Chat) registerPending(scope string, event *Event, seq uint64) (displaced <-chan struct{}, supersedes *Event, registered bool) {
+func (c *Chat) registerPending(scope string, event *Event, seq uint64) (displaced <-chan struct{}, supersedes *supersession, registered bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
 	if turn := c.queueTurns[scope]; turn != nil && turn.won > seq {
@@ -1444,7 +1444,7 @@ func (c *Chat) registerPending(scope string, event *Event, seq uint64) (displace
 			return nil, nil, false
 		}
 		close(prev.displaced)
-		supersedes = prev.event
+		supersedes = newSupersession(prev.event)
 	}
 	waiter := &pendingWaiter{event: event, seq: seq, displaced: make(chan struct{})}
 	c.pending[scope] = waiter
@@ -1455,7 +1455,7 @@ func (c *Chat) registerPending(scope string, event *Event, seq uint64) (displace
 // scope's turn: it supersedes an older pending waiter and makes every delivery
 // admitted before event stale. It reports took=false, and takes no turn, when a
 // newer delivery already took one.
-func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) (supersedes *Event, took bool) {
+func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) (supersedes *supersession, took bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
 	turn := c.queueTurns[scope]
@@ -1471,16 +1471,28 @@ func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) (supersedes
 	assert(prev.seq != seq, "a delivery that holds its prelude lease is never its scope's pending waiter")
 	delete(c.pending, scope)
 	close(prev.displaced)
-	return prev.event, true
+	return newSupersession(prev.event), true
+}
+
+// supersession copies the log fields of a displaced waiter's event, so the
+// newer delivery's tail does not keep that event reachable.
+type supersession struct {
+	adapter  string
+	eventID  string
+	threadID ThreadID
+}
+
+func newSupersession(displaced *Event) *supersession {
+	return &supersession{adapter: displaced.Adapter, eventID: displaced.ID, threadID: displaced.ThreadID}
 }
 
 func (c *Chat) logSupersession(work preludeWork) {
-	prev := work.supersedes
-	if prev == nil {
+	s := work.supersedes
+	if s == nil {
 		return
 	}
-	c.logger.Info("chat "+work.waitLabel+" superseded", "adapter", prev.Adapter,
-		"event_id", prev.ID, "thread_id", prev.ThreadID, "superseded_by", work.event.ID)
+	c.logger.Info("chat "+work.waitLabel+" superseded", "adapter", s.adapter,
+		"event_id", s.eventID, "thread_id", s.threadID, "superseded_by", work.event.ID)
 }
 
 // isPending reports whether event is still its scope's most-recent pending
