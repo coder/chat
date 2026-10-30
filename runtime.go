@@ -279,6 +279,8 @@ type eventAcceptance struct {
 	err  error
 }
 
+var errPreludePanicked = errors.New("chat: the event's primary delivery panicked before it accepted the event")
+
 func New(ctx context.Context, opts ...Option) (*Chat, error) {
 	cfg := config{
 		logger:   slog.Default(),
@@ -804,6 +806,10 @@ func (c *Chat) prelude(ctx context.Context, event *Event, seq uint64, entry *que
 		c.safeEnd(span, OutcomeDuplicate)
 		return preludeWork{}, true, err
 	}
+	// Every return below has finished the entry already. Only a panic from
+	// State or the logger reaches this with the entry open: its duplicates
+	// fail, and a redelivery becomes the primary.
+	defer c.finishEventAcceptance(event.ID, acceptance, errPreludePanicked)
 	finish := func(err error) error {
 		c.finishEventAcceptance(event.ID, acceptance, err)
 		return err
@@ -1599,6 +1605,11 @@ func (c *Chat) beginEventAcceptance(eventID string) (*eventAcceptance, bool) {
 func (c *Chat) finishEventAcceptance(eventID string, acceptance *eventAcceptance, err error) {
 	c.acceptancesMu.Lock()
 	defer c.acceptancesMu.Unlock()
+	select {
+	case <-acceptance.done:
+		return
+	default:
+	}
 	if c.eventAcceptances[eventID] == acceptance {
 		delete(c.eventAcceptances, eventID)
 	}
