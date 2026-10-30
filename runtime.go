@@ -678,6 +678,7 @@ func (c *Chat) dispatchSync(ctx context.Context, event *Event, seq uint64, entry
 	if err != nil || resolved {
 		return err
 	}
+	defer c.logSupersession(work)
 	if work.noLock {
 		if !c.acquireConcurrencySlot(ctx, event) {
 			c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
@@ -733,6 +734,7 @@ func (c *Chat) dispatchDeferred(ctx context.Context, event *Event, seq uint64, e
 		return nil
 	}
 	c.startDetachedTail(work)
+	c.logSupersession(work)
 	return nil
 }
 
@@ -758,6 +760,10 @@ type preludeWork struct {
 	// debounce quiet-period wait exits promptly on it instead of parking through
 	// its full interval.
 	displaced <-chan struct{}
+	// supersedes is the pending waiter's event this delivery displaced. The
+	// dispatcher logs the supersession only once this delivery's run is
+	// secured, so a panicking slog handler cannot lose it.
+	supersedes *Event
 	// debounce is true when the tail must hold the event through the
 	// DebounceInterval quiet period before waiting for the lock.
 	debounce bool
@@ -1038,31 +1044,35 @@ func (c *Chat) routedWork(
 		return work, false, nil
 
 	case ConcurrencyQueue:
+		work.waitLabel = "queue"
 		if conflicted {
 			work.needsLock = true
-			work.waitLabel = "queue"
-			displaced, registered := c.registerPending(scope, event, seq, work.waitLabel)
+			displaced, supersedes, registered := c.registerPending(scope, event, seq)
 			if !registered {
 				return resolveStale(work.waitLabel)
 			}
 			work.displaced = displaced
+			work.supersedes = supersedes
 			return work, false, nil
 		}
-		if !c.takeQueueTurn(scope, event, seq) {
+		supersedes, took := c.takeQueueTurn(scope, event, seq)
+		if !took {
 			releaseOnResolve()
 			return resolveStale("queue")
 		}
+		work.supersedes = supersedes
 		return work, false, nil
 
 	case ConcurrencyDebounce:
 		work.needsLock = true
 		work.debounce = true
 		work.waitLabel = "debounce"
-		displaced, registered := c.registerPending(scope, event, seq, work.waitLabel)
+		displaced, supersedes, registered := c.registerPending(scope, event, seq)
 		if !registered {
 			return resolveStale(work.waitLabel)
 		}
 		work.displaced = displaced
+		work.supersedes = supersedes
 		return work, false, nil
 
 	case ConcurrencyConcurrent:
@@ -1421,55 +1431,58 @@ func (c *Chat) leaveQueueScope(entry *queueEntry) {
 // its prelude (validation, dedupe, routing) never displaces a waiter admitted
 // after it, and instead reports registered=false so the caller resolves it as
 // superseded. Under queue it also reports registered=false when the scope's
-// latest turn was admitted after it. Recording supersession here, where the
-// displacing event's id is known, lets the record carry superseded_by. label
-// names the coordination mode ("queue" or "debounce") so the observation names
-// the strategy that displaced the waiter. The returned channel closes when
-// this registration is itself superseded.
-func (c *Chat) registerPending(scope string, event *Event, seq uint64, label string) (displaced <-chan struct{}, registered bool) {
+// latest turn was admitted after it. supersedes is the displaced waiter's
+// event, for the caller's supersession record. The returned channel closes
+// when this registration is itself superseded.
+func (c *Chat) registerPending(scope string, event *Event, seq uint64) (displaced <-chan struct{}, supersedes *Event, registered bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
 	if turn := c.queueTurns[scope]; turn != nil && turn.won > seq {
-		return nil, false
+		return nil, nil, false
 	}
 	if prev := c.pending[scope]; prev != nil {
 		if prev.seq > seq {
-			return nil, false
+			return nil, nil, false
 		}
-		c.displaceLocked(prev, event, label)
+		close(prev.displaced)
+		supersedes = prev.event
 	}
 	waiter := &pendingWaiter{event: event, seq: seq, displaced: make(chan struct{})}
 	c.pending[scope] = waiter
-	return waiter.displaced, true
-}
-
-func (c *Chat) displaceLocked(prev *pendingWaiter, by *Event, label string) {
-	c.logger.Info("chat "+label+" superseded", "adapter", prev.event.Adapter,
-		"event_id", prev.event.ID, "thread_id", prev.event.ThreadID, "superseded_by", by.ID)
-	close(prev.displaced)
+	return waiter.displaced, supersedes, true
 }
 
 // takeQueueTurn gives event, which took the free lock in its prelude, its
-// scope's turn: it supersedes an older pending waiter and makes every delivery
-// admitted before event stale. It reports false, and takes no turn, when a
-// newer delivery already took one.
-func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) bool {
+// scope's turn: it supersedes an older pending waiter, whose event it returns,
+// and makes every delivery admitted before event stale. It reports took=false,
+// and takes no turn, when a newer delivery already took one.
+func (c *Chat) takeQueueTurn(scope string, event *Event, seq uint64) (supersedes *Event, took bool) {
 	c.queueMu.Lock()
 	defer c.queueMu.Unlock()
 	turn := c.queueTurns[scope]
 	assert(turn != nil, "a queue delivery takes a turn in a scope it entered")
 	if turn.won > seq {
-		return false
+		return nil, false
 	}
 	turn.won = seq
 	prev := c.pending[scope]
 	if prev == nil || prev.seq > seq {
-		return true
+		return nil, true
 	}
 	assert(prev.seq != seq, "a delivery that holds its prelude lease is never its scope's pending waiter")
 	delete(c.pending, scope)
-	c.displaceLocked(prev, event, "queue")
-	return true
+	close(prev.displaced)
+	return prev.event, true
+}
+
+// logSupersession records that work's delivery displaced an earlier waiter.
+func (c *Chat) logSupersession(work preludeWork) {
+	prev := work.supersedes
+	if prev == nil {
+		return
+	}
+	c.logger.Info("chat "+work.waitLabel+" superseded", "adapter", prev.Adapter,
+		"event_id", prev.ID, "thread_id", prev.ThreadID, "superseded_by", work.event.ID)
 }
 
 // isPending reports whether event is still its scope's most-recent pending
