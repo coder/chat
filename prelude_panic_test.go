@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -150,6 +151,8 @@ func TestPreludePanicFinishesItsEventAcceptance(t *testing.T) {
 				return nil
 			})
 			srv := newPanicServer(t, bot)
+			openGate := sync.OnceFunc(func() { close(state.release) })
+			t.Cleanup(openGate)
 			event := mentionEvent("A", queueThread)
 
 			first := srv.postAsync(event)
@@ -160,7 +163,7 @@ func TestPreludePanicFinishesItsEventAcceptance(t *testing.T) {
 				defer observer.mu.Unlock()
 				return observer.opened == 2
 			}, "the duplicate of A did not start its dispatch")
-			close(state.release)
+			openGate()
 
 			srv.requireAborted(t, <-first, "A")
 			if res := <-duplicate; res.err == nil && res.status == http.StatusOK && state.acquireCalls() == 1 {
@@ -247,19 +250,25 @@ func TestQueueSupersedeLoggerPanicReleasesItsThreadLock(t *testing.T) {
 				return nil
 			})
 			srv := newPanicServer(t, bot)
+			finishA := sync.OnceFunc(func() { close(releaseA) })
+			openGate := sync.OnceFunc(func() { close(state.release) })
+			t.Cleanup(func() {
+				finishA()
+				openGate()
+			})
 
 			a := srv.postAsync(mentionEvent("A", queueThread))
 			waitClosed(t, aStarted, "A's handler did not start")
 			b := srv.postAsync(mentionEvent("B", queueThread))
 			waitClosed(t, state.reached, "B did not poll for the lock")
-			close(releaseA)
+			finishA()
 			if res := <-a; res.err != nil || res.status != http.StatusOK {
 				t.Fatalf("A: status=%d err=%v, want 200", res.status, res.err)
 			}
 			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
 				"A did not release the Thread Lock")
 			srv.requireAborted(t, srv.post(mentionEvent("C", queueThread)), "C")
-			close(state.release)
+			openGate()
 			if res := <-b; res.err != nil || res.status != http.StatusOK {
 				t.Fatalf("B: status=%d err=%v, want 200 for a superseded waiter", res.status, res.err)
 			}
