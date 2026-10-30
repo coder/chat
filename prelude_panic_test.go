@@ -123,10 +123,10 @@ func (s *firstMarkPanicState) lockFree() bool {
 type firstRecordPanicHandler struct {
 	slog.Handler
 	msg      string
-	panicked *atomic.Bool
+	panicked atomic.Bool
 }
 
-func (h firstRecordPanicHandler) Handle(ctx context.Context, r slog.Record) error {
+func (h *firstRecordPanicHandler) Handle(ctx context.Context, r slog.Record) error {
 	if r.Message == h.msg && h.panicked.CompareAndSwap(false, true) {
 		panic(preludePanic)
 	}
@@ -226,10 +226,9 @@ func TestQueueSupersedeLoggerPanicReleasesItsThreadLock(t *testing.T) {
 				bFirstPoll
 			)
 			state := newGatedAcquireState(bFirstPoll)
-			logger := slog.New(firstRecordPanicHandler{
-				Handler:  slog.NewTextHandler(io.Discard, nil),
-				msg:      "chat queue superseded",
-				panicked: &atomic.Bool{},
+			logger := slog.New(&firstRecordPanicHandler{
+				Handler: slog.NewTextHandler(io.Discard, nil),
+				msg:     "chat queue superseded",
 			})
 			bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, tc.mode),
 				chat.WithState(state), chat.WithLogger(logger))
@@ -277,10 +276,9 @@ func TestQueueSupersedeLoggerPanicReleasesItsThreadLock(t *testing.T) {
 func TestBurstMemberLoggerPanicStillRunsItsScope(t *testing.T) {
 	t.Parallel()
 
-	logger := slog.New(firstRecordPanicHandler{
-		Handler:  slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}),
-		msg:      "chat burst member joined",
-		panicked: &atomic.Bool{},
+	logger := slog.New(&firstRecordPanicHandler{
+		Handler: slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}),
+		msg:     "chat burst member joined",
 	})
 	options := panicRuntimeOptions(chat.ConcurrencyBurst, chat.DispatchDeferred)
 	options.MaxDetached = 1
