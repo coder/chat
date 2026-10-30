@@ -1,0 +1,57 @@
+# Seed for the emulate.dev test tier (`mise run emulate`). See CONTRIBUTING.md.
+# The Slack emulate tests in adapters/slack/emulate_test.go depend on these
+# values: change both together. emulate generates the Slack user, bot, and
+# channel IDs at startup, so the tests look them up by name.
+slack:
+  team:
+    name: Chat SDK Emulate
+    domain: chat-sdk-emulate
+  # Signs every interactivity callback. The tests also sign the Events API
+  # deliveries that they send with it.
+  signing_secret: emulate-signing-secret
+  users:
+    - name: alice
+      real_name: Alice
+  channels:
+    - name: chat-emulate
+  oauth_apps:
+    - app_id: A0EMULATE1
+      client_id: "1000.2000"
+      client_secret: emulate-client-secret
+      name: Chat SDK Bot
+      bot_name: chat-bot
+      redirect_uris: []
+      # The block-action test listens on this address.
+      interactivity_url: http://127.0.0.1:4799/slack/interactions
+  tokens:
+    - token: xoxb-emulate-bot
+      type: bot
+      user: chat-bot
+      app_id: A0EMULATE1
+    - token: xoxp-emulate-alice
+      type: user
+      user: alice
+
+# No Go test uses Linear yet: emulate's Linear schema differs from Linear's
+# (see CONTRIBUTING.md). The seed keeps a team so that manual checks have data.
+linear:
+  organization:
+    name: Chat SDK Emulate
+    url_key: chat-sdk-emulate
+  users:
+    - email: alice@example.com
+      name: Alice
+  teams:
+    - key: EMU
+      name: Emulate
+  oauth_apps:
+    - client_id: lin_emulate_client
+      client_secret: lin_emulate_secret
+      name: Chat SDK Bot
+      redirect_uris: []
+      scopes: [read, write, app:mentionable, app:assignable]
+      actor: app
+  tokens:
+    - token: lin_emulate_alice
+      user: alice@example.com
+      scopes: [read, write, issues:create, comments:create, admin]

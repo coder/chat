@@ -109,3 +109,4 @@ The code has compile-time assertions for `chat.Listener`, `chat.HistoryReader`, 
 ## Verification
 
 - Run: `go test ./adapters/slack/...`
+- Emulator tier (opt-in): `mise run emulate`, then `mise run test:emulate`. It runs `TestEmulate*` in `emulate_test.go`, which skip without `CHAT_EMULATE_SLACK_URL`. See "Emulator Tests" in `CONTRIBUTING.md`. [emulate_test.go:newEmulateSlack]

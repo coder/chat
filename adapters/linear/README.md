@@ -135,3 +135,4 @@ The adapter owns its own rate-limit retry (`RetryPolicy`) and Linear-specific ex
 ## Verification
 
 - Run: `go test ./adapters/linear/...`
+- The emulate.dev tier has no Linear tests yet, because emulate's Linear schema differs from Linear's. See "Emulator Tests" in `CONTRIBUTING.md` and issue #148.
