@@ -4,8 +4,10 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -282,5 +284,71 @@ func TestConcurrentConstructionValidation(t *testing.T) {
 	}
 	if err := newRuntime(func(o *chat.RuntimeOptions) { o.MaxConcurrent = -1 }); err == nil {
 		t.Fatal("expected a negative max concurrent bound to fail")
+	}
+}
+
+// TestConcurrentSlotFreedDuringShutdownIsAbandoned covers a slot that frees
+// while Shutdown cancels the detached tails. Shutdown cancels the tails one at
+// a time, so the first handler can return and free the only slot before the
+// waiter's context is cancelled. The waiter must still abandon its wait. The
+// child contexts of the first handler's context widen that window, because
+// Shutdown cancels them after it wakes the first handler. The two tails cancel
+// in random order, so the test repeats the scenario.
+func TestConcurrentSlotFreedDuringShutdownIsAbandoned(t *testing.T) {
+	t.Parallel()
+	if runtime.GOMAXPROCS(0) < 2 {
+		t.Skip("the first handler must run while Shutdown cancels the tails")
+	}
+
+	for i := range 20 {
+		state := newFakeState()
+		adapter := newFakeAdapter("fake")
+		var logs syncBuffer
+		bot := newConcurrentRuntime(t, state, adapter, &logs, func(o *chat.RuntimeOptions) {
+			o.MaxConcurrent = 1
+			o.DetachTimeout = time.Hour
+		})
+
+		children := make([]context.CancelFunc, 0, 50000)
+		firstStarted := make(chan struct{})
+		var waiterRan atomic.Bool
+		bot.OnNewMention(func(ctx context.Context, ev *chat.MessageEvent) error {
+			if ev.Event.ID != "first" {
+				waiterRan.Store(true)
+				return nil
+			}
+			for range cap(children) {
+				_, cancel := context.WithCancel(ctx)
+				children = append(children, cancel)
+			}
+			close(firstStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+
+		if status := postEvent(t, bot, "fake", mentionEvent("first", "fake:v1:thread-1")); status != http.StatusOK {
+			t.Fatalf("first status = %d", status)
+		}
+		select {
+		case <-firstStarted:
+		case <-time.After(5 * time.Second):
+			t.Fatal("first handler did not start")
+		}
+		if status := postEvent(t, bot, "fake", mentionEvent("waiter", "fake:v1:thread-2")); status != http.StatusOK {
+			t.Fatalf("waiter status = %d", status)
+		}
+		if err := bot.Shutdown(context.Background()); err != nil {
+			t.Fatalf("shutdown error: %v", err)
+		}
+		for _, cancel := range children {
+			cancel()
+		}
+
+		if waiterRan.Load() {
+			t.Fatalf("iteration %d: waiter ran its handler during Shutdown; logs:\n%s", i, logs.String())
+		}
+		if !strings.Contains(logs.String(), "chat concurrent slot wait abandoned") {
+			t.Fatalf("iteration %d: abandoned slot wait not surfaced via observation; logs:\n%s", i, logs.String())
+		}
 	}
 }
