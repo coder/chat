@@ -113,6 +113,12 @@ func (s *firstMarkPanicState) MarkEvent(ctx context.Context, id string, ttl time
 	return s.fakeState.MarkEvent(ctx, id, ttl)
 }
 
+func (s *firstMarkPanicState) lockFree() bool {
+	s.fakeState.mu.Lock()
+	defer s.fakeState.mu.Unlock()
+	return len(s.locked) == 0
+}
+
 // firstRecordPanicHandler panics on the first record whose message is msg.
 type firstRecordPanicHandler struct {
 	slog.Handler
@@ -177,8 +183,10 @@ func TestPreludePanicReleasesItsThreadLock(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
+			state := &firstMarkPanicState{fakeState: newFakeState()}
+			observer := &recordingObserver{}
 			bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, tc.mode),
-				chat.WithState(&firstMarkPanicState{fakeState: newFakeState()}))
+				chat.WithState(state), chat.WithObserver(observer))
 			var handled atomic.Int32
 			bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
 				if ev.Event.ID == "B" {
@@ -194,6 +202,74 @@ func TestPreludePanicReleasesItsThreadLock(t *testing.T) {
 			}
 			eventually(t, 2*time.Second, func() bool { return handled.Load() == 1 },
 				"B did not run: A's MarkEvent panic kept the Thread Lock, whose TTL is an hour")
+			eventually(t, 2*time.Second, state.lockFree, "B did not release the Thread Lock")
+			if res := srv.post(mentionEvent("B", queueThread)); res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("the redelivery of B: status=%d err=%v, want 200", res.status, res.err)
+			}
+			if observer.hasEvent(chat.ObsLockReleaseFailed) {
+				t.Fatal("a Thread Lock release failed: the prelude released a lease twice")
+			}
+		})
+	}
+}
+
+func TestQueueSupersedeLoggerPanicReleasesItsThreadLock(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			const (
+				aPreludeAcquire = 1 + iota
+				bPreludeAcquire
+				bFirstPoll
+			)
+			state := newGatedAcquireState(bFirstPoll)
+			logger := slog.New(firstRecordPanicHandler{
+				Handler:  slog.NewTextHandler(io.Discard, nil),
+				msg:      "chat queue superseded",
+				panicked: &atomic.Bool{},
+			})
+			bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, tc.mode),
+				chat.WithState(state), chat.WithLogger(logger))
+			aStarted := make(chan struct{})
+			releaseA := make(chan struct{})
+			var dHandled atomic.Bool
+			bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
+				switch ev.Event.ID {
+				case "A":
+					close(aStarted)
+					<-releaseA
+				case "B":
+					t.Error("B ran, but C superseded it")
+				case "D":
+					dHandled.Store(true)
+				}
+				return nil
+			})
+			srv := newPanicServer(t, bot)
+
+			a := srv.postAsync(mentionEvent("A", queueThread))
+			waitClosed(t, aStarted, "A's handler did not start")
+			b := srv.postAsync(mentionEvent("B", queueThread))
+			waitClosed(t, state.reached, "B did not poll for the lock")
+			close(releaseA)
+			if res := <-a; res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("A: status=%d err=%v, want 200", res.status, res.err)
+			}
+			eventually(t, 2*time.Second, func() bool { return !state.lockHeld(string(queueThread)) },
+				"A did not release the Thread Lock")
+			srv.requireAborted(t, srv.post(mentionEvent("C", queueThread)), "C")
+			close(state.release)
+			if res := <-b; res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("B: status=%d err=%v, want 200 for a superseded waiter", res.status, res.err)
+			}
+			if res := srv.post(mentionEvent("D", queueThread)); res.err != nil || res.status != http.StatusOK {
+				t.Fatalf("D: status=%d err=%v, want 200", res.status, res.err)
+			}
+			eventually(t, 2*time.Second, dHandled.Load,
+				"D did not run: C's supersede log panicked while C held the Thread Lock")
 		})
 	}
 }
