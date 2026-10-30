@@ -1222,7 +1222,7 @@ func (c *Chat) waitDebounceQuietPeriod(ctx context.Context, work preludeWork) bo
 		c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 		return false
 	case <-work.displaced:
-		// registerPending already emitted the superseded_by record.
+		// The displacing delivery writes the superseded_by record.
 		c.logger.Debug("chat debounce waiter superseded", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID)
 		c.safeEnd(work.span, OutcomeIgnored, RouteAttr(work.route))
 		return false
@@ -1528,7 +1528,7 @@ func (c *Chat) queueForLock(ctx context.Context, scope string, event *Event, lab
 			return LockLease{}, acquireSuperseded
 		}
 	case acquireSuperseded:
-		// registerPending already emitted the superseded_by record; this waiter
+		// The displacing delivery writes the superseded_by record. This waiter
 		// just stops.
 		c.logger.Debug("chat "+label+" waiter superseded", "adapter", event.Adapter, "event_id", event.ID, "thread_id", event.ThreadID)
 	case acquireAbandoned:
