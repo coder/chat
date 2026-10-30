@@ -4,11 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"weak"
 
 	"github.com/coder/chat"
 )
@@ -589,4 +591,86 @@ func TestDebounceDeliveryDelayedInValidationCannotDisplaceNewerWaiter(t *testing
 	if !equalStrings(handled, []string{"newer"}) {
 		t.Fatalf("handled = %v, want only [newer]: a delivery delayed in validation displaced the final event", handled)
 	}
+}
+
+type weakEventAdapter struct {
+	*fakeAdapter
+	mu     sync.Mutex
+	events map[string]weak.Pointer[chat.Event]
+}
+
+func (a *weakEventAdapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
+	return a.fakeAdapter.Webhook(func(ctx context.Context, ev *chat.Event) error {
+		a.mu.Lock()
+		a.events[ev.ID] = weak.Make(ev)
+		a.mu.Unlock()
+		return dispatch(ctx, ev)
+	})
+}
+
+func (a *weakEventAdapter) collected(id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	ref, ok := a.events[id]
+	return ok && ref.Value() == nil
+}
+
+func TestDebounceNewerTailDoesNotRetainTheDisplacedEvent(t *testing.T) {
+	t.Parallel()
+
+	const aFirstPoll = 1
+	state := newGatedAcquireState(aFirstPoll)
+	adapter := &weakEventAdapter{fakeAdapter: newFakeAdapter("fake"), events: map[string]weak.Pointer[chat.Event]{}}
+	observer := &recordingObserver{}
+	bot, err := chat.New(context.Background(),
+		chat.WithState(state),
+		chat.WithAdapter(adapter),
+		chat.WithObserver(observer),
+		chat.WithRuntimeOptions(chat.RuntimeOptions{
+			DedupeTTL:        time.Hour,
+			ThreadLockTTL:    time.Hour,
+			Concurrency:      chat.ConcurrencyDebounce,
+			DebounceInterval: time.Millisecond,
+			Dispatch:         chat.DispatchDeferred,
+			MaxDetached:      1024,
+			DetachTimeout:    5 * time.Second,
+		}),
+	)
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	bStarted := make(chan struct{})
+	releaseB := make(chan struct{})
+	bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
+		if ev.Event.ID == "B" {
+			close(bStarted)
+			<-releaseB
+		}
+		return nil
+	})
+	finishB := sync.OnceFunc(func() { close(releaseB) })
+	openGate := sync.OnceFunc(func() { close(state.release) })
+	t.Cleanup(func() {
+		openGate()
+		finishB()
+	})
+
+	if status := postEvent(t, bot, "fake", mentionEvent("A", queueThread)); status != http.StatusOK {
+		t.Fatalf("A status = %d", status)
+	}
+	waitClosed(t, state.reached, "A did not poll for the lock")
+	if status := postEvent(t, bot, "fake", mentionEvent("B", queueThread)); status != http.StatusOK {
+		t.Fatalf("B status = %d", status)
+	}
+	openGate()
+	waitClosed(t, bStarted, "B's handler did not start")
+	eventually(t, 2*time.Second, func() bool {
+		got := observer.terminalOutcomes()
+		return len(got) == 1 && got[0] == chat.OutcomeIgnored
+	}, "A's tail did not end superseded")
+	eventually(t, 5*time.Second, func() bool {
+		runtime.GC()
+		return adapter.collected("A")
+	}, "B's tail kept the displaced A reachable after A's tail freed its admission slot")
+	finishB()
 }
