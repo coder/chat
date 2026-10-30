@@ -95,10 +95,12 @@ func (c *Chat) joinBurstBatch(work preludeWork) {
 		c.inflight.Add(1)
 	}
 	c.burstMu.Unlock()
-	c.logger.Debug("chat burst member joined", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "route", work.route)
 	if startRunner {
-		go c.runBurstScope(scope)
+		// Deferred so the runner starts after the join log, and still starts
+		// when the logger panics: it owns this member and every later one.
+		defer func() { go c.runBurstScope(scope) }()
 	}
+	c.logger.Debug("chat burst member joined", "adapter", work.event.Adapter, "event_id", work.event.ID, "thread_id", work.event.ThreadID, "route", work.route)
 }
 
 // runBurstScope is the per-scope burst runner: it dispatches sealed batches in
