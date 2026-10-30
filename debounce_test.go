@@ -595,14 +595,16 @@ func TestDebounceDeliveryDelayedInValidationCannotDisplaceNewerWaiter(t *testing
 
 type weakEventAdapter struct {
 	*fakeAdapter
-	mu     sync.Mutex
-	events map[string]weak.Pointer[chat.Event]
+	mu       sync.Mutex
+	events   map[string]weak.Pointer[chat.Event]
+	messages map[string]weak.Pointer[chat.Message]
 }
 
 func (a *weakEventAdapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 	return a.fakeAdapter.Webhook(func(ctx context.Context, ev *chat.Event) error {
 		a.mu.Lock()
 		a.events[ev.ID] = weak.Make(ev)
+		a.messages[ev.ID] = weak.Make(ev.Message)
 		a.mu.Unlock()
 		return dispatch(ctx, ev)
 	})
@@ -611,8 +613,8 @@ func (a *weakEventAdapter) Webhook(dispatch chat.DispatchFunc) http.Handler {
 func (a *weakEventAdapter) collected(id string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	ref, ok := a.events[id]
-	return ok && ref.Value() == nil
+	event, ok := a.events[id]
+	return ok && event.Value() == nil && a.messages[id].Value() == nil
 }
 
 func TestDebounceNewerTailDoesNotRetainTheDisplacedEvent(t *testing.T) {
@@ -620,7 +622,11 @@ func TestDebounceNewerTailDoesNotRetainTheDisplacedEvent(t *testing.T) {
 
 	const aFirstPoll = 1
 	state := newGatedAcquireState(aFirstPoll)
-	adapter := &weakEventAdapter{fakeAdapter: newFakeAdapter("fake"), events: map[string]weak.Pointer[chat.Event]{}}
+	adapter := &weakEventAdapter{
+		fakeAdapter: newFakeAdapter("fake"),
+		events:      map[string]weak.Pointer[chat.Event]{},
+		messages:    map[string]weak.Pointer[chat.Message]{},
+	}
 	observer := &recordingObserver{}
 	bot, err := chat.New(context.Background(),
 		chat.WithState(state),
