@@ -332,3 +332,26 @@ func TestBurstMemberLoggerPanicStillRunsItsScope(t *testing.T) {
 		t.Fatalf("Shutdown after the logger panicked: %v", err)
 	}
 }
+
+func TestPreludePanicEndsItsDispatchSpan(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range queueDispatchModes {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			observer := &recordingObserver{}
+			bot := newPanicRuntime(t, panicRuntimeOptions(chat.ConcurrencyQueue, tc.mode),
+				chat.WithState(&firstMarkPanicState{fakeState: newFakeState()}), chat.WithObserver(observer))
+			bot.OnNewMention(func(context.Context, *chat.MessageEvent) error { return nil })
+			srv := newPanicServer(t, bot)
+
+			srv.requireAborted(t, srv.post(mentionEvent("A", queueThread)), "A")
+			eventually(t, 2*time.Second, func() bool { return len(observer.terminalOutcomes()) == 1 },
+				"A's dispatch span did not end after its MarkEvent panicked")
+			if got := observer.terminalOutcomes(); got[0] != chat.OutcomeError {
+				t.Fatalf("A's dispatch span ended %q, want %q", got[0], chat.OutcomeError)
+			}
+		})
+	}
+}
