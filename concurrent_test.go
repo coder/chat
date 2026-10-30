@@ -293,6 +293,105 @@ func TestConcurrentSlotWaiterAbandonedAtDetachTimeout(t *testing.T) {
 	})
 }
 
+func TestConcurrentSyncSlotWaiterAbandonedWhenRequestEnds(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		var logs syncBuffer
+		observer := &recordingObserver{}
+		bot, err := chat.New(context.Background(),
+			chat.WithState(newFakeState()),
+			chat.WithAdapter(newFakeAdapter("fake")),
+			chat.WithLogger(slog.New(slog.NewTextHandler(&logs, nil))),
+			chat.WithObserver(observer),
+			chat.WithRuntimeOptions(chat.RuntimeOptions{
+				DedupeTTL:     time.Hour,
+				ThreadLockTTL: time.Hour,
+				Concurrency:   chat.ConcurrencyConcurrent,
+				MaxConcurrent: 1,
+				Dispatch:      chat.DispatchSync,
+				DetachTimeout: 0,
+			}),
+		)
+		if err != nil {
+			t.Fatalf("new concurrent runtime: %v", err)
+		}
+		handler, err := bot.Webhook("fake")
+		if err != nil {
+			t.Fatalf("webhook: %v", err)
+		}
+
+		releaseFirst := make(chan struct{})
+		release := sync.OnceFunc(func() { close(releaseFirst) })
+		defer release()
+		var waiterRan atomic.Bool
+		bot.OnNewMention(func(_ context.Context, ev *chat.MessageEvent) error {
+			if ev.Event.ID == "first" {
+				<-releaseFirst
+				return nil
+			}
+			waiterRan.Store(true)
+			return nil
+		})
+
+		firstStatus := make(chan int, 1)
+		go func() {
+			firstStatus <- serveEventWithContext(handler, context.Background(), mentionEvent("first", "fake:v1:thread-1"))
+		}()
+		synctest.Wait()
+
+		waiterCtx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		waiterStatus := make(chan int, 1)
+		go func() {
+			waiterStatus <- serveEventWithContext(handler, waiterCtx, mentionEvent("waiter", "fake:v1:thread-2"))
+		}()
+		synctest.Wait()
+
+		cancel()
+		synctest.Wait()
+		select {
+		case status := <-waiterStatus:
+			if status != http.StatusOK {
+				t.Fatalf("waiter status = %d", status)
+			}
+		default:
+			t.Fatal("waiter request did not return after its context ended")
+		}
+		if waiterRan.Load() {
+			t.Fatalf("waiter ran its handler after its request ended; logs:\n%s", logs.String())
+		}
+		abandoned := slices.ContainsFunc(strings.Split(logs.String(), "\n"), func(line string) bool {
+			return strings.Contains(line, "chat concurrent slot wait abandoned") &&
+				strings.Contains(line, "event_id=waiter") &&
+				strings.Contains(line, "context canceled")
+		})
+		if !abandoned {
+			t.Fatalf("waiter's ended slot wait not logged as abandoned; logs:\n%s", logs.String())
+		}
+		if got := observer.terminalOutcomes(); !slices.Equal(got, []chat.DispatchOutcome{chat.OutcomeIgnored}) {
+			t.Fatalf("outcomes while the first handler holds the slot = %v, want [ignored]", got)
+		}
+
+		release()
+		synctest.Wait()
+		if waiterRan.Load() {
+			t.Fatalf("waiter ran its handler once the slot freed; logs:\n%s", logs.String())
+		}
+		select {
+		case status := <-firstStatus:
+			if status != http.StatusOK {
+				t.Fatalf("first status = %d", status)
+			}
+		default:
+			t.Fatal("first request did not return after its handler finished")
+		}
+		if got := observer.terminalOutcomes(); !slices.Equal(got, []chat.DispatchOutcome{chat.OutcomeIgnored, chat.OutcomeHandled}) {
+			t.Fatalf("outcomes after the first handler returned = %v, want [ignored handled]", got)
+		}
+	})
+}
+
 func TestConcurrentSyncDispatchRunsWithoutLock(t *testing.T) {
 	t.Parallel()
 
