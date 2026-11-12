@@ -23,7 +23,7 @@ const formatsManifestJSON = `{
   },
   "oauth_config": {
     "redirect_urls": ["https://coder.example.com/api/v2/slack/callback"],
-    "scopes": {"bot": ["app_mentions:read", "chat:write", "users:read"]}
+    "scopes": {"bot": ["app_mentions:read", "chat:write", "users:read"], "user": ["openid"]}
   },
   "settings": {
     "event_subscriptions": {
@@ -58,7 +58,10 @@ func formatsManifest() slackapi.Manifest {
 		},
 		OAuthConfig: &slackapi.ManifestOAuthConfig{
 			RedirectURLs: []string{"https://coder.example.com/api/v2/slack/callback"},
-			Scopes:       &slackapi.ManifestScopes{Bot: []string{"app_mentions:read", "chat:write", "users:read"}},
+			Scopes: &slackapi.ManifestScopes{
+				Bot:  []string{"app_mentions:read", "chat:write", "users:read"},
+				User: []string{"openid"},
+			},
 		},
 		Settings: &slackapi.ManifestSettings{
 			EventSubscriptions: &slackapi.ManifestEventSubscriptions{

@@ -76,6 +76,10 @@ type ButtonElement struct {
 	URL string
 	// ActionID is the optional action_id. It is omitted when empty.
 	ActionID string
+	// Value is the optional value that Slack sends back in the block_actions
+	// action when someone clicks the button. Slack allows at most 2000
+	// characters. It is omitted when empty.
+	Value string
 	// Style is the optional button style, "primary" or "danger". It is
 	// omitted when empty.
 	Style string
@@ -88,12 +92,14 @@ func (e ButtonElement) MarshalJSON() ([]byte, error) {
 		Text     plainTextJSON `json:"text"`
 		URL      string        `json:"url,omitempty"`
 		ActionID string        `json:"action_id,omitempty"`
+		Value    string        `json:"value,omitempty"`
 		Style    string        `json:"style,omitempty"`
 	}{
 		Type:     "button",
 		Text:     newPlainText(e.Text),
 		URL:      e.URL,
 		ActionID: e.ActionID,
+		Value:    e.Value,
 		Style:    e.Style,
 	})
 }

@@ -135,6 +135,9 @@ func TestMethodsReturnAPIError(t *testing.T) {
 		{"oauth.v2.access", func(ctx context.Context, c *slackapi.Client) (any, error) {
 			return c.OAuthV2Access(ctx, slackapi.OAuthV2AccessRequest{})
 		}},
+		{"openid.connect.token", func(ctx context.Context, c *slackapi.Client) (any, error) {
+			return c.OpenIDConnectToken(ctx, slackapi.OpenIDConnectTokenRequest{})
+		}},
 		{"chat.postEphemeral", func(ctx context.Context, c *slackapi.Client) (any, error) {
 			return c.PostEphemeral(ctx, slackapi.PostEphemeralRequest{})
 		}},
