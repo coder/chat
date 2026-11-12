@@ -17,7 +17,7 @@ func TestParseBlockActions(t *testing.T) {
 			"user": {"id": "U0USER", "username": "ada", "name": "ada.lovelace", "team_id": "T0TEAM"},
 			"api_app_id": "A0APP",
 			"token": "verification-token",
-			"container": {"type": "message", "message_ts": "1700000000.000200", "channel_id": "C0CHAN", "is_ephemeral": false},
+			"container": {"type": "message", "message_ts": "1700000000.000200", "channel_id": "C0CHAN", "thread_ts": "1700000000.000100", "is_ephemeral": false},
 			"trigger_id": "123.456.abc",
 			"channel": {"id": "C0CHAN", "name": "general"},
 			"enterprise": null,
@@ -54,6 +54,7 @@ func TestParseBlockActions(t *testing.T) {
 				Type:      "message",
 				MessageTS: "1700000000.000200",
 				ChannelID: "C0CHAN",
+				ThreadTS:  "1700000000.000100",
 			},
 			TriggerID: "123.456.abc",
 			Channel:   slackapi.InteractionChannel{ID: "C0CHAN", Name: "general"},
@@ -82,7 +83,7 @@ func TestParseBlockActions(t *testing.T) {
 		got, ok, err := slackapi.ParseBlockActions([]byte(`{
 			"type": "block_actions",
 			"user": {"id": "U0USER"},
-			"container": {"type": "message", "message_ts": "1700000000.000300", "channel_id": "C0CHAN", "is_ephemeral": true},
+			"container": {"type": "message", "message_ts": "1700000000.000300", "channel_id": "C0CHAN", "thread_ts": "1700000000.000100", "is_ephemeral": true},
 			"channel": {"id": "C0CHAN"},
 			"actions": [{"action_id": "link", "block_id": "link", "type": "button", "action_ts": "1700000001.000400"}]
 		}`))
@@ -96,6 +97,7 @@ func TestParseBlockActions(t *testing.T) {
 				Type:        "message",
 				MessageTS:   "1700000000.000300",
 				ChannelID:   "C0CHAN",
+				ThreadTS:    "1700000000.000100",
 				IsEphemeral: true,
 			},
 			Channel: slackapi.InteractionChannel{ID: "C0CHAN"},

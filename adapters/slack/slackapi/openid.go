@@ -74,9 +74,11 @@ type IDTokenClaims struct {
 // its audience is not req.ClientID, or when it has no team ID or user ID.
 //
 // It does not check the signature of the ID token, because the token comes
-// straight from Slack over TLS, which OpenID Connect Core 1.0 section 3.1.3.7
-// allows. It does not check the issuer, which differs between Slack hosts, or
-// the expiry and the nonce, which the caller can check with Claims.
+// straight from Slack over TLS. OpenID Connect Core 1.0 section 3.1.3.7 allows
+// this for the signature only. The same section requires checks of the issuer,
+// the expiry, and the nonce when the authorize request sent one.
+// OpenIDConnectToken does none of them, so the caller must check
+// Claims.Issuer, Claims.ExpiresAt, and Claims.Nonce.
 func (c *Client) OpenIDConnectToken(ctx context.Context, req OpenIDConnectTokenRequest) (*OpenIDConnectTokenResponse, error) {
 	values := url.Values{}
 	setFormString(values, "client_id", req.ClientID)

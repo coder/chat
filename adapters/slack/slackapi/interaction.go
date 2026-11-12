@@ -27,7 +27,8 @@ type BlockActionsPayload struct {
 	// Channel is the conversation of the element.
 	Channel InteractionChannel `json:"channel,omitzero"`
 	// Message is the message that holds the element. It is nil when the
-	// element is not in a message. Message.ThreadTS is its thread.
+	// element is not in a message, and for an ephemeral message. For the
+	// thread of the message, use Container.ThreadTS.
 	Message *Message `json:"message,omitempty"`
 	// ResponseURL is the URL that PostResponseURL can post a response to.
 	ResponseURL string `json:"response_url,omitempty"`
@@ -64,6 +65,9 @@ type InteractionContainer struct {
 	MessageTS string `json:"message_ts,omitempty"`
 	// ChannelID is the ID of the conversation of the message.
 	ChannelID string `json:"channel_id,omitempty"`
+	// ThreadTS is the thread_ts of the message that holds the element. It
+	// is empty when the message is not in a thread, or when Slack omits it.
+	ThreadTS string `json:"thread_ts,omitempty"`
 	// IsEphemeral is true when the message is an ephemeral message.
 	IsEphemeral bool `json:"is_ephemeral,omitzero"`
 }
@@ -76,7 +80,9 @@ type InteractionChannel struct {
 	Name string `json:"name,omitempty"`
 }
 
-// BlockAction is one action in a BlockActionsPayload.
+// BlockAction is one action in a BlockActionsPayload. It has only the fields
+// of a button action. For another element, such as a select menu, decode its
+// other fields, for example selected_option, from the raw payload.
 type BlockAction struct {
 	// Type is the element type, for example "button".
 	Type string `json:"type,omitempty"`
@@ -93,7 +99,8 @@ type BlockAction struct {
 // ParseBlockActions decodes the payload of a DeliveryInteractive delivery
 // when its type is InteractionTypeBlockActions. It returns false for an
 // interaction of another type, for example view_submission, and an error if
-// the payload does not decode.
+// the payload does not decode. BlockAction has only the fields of a button
+// action.
 func ParseBlockActions(payload []byte) (*BlockActionsPayload, bool, error) {
 	var head struct {
 		Type string `json:"type"`
