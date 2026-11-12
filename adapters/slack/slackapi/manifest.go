@@ -90,6 +90,8 @@ type ManifestOAuthConfig struct {
 type ManifestScopes struct {
 	// Bot is the list of bot token scopes, such as "chat:write".
 	Bot []string `json:"bot,omitempty"`
+	// User is the list of user token scopes, such as "openid".
+	User []string `json:"user,omitempty"`
 }
 
 // ManifestSettings is the settings section of a Manifest. The three flags

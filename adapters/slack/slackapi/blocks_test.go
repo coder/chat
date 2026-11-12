@@ -44,10 +44,10 @@ func TestBlocksMarshalJSON(t *testing.T) {
 		{
 			name: "ActionsBlockWithBlockID",
 			block: slackapi.ActionsBlock{
-				Elements: []slackapi.ButtonElement{{Text: "Stop", ActionID: "stop", Style: "danger"}},
+				Elements: []slackapi.ButtonElement{{Text: "Stop", ActionID: "stop", Value: "chat-1", Style: "danger"}},
 				BlockID:  "actions",
 			},
-			want: `{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"Stop"},"action_id":"stop","style":"danger"}],"block_id":"actions"}`,
+			want: `{"type":"actions","elements":[{"type":"button","text":{"type":"plain_text","text":"Stop"},"action_id":"stop","value":"chat-1","style":"danger"}],"block_id":"actions"}`,
 		},
 		{
 			name:  "ImageBlock",

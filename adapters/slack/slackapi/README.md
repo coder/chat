@@ -8,7 +8,7 @@ The package has four parts:
 
 1. A Slack Web API client (`Client`) with typed methods, a generic `Call` escape hatch, and bounded rate-limit retry.
 2. Two inbound transports that share one `Handler`: `Webhook` (signed HTTP requests) and `Client.Listen` (Socket Mode websocket).
-3. Payload decoding for the Events API (`ParseEnvelope` and event types).
+3. Payload decoding for the Events API (`ParseEnvelope` and event types) and `block_actions` interactions (`ParseBlockActions`).
 4. Formats: Block Kit blocks, a Markdown splitter, mention helpers, and app manifest types.
 
 The Slack adapter (package `slack`) uses this package for its Web API calls, rate-limit retry, history reads, and both inbound transports. The package doc marks the API as experimental. `RetryPolicy` and `RateLimited` keep the supported tier, because the Slack adapter exports them as type aliases. [doc.go:slackapi]
@@ -46,6 +46,7 @@ The Slack adapter (package `slack`) uses this package for its Web API calls, rat
 | `Client.GetUploadURLExternal` | `files.getUploadURLExternal` | [files.go:Client.GetUploadURLExternal] |
 | `Client.CompleteUploadExternal` | `files.completeUploadExternal` | [files.go:Client.CompleteUploadExternal] |
 | `Client.OAuthV2Access` | `oauth.v2.access` | [oauth.go:Client.OAuthV2Access] |
+| `Client.OpenIDConnectToken` | `openid.connect.token` | [openid.go:Client.OpenIDConnectToken] |
 | `Client.AddReaction`, `Client.RemoveReaction` | `reactions.add`, `reactions.remove` | [reactions.go:Client.AddReaction,Client.RemoveReaction] |
 | `Client.SetAssistantThreadStatus` | `assistant.threads.setStatus` | [status.go:Client.SetAssistantThreadStatus] |
 | `Client.SetAgentSessionStatus` | `agents.sessions.setStatus` | [status.go:Client.SetAgentSessionStatus] |
@@ -60,6 +61,7 @@ Some of those types hold nested exported types:
 - `FileSummary`: one uploaded file in `CompleteUploadExternalRequest`. [files.go:FileSummary]
 - `FileShares` and `FileShare`: the shares of a file by channel ID, in `FileInfoResponse`. [files.go:FileShares,FileShare]
 - `OAuthTeam`: the workspace or Enterprise Grid organization in `OAuthV2AccessResponse`. [oauth.go:OAuthTeam]
+- `IDTokenClaims`: the decoded ID token claims in `OpenIDConnectTokenResponse`, with the Slack team ID and user ID. [openid.go:IDTokenClaims]
 
 ### Files
 
@@ -74,6 +76,7 @@ Some of those types hold nested exported types:
 - `DeliveryType` has the values `DeliveryEventsAPI`, `DeliverySlashCommands`, and `DeliveryInteractive`. [delivery.go:DeliveryType]
 - `Handler` handles a `Delivery` and returns the ack response. [delivery.go:Handler]
 - `ErrBusy` and `ErrInvalidPayload` are sentinel handler errors. [delivery.go:ErrBusy,ErrInvalidPayload]
+- `ParseBlockActions` decodes a `block_actions` interaction payload into `BlockActionsPayload` and its `Interaction*` and `BlockAction` types. It returns false for another interaction type. [interaction.go:ParseBlockActions,BlockActionsPayload]
 - `Webhook` is the HTTP transport (`SigningSecret`, `Handler`, `Now`, `SignatureTolerance`). `Webhook.ServeHTTP` handles one request. [webhook.go:Webhook,Webhook.ServeHTTP]
 - `VerifyRequest` checks the Slack v0 HMAC-SHA256 request signature. `DefaultSignatureTolerance` is 5 minutes. [signature.go:VerifyRequest,DefaultSignatureTolerance]
 - `Client.Listen` is the Socket Mode transport. [socketmode.go:Client.Listen]
@@ -109,7 +112,7 @@ Some of those types hold nested exported types:
 
 - `Client` is safe for concurrent use. [client.go:Client]
 - `New` trims trailing slashes from `BaseURL`. It drops each `FileOrigins` entry that is not an absolute URL with a host, and logs a warning for it. [client.go:New]
-- The client sends the `Authorization` header only when the token is not empty. `UploadToURL`, `PostResponseURL`, and `OAuthV2Access` never send the client token. [client.go:send,Options], [oauth.go:Client.OAuthV2Access]
+- The client sends the `Authorization` header only when the token is not empty. `UploadToURL`, `PostResponseURL`, `OAuthV2Access`, and `OpenIDConnectToken` never send the client token. [client.go:send,Options], [oauth.go:Client.OAuthV2Access], [openid.go:Client.OpenIDConnectToken]
 - `Call` encodes a nil payload as `{}`, a `url.Values` payload as a form body, and any other payload as JSON. [client.go:Client.Call,encodeRequest]
 - An `ok:false` response or a non-2xx status returns `*APIError`, except a throttling response: HTTP 429, or `ok:false` with `ratelimited` or `rate_limited`. Retry handles that response, and the retry rules below say when it returns `*RateLimited`. [client.go:Client.Call,send], [retry.go:slackThrottle,Client.doWithRetry]
 - `WithToken` shares the base URL, file origins, HTTP client, retry policy, observer, and logger with the original client. [client.go:Client.WithToken]

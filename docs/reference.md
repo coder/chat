@@ -734,6 +734,7 @@ The client methods and how each one sends its request:
 | `Call` | any Web API method (the escape hatch) | form for a `url.Values` payload, else JSON |
 | `PostResponseURL` | the `response_url` of a command or an interaction | JSON, no token |
 | `OAuthV2Access` | `oauth.v2.access` | form with the client ID and the client secret, no token |
+| `OpenIDConnectToken` | `openid.connect.token` | form with the client ID and the client secret, no token; returns the ID token claims with the Slack team ID and user ID |
 | `CreateApp`, `DeleteApp` | `apps.manifest.create`, `apps.manifest.delete` | form, with an app configuration token; `CreateApp` sends the `Manifest` as a JSON string |
 
 Requests are POSTs with the bearer token unless the table says otherwise.
@@ -783,6 +784,9 @@ Inbound deliveries:
   `DeliverySlashCommands`, or `DeliveryInteractive`), the JSON `Payload`, and
   `RetryAttempt` and `RetryReason` for a redelivery. It is the same for both
   transports. A slash command payload is a JSON object of strings over both.
+  `ParseBlockActions(payload)` decodes a `DeliveryInteractive` payload of type
+  `block_actions` (a button click), and returns false for other interaction
+  types.
 - A `Handler` handles a `Delivery` and gives the acknowledgement. A nil error
   acknowledges the delivery, and a non-nil response is the acknowledgement
   body, encoded as JSON. An error does not acknowledge it:
