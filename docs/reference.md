@@ -786,8 +786,10 @@ Inbound deliveries:
   transports. A slash command payload is a JSON object of strings over both.
   `ParseBlockActions(payload)` decodes a `DeliveryInteractive` payload of type
   `block_actions` (a button click), and returns false for other interaction
-  types. A `BlockAction` has only the fields of a button action. For another
-  element, such as a select menu, decode its other fields from the raw
+  types. The typed payload covers a button click in a message, for an app
+  that is installed in one workspace. For a click in a view, a select menu or
+  another element, or an org-wide install on Enterprise Grid, decode the other
+  fields, such as `view`, `selected_option`, or `enterprise`, from the raw
   payload.
 - A `Handler` handles a `Delivery` and gives the acknowledgement. A nil error
   acknowledges the delivery, and a non-nil response is the acknowledgement

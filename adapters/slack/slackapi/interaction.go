@@ -80,9 +80,8 @@ type InteractionChannel struct {
 	Name string `json:"name,omitempty"`
 }
 
-// BlockAction is one action in a BlockActionsPayload. It has only the fields
-// of a button action. For another element, such as a select menu, decode its
-// other fields, for example selected_option, from the raw payload.
+// BlockAction is one action in a BlockActionsPayload, with the fields of a
+// button action.
 type BlockAction struct {
 	// Type is the element type, for example "button".
 	Type string `json:"type,omitempty"`
@@ -99,8 +98,13 @@ type BlockAction struct {
 // ParseBlockActions decodes the payload of a DeliveryInteractive delivery
 // when its type is InteractionTypeBlockActions. It returns false for an
 // interaction of another type, for example view_submission, and an error if
-// the payload does not decode. BlockAction has only the fields of a button
-// action.
+// the payload does not decode.
+//
+// The typed payload covers a button click in a message, for an app that is
+// installed in one workspace. For a click in a view, a select menu or another
+// element, or an org-wide install on Enterprise Grid, decode the other
+// fields, for example view, selected_option, or enterprise, from the raw
+// payload.
 func ParseBlockActions(payload []byte) (*BlockActionsPayload, bool, error) {
 	var head struct {
 		Type string `json:"type"`
