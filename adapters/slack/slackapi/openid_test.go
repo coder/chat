@@ -11,7 +11,7 @@ import (
 	"github.com/coder/chat/adapters/slack/slackapi/slackapitest"
 )
 
-// openIDToken returns an unsigned JWT with claims as its payload.
+// openIDToken returns a JWT with claims as its payload and a fake signature.
 func openIDToken(claims string) string {
 	return "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString([]byte(claims)) + ".signature"
 }

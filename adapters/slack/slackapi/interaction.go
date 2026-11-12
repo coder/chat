@@ -93,7 +93,7 @@ type BlockAction struct {
 // ParseBlockActions decodes the payload of a DeliveryInteractive delivery
 // when its type is InteractionTypeBlockActions. It returns false for an
 // interaction of another type, for example view_submission, and an error if
-// the payload is not valid JSON.
+// the payload does not decode.
 func ParseBlockActions(payload []byte) (*BlockActionsPayload, bool, error) {
 	var head struct {
 		Type string `json:"type"`
@@ -106,7 +106,7 @@ func ParseBlockActions(payload []byte) (*BlockActionsPayload, bool, error) {
 	}
 	var p BlockActionsPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
-		return nil, false, fmt.Errorf("slack: invalid %s interaction: %w", head.Type, err)
+		return nil, false, fmt.Errorf("slack: invalid block_actions interaction: %w", err)
 	}
 	return &p, true, nil
 }
