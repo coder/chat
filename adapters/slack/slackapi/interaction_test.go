@@ -14,7 +14,7 @@ func TestParseBlockActions(t *testing.T) {
 		got, ok, err := slackapi.ParseBlockActions([]byte(`{
 			"type": "block_actions",
 			"team": {"id": "T0TEAM", "domain": "acme"},
-			"user": {"id": "U0USER", "username": "ada", "name": "ada", "team_id": "T0TEAM"},
+			"user": {"id": "U0USER", "username": "ada", "name": "ada.lovelace", "team_id": "T0TEAM"},
 			"api_app_id": "A0APP",
 			"token": "verification-token",
 			"container": {"type": "message", "message_ts": "1700000000.000200", "channel_id": "C0CHAN", "is_ephemeral": false},
@@ -48,7 +48,7 @@ func TestParseBlockActions(t *testing.T) {
 		methodsCheckEqual(t, "payload", got, &slackapi.BlockActionsPayload{
 			Type:     slackapi.InteractionTypeBlockActions,
 			Team:     slackapi.InteractionTeam{ID: "T0TEAM", Domain: "acme"},
-			User:     slackapi.InteractionUser{ID: "U0USER", Username: "ada", Name: "ada", TeamID: "T0TEAM"},
+			User:     slackapi.InteractionUser{ID: "U0USER", Username: "ada", Name: "ada.lovelace", TeamID: "T0TEAM"},
 			APIAppID: "A0APP",
 			Container: slackapi.InteractionContainer{
 				Type:      "message",
@@ -74,6 +74,32 @@ func TestParseBlockActions(t *testing.T) {
 				Value:    "chat-1",
 				ActionTS: "1700000001.000300",
 			}},
+		})
+	})
+
+	t.Run("EphemeralMessage", func(t *testing.T) {
+		t.Parallel()
+		got, ok, err := slackapi.ParseBlockActions([]byte(`{
+			"type": "block_actions",
+			"user": {"id": "U0USER"},
+			"container": {"type": "message", "message_ts": "1700000000.000300", "channel_id": "C0CHAN", "is_ephemeral": true},
+			"channel": {"id": "C0CHAN"},
+			"actions": [{"action_id": "link", "block_id": "link", "type": "button", "action_ts": "1700000001.000400"}]
+		}`))
+		if err != nil || !ok {
+			t.Fatalf("ParseBlockActions = %v, %v, want true, nil", ok, err)
+		}
+		methodsCheckEqual(t, "payload", got, &slackapi.BlockActionsPayload{
+			Type: slackapi.InteractionTypeBlockActions,
+			User: slackapi.InteractionUser{ID: "U0USER"},
+			Container: slackapi.InteractionContainer{
+				Type:        "message",
+				MessageTS:   "1700000000.000300",
+				ChannelID:   "C0CHAN",
+				IsEphemeral: true,
+			},
+			Channel: slackapi.InteractionChannel{ID: "C0CHAN"},
+			Actions: []slackapi.BlockAction{{Type: "button", ActionID: "link", BlockID: "link", ActionTS: "1700000001.000400"}},
 		})
 	})
 

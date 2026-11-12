@@ -28,6 +28,8 @@ func TestOpenIDConnectToken(t *testing.T) {
 
 	t.Run("Request", func(t *testing.T) {
 		t.Parallel()
+		// The run of "~" in the nonce encodes to "-", which only base64url
+		// has, as in a real ID token.
 		idToken := openIDToken(`{
 			"iss": "https://slack.com",
 			"sub": "U0USER",
@@ -35,7 +37,7 @@ func TestOpenIDConnectToken(t *testing.T) {
 			"exp": 1700000300,
 			"iat": 1700000000,
 			"auth_time": 1699999990,
-			"nonce": "login-nonce",
+			"nonce": "login-nonce~~~~~",
 			"at_hash": "abc",
 			"https://slack.com/team_id": "T0TEAM",
 			"https://slack.com/user_id": "U0USER"
@@ -45,7 +47,9 @@ func TestOpenIDConnectToken(t *testing.T) {
 			"ok": true,
 			"access_token": "xoxp-user",
 			"token_type": "Bearer",
-			"id_token": "`+idToken+`"
+			"id_token": "`+idToken+`",
+			"refresh_token": "xoxe-1-refresh",
+			"expires_in": 43200
 		}`))
 
 		resp, err := methodsNewClient(srv).OpenIDConnectToken(t.Context(), request)
@@ -66,9 +70,11 @@ func TestOpenIDConnectToken(t *testing.T) {
 			"redirect_uri":  {"https://coder.example.com/callback"},
 		})
 		methodsCheckEqual(t, "response", resp, &slackapi.OpenIDConnectTokenResponse{
-			AccessToken: "xoxp-user",
-			TokenType:   "Bearer",
-			IDToken:     idToken,
+			AccessToken:  "xoxp-user",
+			TokenType:    "Bearer",
+			IDToken:      idToken,
+			RefreshToken: "xoxe-1-refresh",
+			ExpiresIn:    43200,
 			Claims: slackapi.IDTokenClaims{
 				Issuer:    "https://slack.com",
 				Subject:   "U0USER",
@@ -76,7 +82,7 @@ func TestOpenIDConnectToken(t *testing.T) {
 				ExpiresAt: 1700000300,
 				IssuedAt:  1700000000,
 				AuthTime:  1699999990,
-				Nonce:     "login-nonce",
+				Nonce:     "login-nonce~~~~~",
 				TeamID:    "T0TEAM",
 				UserID:    "U0USER",
 			},
